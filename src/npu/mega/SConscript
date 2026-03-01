@@ -1,0 +1,6 @@
+# -*- mode:python -*-
+
+Import('*')
+
+SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
+Source('MegaCmdQueue.cc')
