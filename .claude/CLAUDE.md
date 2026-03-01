@@ -17,11 +17,9 @@ Key parts of this repo:
 
 ### Always use the docker environment
 
-Before running any build / tests / formatting, enter the dedicated container:
 ```sh
-gem5-docker
+docker exec -i "${USER}.gem5" bash -lc "cd /gem5 && <command>"
 ```
-(Defined in your `~/.bashrc`.)
 
 ### Build (defaults)
 
