@@ -33,6 +33,7 @@
 
 #include "base/cprintf.hh"
 #include "base/logging.hh"
+#include "debug/MegaCmdQueue.hh"
 #include "mem/packet.hh"
 #include "sim/system.hh"
 
@@ -42,7 +43,9 @@ namespace gem5
 MegaCmdQueue::CPUSidePort::CPUSidePort(
     const std::string &name, int id, MegaCmdQueue *owner)
     : ResponsePort(name), owner(owner), id(id), needRetry(false),
-      blockedRespPacket(nullptr)
+      blockedRespPacket(nullptr),
+      sendResponseEvent([this]() { sendDeferredResponse(); },
+                        name + ".sendResponseEvent")
 {
 }
 
@@ -61,20 +64,21 @@ MegaCmdQueue::CPUSidePort::recvTimingReq(PacketPtr pkt)
 
     if (pkt->needsResponse()) {
         pkt->makeResponse();
-        if (!sendTimingResp(pkt)) {
-            blockedRespPacket = pkt;
+        blockedRespPacket = pkt;
+        if (!sendResponseEvent.scheduled()) {
+            owner->schedule(sendResponseEvent, owner->clockEdge(Cycles(1)));
         }
-    } else {
-        delete pkt;
     }
 
     return true;
 }
 
 void
-MegaCmdQueue::CPUSidePort::recvRespRetry()
+MegaCmdQueue::CPUSidePort::sendDeferredResponse()
 {
-    assert(blockedRespPacket != nullptr);
+    if (blockedRespPacket == nullptr) {
+        return;
+    }
 
     PacketPtr pkt = blockedRespPacket;
     blockedRespPacket = nullptr;
@@ -85,6 +89,13 @@ MegaCmdQueue::CPUSidePort::recvRespRetry()
     }
 
     trySendRetry();
+}
+
+void
+MegaCmdQueue::CPUSidePort::recvRespRetry()
+{
+    assert(blockedRespPacket != nullptr);
+    sendDeferredResponse();
 }
 
 AddrRangeList
@@ -100,7 +111,7 @@ MegaCmdQueue::CPUSidePort::trySendRetry()
         return;
     }
 
-    if (!owner->canAcceptDoorbell()) {
+    if (!owner->canPushMegaCmd()) {
         return;
     }
 
@@ -111,11 +122,16 @@ MegaCmdQueue::CPUSidePort::trySendRetry()
 }
 
 MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
-    : SimObject(params),
+    : ClockedObject(params),
       numInputPort(params.num_input_port),
       megaCmdWidth(params.mega_cmd_width),
       cmdQueueDepth(params.cmd_queue_depth),
-      megaCmdBytes(megaCmdWidth / 8)
+      megaCmdBytes(megaCmdWidth / 8),
+      baseAddr(params.base_addr),
+      hasEnqueuedCmd(false),
+      clearEnqueueGateEvent(
+          [this]() { clearEnqueueGate(); },
+          name() + ".clearEnqueueGateEvent")
 {
     fatal_if(megaCmdWidth == 0 || megaCmdWidth % 8 != 0,
              "%s: mega_cmd_width must be non-zero and byte aligned", name());
@@ -134,9 +150,15 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
 void
 MegaCmdQueue::init()
 {
-    SimObject::init();
+    ClockedObject::init();
     fatal_if(numInputPort != 1,
              "%s: currently only num_input_port == 1 is supported", name());
+
+    for (auto &port : cpuSidePorts) {
+        if (port.isConnected()) {
+            port.sendRangeChange();
+        }
+    }
 }
 
 Port &
@@ -146,55 +168,107 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
         return cpuSidePorts[idx];
     }
 
-    return SimObject::getPort(if_name, idx);
+    return ClockedObject::getPort(if_name, idx);
 }
 
 AddrRangeList
 MegaCmdQueue::getAddrRanges() const
 {
-    return {AddrRange(0, MaxAddrSpace)};
+    return {AddrRange(baseAddr, baseAddr + (2 * megaCmdBytes))};
 }
 
 bool
-MegaCmdQueue::canAcceptDoorbell() const
+MegaCmdQueue::canPushMegaCmd() const
 {
-    return queue.size() < cmdQueueDepth;
+    return queue.size() < cmdQueueDepth && !hasEnqueuedCmd;
 }
 
 bool
-MegaCmdQueue::appendDataBytes(PortID port_id, const uint8_t *src, size_t size)
+MegaCmdQueue::validMmioOffset(Addr offset, size_t size) const
 {
-    auto &staging = stagingBuffers[port_id];
-    if (staging.writeOffset + size > megaCmdBytes) {
+    const Addr window_size = 2 * megaCmdBytes;
+    if (offset >= window_size) {
         return false;
     }
 
-    std::copy(src, src + size, staging.bytes.begin() + staging.writeOffset);
-    staging.writeOffset += size;
+    if (size == 0) {
+        return false;
+    }
+
+    return offset + size <= window_size;
+}
+
+bool
+MegaCmdQueue::writeDataBytes(PortID port_id, Addr offset,
+                             const uint8_t *src, size_t size)
+{
+    auto &staging = stagingBuffers[port_id];
+    if (offset + size > megaCmdBytes) {
+        return false;
+    }
+
+    std::copy(src, src + size, staging.bytes.begin() + offset);
     return true;
 }
 
 bool
-MegaCmdQueue::appendDataChunk(PortID port_id, PacketPtr pkt)
+MegaCmdQueue::writeDataChunk(PortID port_id, Addr offset, PacketPtr pkt)
 {
-    return appendDataBytes(port_id, pkt->getConstPtr<uint8_t>(), pkt->getSize());
+    return writeDataBytes(
+        port_id, offset, pkt->getConstPtr<uint8_t>(), pkt->getSize());
 }
 
 bool
-MegaCmdQueue::enqueueStagedCommand(PortID port_id)
+MegaCmdQueue::recvTimingPushReq(PortID port_id)
 {
-    auto &staging = stagingBuffers[port_id];
-    if (staging.writeOffset != megaCmdBytes) {
+    if (!canPushMegaCmd()) {
+        DPRINTF(MegaCmdQueue,
+                "push rejected: queue=%llu depth=%u hasEnqueued=%d\n",
+                static_cast<unsigned long long>(queue.size()),
+                cmdQueueDepth, hasEnqueuedCmd);
         return false;
     }
 
-    if (queue.size() >= cmdQueueDepth) {
-        return false;
+    queue.emplace_back(stagingBuffers[port_id].bytes.begin(),
+                       stagingBuffers[port_id].bytes.end());
+    std::fill(stagingBuffers[port_id].bytes.begin(),
+              stagingBuffers[port_id].bytes.end(), 0);
+
+    hasEnqueuedCmd = true;
+    if (!clearEnqueueGateEvent.scheduled()) {
+        schedule(clearEnqueueGateEvent, clockEdge(Cycles(1)));
     }
 
-    queue.emplace_back(staging.bytes.begin(), staging.bytes.end());
-    staging.writeOffset = 0;
-    std::fill(staging.bytes.begin(), staging.bytes.end(), 0);
+    DPRINTF(MegaCmdQueue,
+            "push accepted: queue=%llu/%u clear_tick=%llu\n",
+            static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
+            static_cast<unsigned long long>(clockEdge(Cycles(1))));
+
+    return true;
+}
+
+void
+MegaCmdQueue::popMegaCmd()
+{
+    panic_if(queue.empty(), "%s: pop requested on empty queue", name());
+
+    const bool was_blocked = !canPushMegaCmd();
+    queue.pop_front();
+
+    DPRINTF(MegaCmdQueue,
+            "pop executed: queue=%llu/%u hasEnqueued=%d\n",
+            static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
+            hasEnqueuedCmd);
+
+    if (was_blocked && canPushMegaCmd()) {
+        trySendRetries();
+    }
+}
+
+bool
+MegaCmdQueue::recvTimingPopReq()
+{
+    popMegaCmd();
     return true;
 }
 
@@ -202,14 +276,58 @@ bool
 MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
 {
     if (!pkt->isWrite()) {
+        DPRINTF(MegaCmdQueue, "reject non-write req cmd=%s\n", pkt->cmdString());
         return false;
     }
 
-    if (pkt->getAddr() == DoorbellOffset) {
-        return enqueueStagedCommand(port_id);
+    if (pkt->getAddr() < baseAddr) {
+        DPRINTF(MegaCmdQueue,
+                "reject addr=%#llx below base=%#llx\n",
+                pkt->getAddr(), baseAddr);
+        return false;
     }
 
-    return appendDataChunk(port_id, pkt);
+    const Addr offset = pkt->getAddr() - baseAddr;
+    if (!validMmioOffset(offset, pkt->getSize())) {
+        DPRINTF(MegaCmdQueue,
+                "reject invalid mmio range addr=%#llx size=%u\n",
+                pkt->getAddr(), pkt->getSize());
+        return false;
+    }
+
+    if (offset < megaCmdBytes) {
+        const bool ok = writeDataChunk(port_id, offset, pkt);
+        DPRINTF(MegaCmdQueue,
+                "data write addr=%#llx off=%#llx size=%u accepted=%d\n",
+                pkt->getAddr(), offset, pkt->getSize(), ok);
+        return ok;
+    }
+
+    const uint64_t ctrl = pkt->getUintX(ByteOrder::little);
+    DPRINTF(MegaCmdQueue,
+            "control write addr=%#llx off=%#llx val=%llu\n",
+            pkt->getAddr(), offset,
+            static_cast<unsigned long long>(ctrl));
+
+    if (ctrl == 0) {
+        return recvTimingPushReq(port_id);
+    }
+
+    if (ctrl == 1) {
+        return recvTimingPopReq();
+    }
+
+    DPRINTF(MegaCmdQueue, "reject control val=%llu\n",
+            static_cast<unsigned long long>(ctrl));
+    return false;
+}
+
+void
+MegaCmdQueue::clearEnqueueGate()
+{
+    hasEnqueuedCmd = false;
+    DPRINTF(MegaCmdQueue, "clear same-cycle push gate\n");
+    trySendRetries();
 }
 
 void
@@ -218,42 +336,6 @@ MegaCmdQueue::trySendRetries()
     for (auto &port : cpuSidePorts) {
         port.trySendRetry();
     }
-}
-
-bool
-MegaCmdQueue::testWriteWord(uint64_t data_addr, uint32_t value)
-{
-    uint8_t data[sizeof(value)] = {};
-    std::memcpy(data, &value, sizeof(value));
-
-    if (data_addr == DoorbellOffset) {
-        return false;
-    }
-
-    return appendDataBytes(0, data, sizeof(value));
-}
-
-bool
-MegaCmdQueue::testRingDoorbell()
-{
-    return enqueueStagedCommand(0);
-}
-
-bool
-MegaCmdQueue::popCmd()
-{
-    if (queue.empty()) {
-        return false;
-    }
-
-    const bool was_full = queue.size() == cmdQueueDepth;
-    queue.pop_front();
-
-    if (was_full) {
-        trySendRetries();
-    }
-
-    return true;
 }
 
 uint64_t

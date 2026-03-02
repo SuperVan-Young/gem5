@@ -2,5 +2,7 @@
 
 Import('*')
 
+DebugFlag('MegaCmdQueue')
+
 SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
 Source('MegaCmdQueue.cc')
