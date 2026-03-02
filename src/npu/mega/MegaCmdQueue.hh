@@ -36,12 +36,13 @@
 #include "base/addr_range.hh"
 #include "mem/port.hh"
 #include "params/MegaCmdQueue.hh"
-#include "sim/sim_object.hh"
+#include "sim/clocked_object.hh"
+#include "sim/eventq.hh"
 
 namespace gem5
 {
 
-class MegaCmdQueue : public SimObject
+class MegaCmdQueue : public ClockedObject
 {
   private:
     class CPUSidePort : public ResponsePort
@@ -51,6 +52,9 @@ class MegaCmdQueue : public SimObject
         int id;
         bool needRetry;
         PacketPtr blockedRespPacket;
+        EventFunctionWrapper sendResponseEvent;
+
+        void sendDeferredResponse();
 
       public:
         CPUSidePort(const std::string &name, int id, MegaCmdQueue *owner);
@@ -78,7 +82,6 @@ class MegaCmdQueue : public SimObject
     struct StagingBuffer
     {
         std::vector<uint8_t> bytes;
-        size_t writeOffset = 0;
     };
 
     std::vector<CPUSidePort> cpuSidePorts;
@@ -89,19 +92,25 @@ class MegaCmdQueue : public SimObject
     const uint32_t megaCmdWidth;
     const uint32_t cmdQueueDepth;
     const uint32_t megaCmdBytes;
+    const Addr baseAddr;
 
-    static constexpr Addr DoorbellOffset = 0x1000;
-    static constexpr Addr MaxAddrSpace = static_cast<Addr>(-1);
+    bool hasEnqueuedCmd;
+    EventFunctionWrapper clearEnqueueGateEvent;
 
-    bool canAcceptDoorbell() const;
-    bool appendDataChunk(PortID port_id, PacketPtr pkt);
-    bool enqueueStagedCommand(PortID port_id);
+    bool canPushMegaCmd() const;
+    bool writeDataChunk(PortID port_id, Addr offset, PacketPtr pkt);
+    bool recvTimingPushReq(PortID port_id);
+    bool recvTimingPopReq();
     bool handleRequest(PacketPtr pkt, PortID port_id);
+    void clearEnqueueGate();
 
-    bool appendDataBytes(PortID port_id, const uint8_t *src, size_t size);
+    bool writeDataBytes(PortID port_id, Addr offset, const uint8_t *src,
+                        size_t size);
+    bool validMmioOffset(Addr offset, size_t size) const;
 
     AddrRangeList getAddrRanges() const;
     void trySendRetries();
+    void popMegaCmd();
 
   public:
     MegaCmdQueue(const MegaCmdQueueParams &params);
@@ -111,9 +120,6 @@ class MegaCmdQueue : public SimObject
     Port &getPort(const std::string &if_name,
                   PortID idx = InvalidPortID) override;
 
-    bool testWriteWord(uint64_t data_addr, uint32_t value);
-    bool testRingDoorbell();
-    bool popCmd();
     uint64_t queueOccupancy() const;
 };
 
