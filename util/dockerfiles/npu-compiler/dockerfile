@@ -1,0 +1,19 @@
+FROM  ghcr.io/gem5/ubuntu-24.04_all-dependencies:latest
+
+LABEL org.opencontainers.image.source=https://github.com/gem5/gem5
+LABEL org.opencontainers.image.licenses=BSD-3-Clause
+
+RUN apt -y update  && \
+    apt -y install \
+    vim \
+    qemu-system \
+    qemu-kvm \
+    g++-aarch64-linux-gnu \
+    g++-riscv64-linux-gnu \
+    gcc-aarch64-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    gcc-x86-64-linux-gnu \
+    g++-x86-64-linux-gnu \
+    locales \
+    gdb \
+    unzip
