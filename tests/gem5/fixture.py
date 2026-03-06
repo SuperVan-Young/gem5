@@ -263,17 +263,15 @@ class Gem5Fixture(SConsFixture):
 class MakeFixture(Fixture):
     def __init__(self, directory, *args, **kwargs):
         name = f"make -C {directory}"
-        super().__init__(
-            build_once=True, lazy_init=False, name=name, *args, **kwargs
-        )
-        self.targets = []
+        super().__init__(name=name, *args, **kwargs)
         self.directory = directory
 
-    def setup(self):
-        super().setup()
-        targets = set(self.required_by)
+    def setup(self, testitem):
+        super().setup(testitem)
+
+    def build_targets(self, *targets):
         command = ["make", "-C", self.directory]
-        command.extend([target.target for target in targets])
+        command.extend(targets)
         log_call(log.test_log, command, time=None, stderr=sys.stderr)
 
 
@@ -289,18 +287,13 @@ class MakeTarget(Fixture):
         self.target = self.name
 
         if make_fixture is None:
-            make_fixture = MakeFixture(
-                absdirpath(target), lazy_init=True, build_once=False
-            )
+            make_fixture = MakeFixture(absdirpath(target))
 
         self.make_fixture = make_fixture
 
-        # Add our self to the required targets of the main MakeFixture
-        self.require(self.make_fixture)
-
     def setup(self, testitem):
-        super().setup()
-        self.make_fixture.setup()
+        super().setup(testitem)
+        self.make_fixture.build_targets(self.target)
         return self
 
 

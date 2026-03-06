@@ -25,7 +25,6 @@ main(void)
     mmio_write32(CMDQ_BASE + 0xC, 0x2003);
     mmio_write32(CTRL_ADDR, 0);
 
-    mmio_write32(CTRL_ADDR, 0);
     mmio_write32(CTRL_ADDR, 1);
 
     mmio_write32(CMDQ_BASE + 0x0, 0x3000);
@@ -33,10 +32,6 @@ main(void)
     mmio_write32(CMDQ_BASE + 0x8, 0x3002);
     mmio_write32(CMDQ_BASE + 0xC, 0x3003);
     mmio_write32(CTRL_ADDR, 0);
-
-    while (1) {
-        asm volatile("nop");
-    }
 
     return 0;
 }

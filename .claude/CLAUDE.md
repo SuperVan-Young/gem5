@@ -93,6 +93,15 @@ A central concept is the **SimObject**:
 
 Practical implication: adding/changing parameters commonly touches both Python and C++ plus the build glue that generates params.
 
+## Testing guidance
+
+For `tests/gem5/` structure, pass/fail conventions, build/run workflow, and the recommended pattern of automated verification plus preserved artifacts for human inspection, see:
+
+- `.claude/testing_gem5_notes.md`
+- `.claude/skill/testing-gem5.md`
+
+Prefer these notes when asked about writing, reviewing, or debugging gem5 tests. Unless explicitly requested by the user, do not retain or prioritize `tests/pyunit/` guidance.
+
 ## Commit conventions (repo-enforced)
 
 - Commit headers must start with one or more **tags** (from `MAINTAINERS.yaml`) followed by a colon, e.g. `mem-ruby: ...` or `mem,mem-cache: ...`.
