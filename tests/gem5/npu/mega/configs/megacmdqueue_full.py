@@ -3,7 +3,6 @@
 
 import argparse
 import os
-import sys
 
 import m5
 from m5.objects import *
@@ -15,6 +14,8 @@ args = parser.parse_args()
 cmd_width = 128
 cmdq_base = 0x70000000
 cmd_bytes = cmd_width // 8
+expected_exit_cause = "exiting with last active thread context"
+expected_final_occupancy = 2
 
 system = System(
     mem_mode="timing",
@@ -52,13 +53,14 @@ m5.instantiate()
 process.map(cmdq_base, cmdq_base, 2 * cmd_bytes, False)
 
 exit_event = m5.simulate()
-print(f"Final queue occupancy: {system.cmdq.queueOccupancy()}")
-if system.cmdq.queueOccupancy() == 0:
-    print("FAIL: no command was pushed into MegaCmdQueue")
-    sys.exit(1)
-if exit_event.getCause() != "simulate() limit reached":
-    print(f"FAIL: unexpected exit cause {exit_event.getCause()}")
-    sys.exit(1)
+exit_cause = exit_event.getCause()
+final_occupancy = system.cmdq.queueOccupancy()
 
-print("MEGACMDQUEUE_TEST_PASS")
-sys.exit(0)
+print(f"MEGACMDQUEUE_EXIT_CAUSE={exit_cause}")
+print(f"MEGACMDQUEUE_FINAL_OCCUPANCY={final_occupancy}")
+
+if (
+    exit_cause == expected_exit_cause
+    and final_occupancy == expected_final_occupancy
+):
+    print("MEGACMDQUEUE_TEST_PASS")
