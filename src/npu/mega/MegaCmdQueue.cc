@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 
 #include "base/cprintf.hh"
 #include "base/logging.hh"
@@ -39,6 +40,25 @@
 
 namespace gem5
 {
+
+namespace
+{
+
+constexpr Addr MmioBase = 0x70000000;
+
+uint32_t
+extractCmdWord(const std::vector<uint8_t> &cmd)
+{
+    if (cmd.size() < sizeof(uint32_t)) {
+        return 0;
+    }
+
+    uint32_t word = 0;
+    std::memcpy(&word, cmd.data(), sizeof(word));
+    return word;
+}
+
+} // anonymous namespace
 
 MegaCmdQueue::CPUSidePort::CPUSidePort(
     const std::string &name, int id, MegaCmdQueue *owner)
@@ -121,14 +141,42 @@ MegaCmdQueue::CPUSidePort::trySendRetry()
     }
 }
 
+MegaCmdQueue::MemSidePort::MemSidePort(
+    const std::string &name, MegaCmdQueue *owner)
+    : RequestPort(name, owner), owner(owner)
+{
+}
+
+bool
+MegaCmdQueue::MemSidePort::sendPacket(PacketPtr pkt)
+{
+    return sendTimingReq(pkt);
+}
+
+bool
+MegaCmdQueue::MemSidePort::recvTimingResp(PacketPtr pkt)
+{
+    return owner->handleMemResponse(pkt);
+}
+
+void
+MegaCmdQueue::MemSidePort::recvReqRetry()
+{
+    owner->retryDispatch();
+}
+
 MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
     : ClockedObject(params),
+      memSidePort(params.name + ".mem_side", this),
       numInputPort(params.num_input_port),
       megaCmdWidth(params.mega_cmd_width),
       cmdQueueDepth(params.cmd_queue_depth),
       megaCmdBytes(megaCmdWidth / 8),
       baseAddr(params.base_addr),
       hasEnqueuedCmd(false),
+      writeInFlight(false),
+      writeAwaitingRetry(false),
+      writePacket(nullptr),
       clearEnqueueGateEvent(
           [this]() { clearEnqueueGate(); },
           name() + ".clearEnqueueGateEvent")
@@ -144,6 +192,20 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
         stagingBuffers[i].bytes.resize(megaCmdBytes, 0);
         cpuSidePorts.emplace_back(csprintf("%s.cpu_side[%d]", name(), i),
                                   i, this);
+    }
+}
+
+MegaCmdQueue::~MegaCmdQueue()
+{
+    cleanupWritePacket();
+}
+
+void
+MegaCmdQueue::cleanupWritePacket()
+{
+    if (writePacket != nullptr) {
+        delete writePacket;
+        writePacket = nullptr;
     }
 }
 
@@ -166,6 +228,10 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
 {
     if (if_name == "cpu_side" && idx < cpuSidePorts.size()) {
         return cpuSidePorts[idx];
+    }
+
+    if (if_name == "mem_side") {
+        return memSidePort;
     }
 
     return ClockedObject::getPort(if_name, idx);
@@ -244,6 +310,7 @@ MegaCmdQueue::recvTimingPushReq(PortID port_id)
             static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
             static_cast<unsigned long long>(clockEdge(Cycles(1))));
 
+    tryDispatchNext();
     return true;
 }
 
@@ -263,6 +330,8 @@ MegaCmdQueue::popMegaCmd()
     if (was_blocked && canPushMegaCmd()) {
         trySendRetries();
     }
+
+    tryDispatchNext();
 }
 
 bool
@@ -327,6 +396,7 @@ MegaCmdQueue::clearEnqueueGate()
 {
     hasEnqueuedCmd = false;
     DPRINTF(MegaCmdQueue, "clear same-cycle push gate\n");
+    tryDispatchNext();
     trySendRetries();
 }
 
@@ -336,6 +406,104 @@ MegaCmdQueue::trySendRetries()
     for (auto &port : cpuSidePorts) {
         port.trySendRetry();
     }
+}
+
+bool
+MegaCmdQueue::tryDispatchNext()
+{
+    if (!memSidePort.isConnected() ||
+        writeInFlight || writeAwaitingRetry || writePacket != nullptr ||
+        queue.empty()) {
+        return false;
+    }
+
+    const auto &cmd = queue.front();
+    const Addr target_addr = buildTargetAddr(cmd);
+
+    RequestPtr req = std::make_shared<Request>(
+        target_addr, megaCmdBytes, Request::Flags(), Request::funcRequestorId);
+    writePacket = new Packet(req, MemCmd::WriteReq);
+    writePacket->allocate();
+    writePacket->setData(cmd.data());
+
+    if (!memSidePort.sendPacket(writePacket)) {
+        writeAwaitingRetry = true;
+        DPRINTF(MegaCmdQueue,
+                "dispatch blocked: target=%#llx queue=%llu\n",
+                target_addr,
+                static_cast<unsigned long long>(queue.size()));
+        return false;
+    }
+
+    writeInFlight = true;
+
+    DPRINTF(MegaCmdQueue,
+            "dispatch sent: target=%#llx queue=%llu inflight=1\n",
+            target_addr,
+            static_cast<unsigned long long>(queue.size()));
+
+    return true;
+}
+
+void
+MegaCmdQueue::retryDispatch()
+{
+    if (!writeAwaitingRetry || writePacket == nullptr || writeInFlight) {
+        return;
+    }
+
+    if (!memSidePort.sendPacket(writePacket)) {
+        return;
+    }
+
+    writeAwaitingRetry = false;
+    writeInFlight = true;
+
+    DPRINTF(MegaCmdQueue,
+            "dispatch sent on retry: target=%#llx queue=%llu inflight=1\n",
+            writePacket->getAddr(),
+            static_cast<unsigned long long>(queue.size()));
+}
+
+bool
+MegaCmdQueue::handleMemResponse(PacketPtr pkt)
+{
+    panic_if(!writeInFlight || writePacket == nullptr,
+             "%s: unexpected mem response without in-flight write", name());
+    panic_if(pkt != writePacket,
+             "%s: response packet mismatch", name());
+    panic_if(queue.empty(),
+             "%s: response arrived but queue is empty", name());
+
+    const bool was_blocked = !canPushMegaCmd();
+
+    DPRINTF(MegaCmdQueue,
+            "dispatch complete: target=%#llx queue=%llu\n",
+            pkt->getAddr(),
+            static_cast<unsigned long long>(queue.size()));
+
+    queue.pop_front();
+
+    cleanupWritePacket();
+    writeInFlight = false;
+    writeAwaitingRetry = false;
+
+    if (was_blocked && canPushMegaCmd()) {
+        trySendRetries();
+    }
+
+    tryDispatchNext();
+    return true;
+}
+
+Addr
+MegaCmdQueue::buildTargetAddr(const std::vector<uint8_t> &cmd) const
+{
+    const uint32_t cmd_word = extractCmdWord(cmd);
+    const Addr device_type = (cmd_word >> 24) & 0xF;
+    const Addr device_id = (cmd_word >> 20) & 0xF;
+
+    return MmioBase | (device_type << 24) | (device_id << 20);
 }
 
 uint64_t

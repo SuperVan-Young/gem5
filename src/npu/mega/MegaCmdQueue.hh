@@ -34,7 +34,9 @@
 #include <vector>
 
 #include "base/addr_range.hh"
+#include "mem/packet.hh"
 #include "mem/port.hh"
+#include "mem/request.hh"
 #include "params/MegaCmdQueue.hh"
 #include "sim/clocked_object.hh"
 #include "sim/eventq.hh"
@@ -79,12 +81,29 @@ class MegaCmdQueue : public ClockedObject
         AddrRangeList getAddrRanges() const override;
     };
 
+    class MemSidePort : public RequestPort
+    {
+      private:
+        MegaCmdQueue *owner;
+
+      public:
+        MemSidePort(const std::string &name, MegaCmdQueue *owner);
+
+        bool sendPacket(PacketPtr pkt);
+
+      protected:
+        bool recvTimingResp(PacketPtr pkt) override;
+        void recvReqRetry() override;
+        void recvRangeChange() override {}
+    };
+
     struct StagingBuffer
     {
         std::vector<uint8_t> bytes;
     };
 
     std::vector<CPUSidePort> cpuSidePorts;
+    MemSidePort memSidePort;
     std::vector<StagingBuffer> stagingBuffers;
     std::deque<std::vector<uint8_t>> queue;
 
@@ -95,6 +114,9 @@ class MegaCmdQueue : public ClockedObject
     const Addr baseAddr;
 
     bool hasEnqueuedCmd;
+    bool writeInFlight;
+    bool writeAwaitingRetry;
+    PacketPtr writePacket;
     EventFunctionWrapper clearEnqueueGateEvent;
 
     bool canPushMegaCmd() const;
@@ -112,8 +134,15 @@ class MegaCmdQueue : public ClockedObject
     void trySendRetries();
     void popMegaCmd();
 
+    bool tryDispatchNext();
+    void retryDispatch();
+    bool handleMemResponse(PacketPtr pkt);
+    Addr buildTargetAddr(const std::vector<uint8_t> &cmd) const;
+    void cleanupWritePacket();
+
   public:
     MegaCmdQueue(const MegaCmdQueueParams &params);
+    ~MegaCmdQueue() override;
 
     void init() override;
 

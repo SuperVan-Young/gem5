@@ -111,6 +111,7 @@ class SpecializedExecutionUnit : public ClockedObject
     const uint32_t macroCmdBytes;
     const uint32_t cmdQueueDepth;
     const Addr baseAddr;
+    const bool syncEnqueueOnDataWrite;
     Tick debugProcessLatency;
 
     bool issueCmdBusy;
