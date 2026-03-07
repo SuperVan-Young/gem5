@@ -20,6 +20,10 @@ class SpecializedExecutionUnit(ClockedObject):
     debug_process_latency = Param.Latency(
         "100ns", "Fixed execution latency returned by the debug process path"
     )
+    sync_enqueue_on_data_write = Param.Bool(
+        False,
+        "If true, writing command data area immediately enqueues the current staging buffer",
+    )
 
     cxx_exports = [
         PyBindMethod("queueOccupancy"),

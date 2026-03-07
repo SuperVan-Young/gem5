@@ -12,6 +12,7 @@ class MegaCmdQueue(ClockedObject):
     cxx_class = "gem5::MegaCmdQueue"
 
     cpu_side = VectorResponsePort("CPU-side request input ports")
+    mem_side = RequestPort("Memory-side request port")
 
     num_input_port = Param.Unsigned(1, "Number of CPU input ports")
     mega_cmd_width = Param.Unsigned(128, "Macro command width in bits")

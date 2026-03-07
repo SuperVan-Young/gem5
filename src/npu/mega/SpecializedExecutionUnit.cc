@@ -148,6 +148,7 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
       macroCmdBytes(params.macro_cmd_bytes),
       cmdQueueDepth(params.cmd_queue_depth),
       baseAddr(params.base_addr),
+      syncEnqueueOnDataWrite(params.sync_enqueue_on_data_write),
       debugProcessLatency(params.debug_process_latency),
       issueCmdBusy(false),
       completedCount(0),
@@ -285,6 +286,10 @@ SpecializedExecutionUnit::handleRequest(PacketPtr pkt)
     if (offset < macroCmdBytes) {
         // Staging area write
         writeDataChunk(offset, pkt);
+
+        if (syncEnqueueOnDataWrite && offset == 0) {
+            success = launchStagedCmd();
+        }
     } else {
         // Control area write - trigger launch
         success = launchStagedCmd();
