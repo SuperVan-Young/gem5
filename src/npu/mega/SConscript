@@ -3,6 +3,10 @@
 Import('*')
 
 DebugFlag('MegaCmdQueue')
+DebugFlag('SpecializedExecutionUnit')
 
 SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
+SimObject('SpecializedExecutionUnit.py',
+          sim_objects=['SpecializedExecutionUnit'])
 Source('MegaCmdQueue.cc')
+Source('SpecializedExecutionUnit.cc')
