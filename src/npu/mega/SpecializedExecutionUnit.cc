@@ -28,12 +28,21 @@
 
 #include "npu/mega/SpecializedExecutionUnit.hh"
 
+#include <cstring>
+
 #include "base/trace.hh"
 #include "debug/SpecializedExecutionUnit.hh"
 #include "sim/system.hh"
 
 namespace gem5
 {
+
+namespace
+{
+
+constexpr Addr SyncIndicatorBase = 0x71000000;
+
+} // anonymous namespace
 
 SpecializedExecutionUnit::CPUSidePort::CPUSidePort(
     const std::string &name, SpecializedExecutionUnit *owner)
@@ -153,7 +162,7 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
       issueCmdBusy(false),
       completedCount(0),
       activeMemPacket(nullptr),
-      activeMemBuffer(nullptr),
+      activeCmd(macroCmdBytes, 0),
       issueEvent([this] { issueOneCommand(); }, name() + ".issueEvent"),
       finishExecutionEvent([this] { finishExecution(); },
                            name() + ".finishExecutionEvent")
@@ -185,10 +194,6 @@ SpecializedExecutionUnit::cleanupActiveMemPacket()
     if (activeMemPacket) {
         delete activeMemPacket;
         activeMemPacket = nullptr;
-    }
-    if (activeMemBuffer) {
-        delete[] activeMemBuffer;
-        activeMemBuffer = nullptr;
     }
 }
 
@@ -318,6 +323,7 @@ SpecializedExecutionUnit::issueOneCommand()
 
     std::vector<uint8_t> cmd = cmdQueue.front();
     cmdQueue.pop_front();
+    activeCmd = cmd;
     issueCmdBusy = true;
 
     DPRINTF(SpecializedExecutionUnit,
@@ -331,6 +337,7 @@ void
 SpecializedExecutionUnit::finishExecution()
 {
     issueCmdBusy = false;
+    postProcess(activeCmd);
     completedCount++;
 
     DPRINTF(SpecializedExecutionUnit,
@@ -351,6 +358,59 @@ SpecializedExecutionUnit::process(const std::vector<uint8_t> &cmd)
     DPRINTF(SpecializedExecutionUnit,
             "Processing command, latency=%lu ticks\n", debugProcessLatency);
     return debugProcessLatency;
+}
+
+uint32_t
+SpecializedExecutionUnit::extractCmdWord(const std::vector<uint8_t> &cmd) const
+{
+    if (cmd.size() < sizeof(uint32_t)) {
+        return 0;
+    }
+
+    uint32_t word = 0;
+    std::memcpy(&word, cmd.data(), sizeof(word));
+    return word;
+}
+
+SpecializedExecutionUnit::CmdFields
+SpecializedExecutionUnit::parseCmdFields(uint32_t word) const
+{
+    CmdFields fields;
+    fields.deviceType = (word >> 24) & 0xF;
+    fields.deviceId = (word >> 20) & 0xF;
+    fields.opCode = (word >> 16) & 0xF;
+    fields.indicatorIdx = word & 0xFFFF;
+    return fields;
+}
+
+void
+SpecializedExecutionUnit::postProcess(const std::vector<uint8_t> &cmd)
+{
+    const CmdFields fields = parseCmdFields(extractCmdWord(cmd));
+    if (fields.opCode != 1) {
+        return;
+    }
+
+    panic_if(activeMemPacket != nullptr,
+             "%s: postProcess requested while memory packet is still active",
+             name());
+
+    uint32_t word = (static_cast<uint32_t>(fields.deviceType) << 24) |
+                    (static_cast<uint32_t>(fields.deviceId) << 20) |
+                    (static_cast<uint32_t>(fields.opCode) << 16) |
+                    fields.indicatorIdx;
+
+    RequestPtr req = std::make_shared<Request>(
+        SyncIndicatorBase, sizeof(uint32_t), Request::Flags(),
+        Request::funcRequestorId);
+    activeMemPacket = new Packet(req, MemCmd::WriteReq);
+    activeMemPacket->allocate();
+    activeMemPacket->setData(reinterpret_cast<const uint8_t *>(&word));
+
+    DPRINTF(SpecializedExecutionUnit,
+            "postProcess set indicator idx=%u word=%#x\n",
+            fields.indicatorIdx, word);
+    memSidePort.sendPacket(activeMemPacket);
 }
 
 void
