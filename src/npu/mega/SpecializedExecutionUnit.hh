@@ -103,6 +103,14 @@ class SpecializedExecutionUnit : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
+    struct CmdFields
+    {
+        uint8_t deviceType;
+        uint8_t deviceId;
+        uint8_t opCode;
+        uint16_t indicatorIdx;
+    };
+
     CPUSidePort cpuSidePort;
     MemSidePort memSidePort;
     StagingBuffer stagingBuffer;
@@ -117,7 +125,7 @@ class SpecializedExecutionUnit : public ClockedObject
     bool issueCmdBusy;
     uint64_t completedCount;
     PacketPtr activeMemPacket;
-    uint8_t *activeMemBuffer;
+    std::vector<uint8_t> activeCmd;
 
     EventFunctionWrapper issueEvent;
     EventFunctionWrapper finishExecutionEvent;
@@ -132,8 +140,12 @@ class SpecializedExecutionUnit : public ClockedObject
     void issueOneCommand();
     void finishExecution();
     Tick process(const std::vector<uint8_t> &cmd);
+    void postProcess(const std::vector<uint8_t> &cmd);
     void cleanupActiveMemPacket();
     bool handleMemResponse(PacketPtr pkt);
+
+    uint32_t extractCmdWord(const std::vector<uint8_t> &cmd) const;
+    CmdFields parseCmdFields(uint32_t word) const;
 
     AddrRangeList getAddrRanges() const;
 
