@@ -59,10 +59,7 @@ main(void)
     mmio_write32(SYNC_BASE, cmd_header(DEVICE_TYPE_SYNC, DEVICE_ID,
                                        OP_SYNC_SET, SYNC_INDEX));
 
-    volatile uint64_t spin = 0;
-    for (uint64_t i = 0; i < 4000000ULL; ++i) {
-        spin += i;
+    for (;;) {
+        asm volatile("" ::: "memory");
     }
-
-    return (int)(spin & 0);
 }

@@ -68,10 +68,7 @@ main(void)
         0xB0020002U,
         0xB0020003U);
 
-    volatile uint64_t spin = 0;
-    for (uint64_t i = 0; i < 4000000ULL; ++i) {
-        spin += i;
+    for (;;) {
+        asm volatile("" ::: "memory");
     }
-
-    return (int)(spin & 0);
 }
