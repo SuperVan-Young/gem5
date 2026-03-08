@@ -45,6 +45,7 @@ namespace
 {
 
 constexpr Addr MmioBase = 0x70000000;
+constexpr Addr SyncIndicatorBase = 0x71000000;
 
 uint32_t
 extractCmdWord(const std::vector<uint8_t> &cmd)
@@ -60,9 +61,11 @@ extractCmdWord(const std::vector<uint8_t> &cmd)
 
 } // anonymous namespace
 
-MegaCmdQueue::CPUSidePort::CPUSidePort(
-    const std::string &name, int id, MegaCmdQueue *owner)
-    : ResponsePort(name), owner(owner), id(id), needRetry(false),
+MegaCmdQueue::CPUSidePort::CPUSidePort(const std::string &name, PortID id,
+                                       bool sync_indicator_port,
+                                       MegaCmdQueue *owner)
+    : ResponsePort(name), owner(owner), id(id),
+      syncIndicatorPort(sync_indicator_port), needRetry(false),
       blockedRespPacket(nullptr),
       sendResponseEvent([this]() { sendDeferredResponse(); },
                         name + ".sendResponseEvent")
@@ -77,7 +80,9 @@ MegaCmdQueue::CPUSidePort::recvTimingReq(PacketPtr pkt)
         return false;
     }
 
-    if (!owner->handleRequest(pkt, id)) {
+    const bool accepted = syncIndicatorPort ?
+        owner->handleSyncIndicatorRequest(pkt) : owner->handleRequest(pkt, id);
+    if (!accepted) {
         needRetry = true;
         return false;
     }
@@ -121,7 +126,8 @@ MegaCmdQueue::CPUSidePort::recvRespRetry()
 AddrRangeList
 MegaCmdQueue::CPUSidePort::getAddrRanges() const
 {
-    return owner->getAddrRanges();
+    return syncIndicatorPort ? owner->getSyncIndicatorAddrRanges() :
+                               owner->getCpuAddrRanges(id);
 }
 
 void
@@ -131,7 +137,7 @@ MegaCmdQueue::CPUSidePort::trySendRetry()
         return;
     }
 
-    if (!owner->canPushMegaCmd()) {
+    if (!syncIndicatorPort && !owner->canPushMegaCmd()) {
         return;
     }
 
@@ -167,12 +173,17 @@ MegaCmdQueue::MemSidePort::recvReqRetry()
 
 MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
     : ClockedObject(params),
+      syncIndicatorSidePort(params.name + ".sync_indicator_side", InvalidPortID,
+                            true, this),
       memSidePort(params.name + ".mem_side", this),
       numInputPort(params.num_input_port),
       megaCmdWidth(params.mega_cmd_width),
       cmdQueueDepth(params.cmd_queue_depth),
       megaCmdBytes(megaCmdWidth / 8),
       baseAddr(params.base_addr),
+      rangeAddr(params.range_addr),
+      numSyncIndicator(params.num_sync_indicator),
+      syncIndicatorTable(numSyncIndicator, 0),
       hasEnqueuedCmd(false),
       writeInFlight(false),
       writeAwaitingRetry(false),
@@ -185,14 +196,30 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
              "%s: mega_cmd_width must be non-zero and byte aligned", name());
     fatal_if(cmdQueueDepth == 0,
              "%s: cmd_queue_depth must be greater than zero", name());
+    fatal_if(numInputPort == 0,
+             "%s: num_input_port must be greater than zero", name());
+    fatal_if(rangeAddr <= baseAddr,
+             "%s: range_addr must be above base_addr", name());
 
     stagingBuffers.resize(numInputPort);
 
-    for (int i = 0; i < numInputPort; ++i) {
+    for (PortID i = 0; i < numInputPort; ++i) {
         stagingBuffers[i].bytes.resize(megaCmdBytes, 0);
         cpuSidePorts.emplace_back(csprintf("%s.cpu_side[%d]", name(), i),
-                                  i, this);
+                                  i, false, this);
+
+        const Addr start = portBaseAddr(i);
+        const Addr end = start + (2 * megaCmdBytes);
+        fatal_if(end > rangeAddr,
+                 "%s: cpu_side[%d] MMIO range [%#llx, %#llx) exceeds "
+                 "range_addr=%#llx",
+                 name(), i, start, end, rangeAddr);
     }
+
+    fatal_if(SyncIndicatorBase + sizeof(uint32_t) > rangeAddr,
+             "%s: sync indicator MMIO [%#llx, %#llx) exceeds range_addr=%#llx",
+             name(), SyncIndicatorBase,
+             SyncIndicatorBase + sizeof(uint32_t), rangeAddr);
 }
 
 MegaCmdQueue::~MegaCmdQueue()
@@ -213,13 +240,15 @@ void
 MegaCmdQueue::init()
 {
     ClockedObject::init();
-    fatal_if(numInputPort != 1,
-             "%s: currently only num_input_port == 1 is supported", name());
 
     for (auto &port : cpuSidePorts) {
         if (port.isConnected()) {
             port.sendRangeChange();
         }
+    }
+
+    if (syncIndicatorSidePort.isConnected()) {
+        syncIndicatorSidePort.sendRangeChange();
     }
 }
 
@@ -230,6 +259,10 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
         return cpuSidePorts[idx];
     }
 
+    if (if_name == "sync_indicator_side") {
+        return syncIndicatorSidePort;
+    }
+
     if (if_name == "mem_side") {
         return memSidePort;
     }
@@ -237,10 +270,23 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
     return ClockedObject::getPort(if_name, idx);
 }
 
-AddrRangeList
-MegaCmdQueue::getAddrRanges() const
+Addr
+MegaCmdQueue::portBaseAddr(PortID port_id) const
 {
-    return {AddrRange(baseAddr, baseAddr + (2 * megaCmdBytes))};
+    return baseAddr + (static_cast<Addr>(port_id) << 20);
+}
+
+AddrRangeList
+MegaCmdQueue::getCpuAddrRanges(PortID port_id) const
+{
+    const Addr port_base = portBaseAddr(port_id);
+    return {AddrRange(port_base, port_base + (2 * megaCmdBytes))};
+}
+
+AddrRangeList
+MegaCmdQueue::getSyncIndicatorAddrRanges() const
+{
+    return {AddrRange(SyncIndicatorBase, SyncIndicatorBase + sizeof(uint32_t))};
 }
 
 bool
@@ -349,14 +395,15 @@ MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
         return false;
     }
 
-    if (pkt->getAddr() < baseAddr) {
+    const Addr port_base = portBaseAddr(port_id);
+    if (pkt->getAddr() < port_base || pkt->getAddr() >= rangeAddr) {
         DPRINTF(MegaCmdQueue,
-                "reject addr=%#llx below base=%#llx\n",
-                pkt->getAddr(), baseAddr);
+                "reject addr=%#llx outside cpu_side[%d] range\n",
+                pkt->getAddr(), port_id);
         return false;
     }
 
-    const Addr offset = pkt->getAddr() - baseAddr;
+    const Addr offset = pkt->getAddr() - port_base;
     if (!validMmioOffset(offset, pkt->getSize())) {
         DPRINTF(MegaCmdQueue,
                 "reject invalid mmio range addr=%#llx size=%u\n",
@@ -367,15 +414,15 @@ MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
     if (offset < megaCmdBytes) {
         const bool ok = writeDataChunk(port_id, offset, pkt);
         DPRINTF(MegaCmdQueue,
-                "data write addr=%#llx off=%#llx size=%u accepted=%d\n",
-                pkt->getAddr(), offset, pkt->getSize(), ok);
+                "data write port=%d addr=%#llx off=%#llx size=%u accepted=%d\n",
+                port_id, pkt->getAddr(), offset, pkt->getSize(), ok);
         return ok;
     }
 
     const uint64_t ctrl = pkt->getUintX(ByteOrder::little);
     DPRINTF(MegaCmdQueue,
-            "control write addr=%#llx off=%#llx val=%llu\n",
-            pkt->getAddr(), offset,
+            "control write port=%d addr=%#llx off=%#llx val=%llu\n",
+            port_id, pkt->getAddr(), offset,
             static_cast<unsigned long long>(ctrl));
 
     if (ctrl == 0) {
@@ -389,6 +436,56 @@ MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
     DPRINTF(MegaCmdQueue, "reject control val=%llu\n",
             static_cast<unsigned long long>(ctrl));
     return false;
+}
+
+bool
+MegaCmdQueue::handleSyncIndicatorRequest(PacketPtr pkt)
+{
+    if (!pkt->isWrite()) {
+        DPRINTF(MegaCmdQueue,
+                "reject sync-indicator non-write req cmd=%s\n",
+                pkt->cmdString());
+        return false;
+    }
+
+    const Addr addr = pkt->getAddr();
+    if (addr < SyncIndicatorBase || addr >= rangeAddr) {
+        DPRINTF(MegaCmdQueue,
+                "reject sync-indicator addr=%#llx outside range\n", addr);
+        return false;
+    }
+
+    if (pkt->getSize() < sizeof(uint32_t)) {
+        DPRINTF(MegaCmdQueue,
+                "reject sync-indicator write size=%u (<4)\n", pkt->getSize());
+        return false;
+    }
+
+    uint32_t word = 0;
+    std::memcpy(&word, pkt->getConstPtr<uint8_t>(), sizeof(uint32_t));
+    const CmdFields fields = parseCmdFields(word);
+
+    if (fields.opCode != 1) {
+        DPRINTF(MegaCmdQueue,
+                "reject sync-indicator op=%u idx=%u (only op=1 supported)\n",
+                fields.opCode, fields.indicatorIdx);
+        return false;
+    }
+
+    if (fields.indicatorIdx >= numSyncIndicator) {
+        DPRINTF(MegaCmdQueue,
+                "reject sync-indicator idx=%u out of range [0, %u)\n",
+                fields.indicatorIdx, numSyncIndicator);
+        return false;
+    }
+
+    syncIndicatorTable[fields.indicatorIdx] = 1;
+    DPRINTF(MegaCmdQueue,
+            "sync-indicator set idx=%u (device_type=%u device_id=%u)\n",
+            fields.indicatorIdx, fields.deviceType, fields.deviceId);
+
+    tryDispatchNext();
+    return true;
 }
 
 void
@@ -406,6 +503,25 @@ MegaCmdQueue::trySendRetries()
     for (auto &port : cpuSidePorts) {
         port.trySendRetry();
     }
+
+    syncIndicatorSidePort.trySendRetry();
+}
+
+MegaCmdQueue::CmdFields
+MegaCmdQueue::parseCmdFields(uint32_t word) const
+{
+    CmdFields fields;
+    fields.deviceType = (word >> 24) & 0xF;
+    fields.deviceId = (word >> 20) & 0xF;
+    fields.opCode = (word >> 16) & 0xF;
+    fields.indicatorIdx = word & 0xFFFF;
+    return fields;
+}
+
+MegaCmdQueue::CmdFields
+MegaCmdQueue::parseCmdFields(const std::vector<uint8_t> &cmd) const
+{
+    return parseCmdFields(extractCmdWord(cmd));
 }
 
 bool
@@ -418,6 +534,31 @@ MegaCmdQueue::tryDispatchNext()
     }
 
     const auto &cmd = queue.front();
+    const CmdFields fields = parseCmdFields(cmd);
+    if (fields.deviceType == 0x1 && fields.opCode == 0) {
+        if (fields.indicatorIdx >= numSyncIndicator) {
+            DPRINTF(MegaCmdQueue,
+                    "sync wait blocked by invalid idx=%u (table size=%u)\n",
+                    fields.indicatorIdx, numSyncIndicator);
+            return false;
+        }
+
+        if (!syncIndicatorTable[fields.indicatorIdx]) {
+            DPRINTF(MegaCmdQueue,
+                    "sync wait blocked idx=%u indicator=0 queue=%llu\n",
+                    fields.indicatorIdx,
+                    static_cast<unsigned long long>(queue.size()));
+            return false;
+        }
+
+        syncIndicatorTable[fields.indicatorIdx] = 0;
+        DPRINTF(MegaCmdQueue,
+                "sync wait released idx=%u indicator cleared\n",
+                fields.indicatorIdx);
+        popMegaCmd();
+        return true;
+    }
+
     const Addr target_addr = buildTargetAddr(cmd);
 
     RequestPtr req = std::make_shared<Request>(
@@ -499,11 +640,9 @@ MegaCmdQueue::handleMemResponse(PacketPtr pkt)
 Addr
 MegaCmdQueue::buildTargetAddr(const std::vector<uint8_t> &cmd) const
 {
-    const uint32_t cmd_word = extractCmdWord(cmd);
-    const Addr device_type = (cmd_word >> 24) & 0xF;
-    const Addr device_id = (cmd_word >> 20) & 0xF;
-
-    return MmioBase | (device_type << 24) | (device_id << 20);
+    const CmdFields fields = parseCmdFields(cmd);
+    return MmioBase | (static_cast<Addr>(fields.deviceType) << 24) |
+           (static_cast<Addr>(fields.deviceId) << 20);
 }
 
 uint64_t

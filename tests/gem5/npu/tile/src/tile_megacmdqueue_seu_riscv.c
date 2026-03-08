@@ -4,7 +4,7 @@
 #define CMD_BYTES 16UL
 #define CTRL_ADDR (CMDQ_BASE + CMD_BYTES)
 
-#define DEVICE_TYPE 0x1U
+#define DEVICE_TYPE 0x2U
 #define DEVICE_ID 0x0U
 #define NUM_CMDS 6
 

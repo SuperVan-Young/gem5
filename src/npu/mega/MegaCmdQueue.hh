@@ -51,7 +51,8 @@ class MegaCmdQueue : public ClockedObject
     {
       private:
         MegaCmdQueue *owner;
-        int id;
+        PortID id;
+        bool syncIndicatorPort;
         bool needRetry;
         PacketPtr blockedRespPacket;
         EventFunctionWrapper sendResponseEvent;
@@ -59,7 +60,8 @@ class MegaCmdQueue : public ClockedObject
         void sendDeferredResponse();
 
       public:
-        CPUSidePort(const std::string &name, int id, MegaCmdQueue *owner);
+        CPUSidePort(const std::string &name, PortID id, bool sync_indicator_port,
+                    MegaCmdQueue *owner);
 
         void trySendRetry();
 
@@ -102,7 +104,16 @@ class MegaCmdQueue : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
+    struct CmdFields
+    {
+        uint8_t deviceType;
+        uint8_t deviceId;
+        uint8_t opCode;
+        uint16_t indicatorIdx;
+    };
+
     std::vector<CPUSidePort> cpuSidePorts;
+    CPUSidePort syncIndicatorSidePort;
     MemSidePort memSidePort;
     std::vector<StagingBuffer> stagingBuffers;
     std::deque<std::vector<uint8_t>> queue;
@@ -112,6 +123,9 @@ class MegaCmdQueue : public ClockedObject
     const uint32_t cmdQueueDepth;
     const uint32_t megaCmdBytes;
     const Addr baseAddr;
+    const Addr rangeAddr;
+    const uint32_t numSyncIndicator;
+    std::vector<uint8_t> syncIndicatorTable;
 
     bool hasEnqueuedCmd;
     bool writeInFlight;
@@ -124,13 +138,16 @@ class MegaCmdQueue : public ClockedObject
     bool recvTimingPushReq(PortID port_id);
     bool recvTimingPopReq();
     bool handleRequest(PacketPtr pkt, PortID port_id);
+    bool handleSyncIndicatorRequest(PacketPtr pkt);
     void clearEnqueueGate();
 
     bool writeDataBytes(PortID port_id, Addr offset, const uint8_t *src,
                         size_t size);
     bool validMmioOffset(Addr offset, size_t size) const;
 
-    AddrRangeList getAddrRanges() const;
+    Addr portBaseAddr(PortID port_id) const;
+    AddrRangeList getCpuAddrRanges(PortID port_id) const;
+    AddrRangeList getSyncIndicatorAddrRanges() const;
     void trySendRetries();
     void popMegaCmd();
 
@@ -139,6 +156,9 @@ class MegaCmdQueue : public ClockedObject
     bool handleMemResponse(PacketPtr pkt);
     Addr buildTargetAddr(const std::vector<uint8_t> &cmd) const;
     void cleanupWritePacket();
+
+    CmdFields parseCmdFields(const std::vector<uint8_t> &cmd) const;
+    CmdFields parseCmdFields(uint32_t word) const;
 
   public:
     MegaCmdQueue(const MegaCmdQueueParams &params);
