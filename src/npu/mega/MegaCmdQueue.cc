@@ -112,8 +112,6 @@ MegaCmdQueue::CPUSidePort::sendDeferredResponse()
         blockedRespPacket = pkt;
         return;
     }
-
-    trySendRetry();
 }
 
 void
@@ -202,6 +200,7 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
              "%s: range_addr must be above base_addr", name());
 
     stagingBuffers.resize(numInputPort);
+    cpuSidePorts.reserve(numInputPort);
 
     for (PortID i = 0; i < numInputPort; ++i) {
         stagingBuffers[i].bytes.resize(megaCmdBytes, 0);

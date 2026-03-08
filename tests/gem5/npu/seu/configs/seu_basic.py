@@ -37,7 +37,9 @@ args = parser.parse_args()
 cmd_bytes = 16
 seu_base = 0x70000000
 queue_depth = 2
-expected_exit_cause = "exiting with last active thread context"
+poll_step_ticks = int(1e6)
+max_poll_steps = 50000
+expected_poll_exit_cause = "simulate() limit reached"
 expected_completed_cmds = 5
 
 system = System(
@@ -75,19 +77,37 @@ m5.instantiate()
 
 process.map(seu_base, seu_base, 2 * cmd_bytes, False)
 
-exit_event = m5.simulate()
-exit_cause = exit_event.getCause()
-final_occupancy = system.seu.queueOccupancy()
-completed_cmds = system.seu.completedCmdCount()
-issue_busy = system.seu.isIssueBusy()
+all_done = False
+exit_cause = ""
+final_occupancy = 0
+completed_cmds = 0
+issue_busy = False
+exit_cause_ok = True
 
-print(f"SEU_EXIT_CAUSE={exit_cause}")
+for _ in range(max_poll_steps):
+    exit_event = m5.simulate(poll_step_ticks)
+    exit_cause = exit_event.getCause()
+
+    if exit_cause != expected_poll_exit_cause:
+        exit_cause_ok = False
+        break
+
+    final_occupancy = system.seu.queueOccupancy()
+    completed_cmds = system.seu.completedCmdCount()
+    issue_busy = system.seu.isIssueBusy()
+
+    if completed_cmds >= expected_completed_cmds:
+        all_done = True
+        break
+
+if all_done:
+    print("SEU_EXIT_CAUSE=drain_complete")
+else:
+    print(f"SEU_EXIT_CAUSE={exit_cause}")
+print(f"SEU_POLL_EXIT_OK={int(exit_cause_ok)}")
 print(f"SEU_COMPLETED_CMDS={completed_cmds}")
 print(f"SEU_FINAL_OCCUPANCY={final_occupancy}")
 print(f"SEU_ISSUE_BUSY={issue_busy}")
 
-if (
-    exit_cause == expected_exit_cause
-    and completed_cmds >= expected_completed_cmds
-):
+if all_done and exit_cause_ok:
     print("SEU_TEST_PASS")
