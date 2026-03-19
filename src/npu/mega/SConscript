@@ -4,12 +4,15 @@ Import('*')
 
 DebugFlag('MegaCmdQueue')
 DebugFlag('SpecializedExecutionUnit')
+DebugFlag('DmaUnit')
 DebugFlag('ScratchpadMemory')
 
 SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
 SimObject('SpecializedExecutionUnit.py',
           sim_objects=['SpecializedExecutionUnit'])
+SimObject('DmaUnit.py', sim_objects=['DmaUnit'])
 SimObject('ScratchpadMemory.py', sim_objects=['ScratchpadMemory'])
 Source('MegaCmdQueue.cc')
 Source('SpecializedExecutionUnit.cc')
+Source('DmaUnit.cc')
 Source('ScratchpadMemory.cc')

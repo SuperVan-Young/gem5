@@ -156,6 +156,7 @@ class MegaCmdQueue : public ClockedObject
     bool handleMemResponse(PacketPtr pkt);
     Addr buildTargetAddr(const std::vector<uint8_t> &cmd) const;
     void cleanupWritePacket();
+    uint32_t extractHeaderWord(const std::vector<uint8_t> &cmd) const;
 
     CmdFields parseCmdFields(const std::vector<uint8_t> &cmd) const;
     CmdFields parseCmdFields(uint32_t word) const;

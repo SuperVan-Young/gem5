@@ -329,27 +329,46 @@ SpecializedExecutionUnit::issueOneCommand()
     DPRINTF(SpecializedExecutionUnit,
             "Issuing command, queue size now %zu\n", cmdQueue.size());
 
+    startExecuteCommand(activeCmd);
+}
+
+void
+SpecializedExecutionUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
+{
     Tick execLatency = process(cmd);
     schedule(finishExecutionEvent, curTick() + execLatency);
 }
 
 void
-SpecializedExecutionUnit::finishExecution()
+SpecializedExecutionUnit::completeActiveCommand()
 {
     issueCmdBusy = false;
-    postProcess(activeCmd);
+
+    uint32_t syncWord = 0;
+    const bool sentCompletionSync =
+        buildCompletionSyncWord(activeCmd, syncWord);
+    if (sentCompletionSync) {
+        sendCompletionSyncWord(syncWord);
+    }
+
     completedCount++;
 
     DPRINTF(SpecializedExecutionUnit,
             "Finished command %lu, queue size %zu\n",
             completedCount, cmdQueue.size());
 
-    if (!cmdQueue.empty()) {
+    if (!sentCompletionSync && !cmdQueue.empty()) {
         schedule(issueEvent, nextCycle());
     }
 
     // If we previously blocked a launch due to full queue, retry now
     cpuSidePort.trySendRetry();
+}
+
+void
+SpecializedExecutionUnit::finishExecution()
+{
+    completeActiveCommand();
 }
 
 Tick
@@ -358,6 +377,48 @@ SpecializedExecutionUnit::process(const std::vector<uint8_t> &cmd)
     DPRINTF(SpecializedExecutionUnit,
             "Processing command, latency=%lu ticks\n", debugProcessLatency);
     return debugProcessLatency;
+}
+
+void
+SpecializedExecutionUnit::sendMemRequest(PacketPtr pkt)
+{
+    panic_if(
+        activeMemPacket != nullptr,
+        "%s: sendMemRequest requested while memory packet is still active",
+        name());
+    activeMemPacket = pkt;
+    memSidePort.sendPacket(activeMemPacket);
+}
+
+bool
+SpecializedExecutionUnit::buildCompletionSyncWord(
+    const std::vector<uint8_t> &cmd, uint32_t &word) const
+{
+    const CmdFields fields = parseCmdFields(extractCmdWord(cmd));
+    if (fields.opCode != 1) {
+        return false;
+    }
+
+    word = (static_cast<uint32_t>(fields.deviceType) << 24) |
+           (static_cast<uint32_t>(fields.deviceId) << 20) |
+           (static_cast<uint32_t>(fields.opCode) << 16) |
+           fields.indicatorIdx;
+    return true;
+}
+
+void
+SpecializedExecutionUnit::sendCompletionSyncWord(uint32_t word)
+{
+    RequestPtr req = std::make_shared<Request>(
+        SyncIndicatorBase, sizeof(uint32_t), Request::Flags(),
+        Request::funcRequestorId);
+    PacketPtr pkt = new Packet(req, MemCmd::WriteReq);
+    pkt->allocate();
+    pkt->setData(reinterpret_cast<const uint8_t *>(&word));
+
+    DPRINTF(
+        SpecializedExecutionUnit, "completion sync write word=%#x\n", word);
+    sendMemRequest(pkt);
 }
 
 uint32_t
@@ -381,36 +442,6 @@ SpecializedExecutionUnit::parseCmdFields(uint32_t word) const
     fields.opCode = (word >> 16) & 0xF;
     fields.indicatorIdx = word & 0xFFFF;
     return fields;
-}
-
-void
-SpecializedExecutionUnit::postProcess(const std::vector<uint8_t> &cmd)
-{
-    const CmdFields fields = parseCmdFields(extractCmdWord(cmd));
-    if (fields.opCode != 1) {
-        return;
-    }
-
-    panic_if(activeMemPacket != nullptr,
-             "%s: postProcess requested while memory packet is still active",
-             name());
-
-    uint32_t word = (static_cast<uint32_t>(fields.deviceType) << 24) |
-                    (static_cast<uint32_t>(fields.deviceId) << 20) |
-                    (static_cast<uint32_t>(fields.opCode) << 16) |
-                    fields.indicatorIdx;
-
-    RequestPtr req = std::make_shared<Request>(
-        SyncIndicatorBase, sizeof(uint32_t), Request::Flags(),
-        Request::funcRequestorId);
-    activeMemPacket = new Packet(req, MemCmd::WriteReq);
-    activeMemPacket->allocate();
-    activeMemPacket->setData(reinterpret_cast<const uint8_t *>(&word));
-
-    DPRINTF(SpecializedExecutionUnit,
-            "postProcess set indicator idx=%u word=%#x\n",
-            fields.indicatorIdx, word);
-    memSidePort.sendPacket(activeMemPacket);
 }
 
 void
@@ -442,6 +473,9 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
             "Received memory response for addr=%#x\n", pkt->getAddr());
 
     cleanupActiveMemPacket();
+    if (!issueCmdBusy && !cmdQueue.empty()) {
+        tryScheduleIssue();
+    }
     return true;
 }
 

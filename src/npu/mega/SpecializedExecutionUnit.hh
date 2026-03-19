@@ -111,6 +111,20 @@ class SpecializedExecutionUnit : public ClockedObject
         uint16_t indicatorIdx;
     };
 
+    bool validMmioOffset(Addr offset, size_t size) const;
+    bool writeDataBytes(Addr offset, const uint8_t *src, size_t size);
+    bool writeDataChunk(Addr offset, PacketPtr pkt);
+    bool canLaunchCmd() const;
+    bool launchStagedCmd();
+    bool handleRequest(PacketPtr pkt);
+    void tryScheduleIssue();
+    void issueOneCommand();
+    uint32_t extractCmdWord(const std::vector<uint8_t> &cmd) const;
+    CmdFields parseCmdFields(uint32_t word) const;
+
+    AddrRangeList getAddrRanges() const;
+
+  protected:
     CPUSidePort cpuSidePort;
     MemSidePort memSidePort;
     StagingBuffer stagingBuffer;
@@ -130,24 +144,17 @@ class SpecializedExecutionUnit : public ClockedObject
     EventFunctionWrapper issueEvent;
     EventFunctionWrapper finishExecutionEvent;
 
-    bool validMmioOffset(Addr offset, size_t size) const;
-    bool writeDataBytes(Addr offset, const uint8_t *src, size_t size);
-    bool writeDataChunk(Addr offset, PacketPtr pkt);
-    bool canLaunchCmd() const;
-    bool launchStagedCmd();
-    bool handleRequest(PacketPtr pkt);
-    void tryScheduleIssue();
-    void issueOneCommand();
+    virtual void startExecuteCommand(const std::vector<uint8_t> &cmd);
+    virtual bool handleMemResponse(PacketPtr pkt);
+    virtual bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
+                                         uint32_t &word) const;
+    virtual void sendCompletionSyncWord(uint32_t word);
+
     void finishExecution();
     Tick process(const std::vector<uint8_t> &cmd);
-    void postProcess(const std::vector<uint8_t> &cmd);
+    void completeActiveCommand();
+    void sendMemRequest(PacketPtr pkt);
     void cleanupActiveMemPacket();
-    bool handleMemResponse(PacketPtr pkt);
-
-    uint32_t extractCmdWord(const std::vector<uint8_t> &cmd) const;
-    CmdFields parseCmdFields(uint32_t word) const;
-
-    AddrRangeList getAddrRanges() const;
 
   public:
     SpecializedExecutionUnit(const SpecializedExecutionUnitParams &params);
