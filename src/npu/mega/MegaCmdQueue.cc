@@ -510,17 +510,24 @@ MegaCmdQueue::CmdFields
 MegaCmdQueue::parseCmdFields(uint32_t word) const
 {
     CmdFields fields;
-    fields.deviceType = (word >> 24) & 0xF;
-    fields.deviceId = (word >> 20) & 0xF;
-    fields.opCode = (word >> 16) & 0xF;
-    fields.indicatorIdx = word & 0xFFFF;
+    if (megaCmdBytes == 64) {
+        fields.deviceType = (word >> 28) & 0xF;
+        fields.deviceId = (word >> 24) & 0xF;
+        fields.opCode = (word >> 16) & 0xFF;
+        fields.indicatorIdx = (word >> 8) & 0xFF;
+    } else {
+        fields.deviceType = (word >> 24) & 0xF;
+        fields.deviceId = (word >> 20) & 0xF;
+        fields.opCode = (word >> 16) & 0xF;
+        fields.indicatorIdx = word & 0xFFFF;
+    }
     return fields;
 }
 
 MegaCmdQueue::CmdFields
 MegaCmdQueue::parseCmdFields(const std::vector<uint8_t> &cmd) const
 {
-    return parseCmdFields(extractCmdWord(cmd));
+    return parseCmdFields(extractHeaderWord(cmd));
 }
 
 bool
@@ -642,6 +649,19 @@ MegaCmdQueue::buildTargetAddr(const std::vector<uint8_t> &cmd) const
     const CmdFields fields = parseCmdFields(cmd);
     return MmioBase | (static_cast<Addr>(fields.deviceType) << 24) |
            (static_cast<Addr>(fields.deviceId) << 20);
+}
+
+uint32_t
+MegaCmdQueue::extractHeaderWord(const std::vector<uint8_t> &cmd) const
+{
+    if (megaCmdBytes == 64 && cmd.size() >= megaCmdBytes) {
+        uint32_t word = 0;
+        std::memcpy(&word, cmd.data() + (15 * sizeof(uint32_t)),
+                    sizeof(word));
+        return word;
+    }
+
+    return extractCmdWord(cmd);
 }
 
 uint64_t
