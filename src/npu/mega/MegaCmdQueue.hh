@@ -109,7 +109,9 @@ class MegaCmdQueue : public ClockedObject
         uint8_t deviceType;
         uint8_t deviceId;
         uint8_t opCode;
-        uint16_t indicatorIdx;
+        uint8_t syncIndicator;
+        bool setIndicatorSns;
+        bool setIndicatorSnd;
     };
 
     std::vector<CPUSidePort> cpuSidePorts;

@@ -84,7 +84,7 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
              "DmaUnit: expected 64-byte command, got %zu bytes", cmd.size());
 
     ParsedCmd parsed;
-    const uint32_t header = extractWord(cmd, 15);
+    const uint32_t header = extractWord(cmd, 0);
     const uint8_t opCode = (header >> 16) & 0xff;
 
     parsed.deviceId = (header >> 24) & 0xf;
@@ -517,7 +517,7 @@ DmaUnit::buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
     (void)cmd;
     panic_if(!parsedCmdValid,
              "DmaUnit: completion requested without active command");
-    word = (static_cast<uint32_t>(DmaDeviceType) << 28) |
+    word = (static_cast<uint32_t>(0x1U) << 28) |
            (static_cast<uint32_t>(parsedCmd.deviceId) << 24) |
            (static_cast<uint32_t>(SyncSetOpCode) << 16) |
            (static_cast<uint32_t>(parsedCmd.syncIndicator) << 8);

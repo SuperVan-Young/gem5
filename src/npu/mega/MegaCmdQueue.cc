@@ -467,21 +467,21 @@ MegaCmdQueue::handleSyncIndicatorRequest(PacketPtr pkt)
     if (fields.opCode != 1) {
         DPRINTF(MegaCmdQueue,
                 "reject sync-indicator op=%u idx=%u (only op=1 supported)\n",
-                fields.opCode, fields.indicatorIdx);
+                fields.opCode, fields.syncIndicator);
         return false;
     }
 
-    if (fields.indicatorIdx >= numSyncIndicator) {
+    if (fields.syncIndicator >= numSyncIndicator) {
         DPRINTF(MegaCmdQueue,
                 "reject sync-indicator idx=%u out of range [0, %u)\n",
-                fields.indicatorIdx, numSyncIndicator);
+                fields.syncIndicator, numSyncIndicator);
         return false;
     }
 
-    syncIndicatorTable[fields.indicatorIdx] = 1;
+    syncIndicatorTable[fields.syncIndicator] = 1;
     DPRINTF(MegaCmdQueue,
             "sync-indicator set idx=%u (device_type=%u device_id=%u)\n",
-            fields.indicatorIdx, fields.deviceType, fields.deviceId);
+            fields.syncIndicator, fields.deviceType, fields.deviceId);
 
     tryDispatchNext();
     return true;
@@ -510,17 +510,12 @@ MegaCmdQueue::CmdFields
 MegaCmdQueue::parseCmdFields(uint32_t word) const
 {
     CmdFields fields;
-    if (megaCmdBytes == 64) {
-        fields.deviceType = (word >> 28) & 0xF;
-        fields.deviceId = (word >> 24) & 0xF;
-        fields.opCode = (word >> 16) & 0xFF;
-        fields.indicatorIdx = (word >> 8) & 0xFF;
-    } else {
-        fields.deviceType = (word >> 24) & 0xF;
-        fields.deviceId = (word >> 20) & 0xF;
-        fields.opCode = (word >> 16) & 0xF;
-        fields.indicatorIdx = word & 0xFFFF;
-    }
+    fields.deviceType = (word >> 28) & 0xF;
+    fields.deviceId = (word >> 24) & 0xF;
+    fields.opCode = (word >> 16) & 0xFF;
+    fields.syncIndicator = (word >> 8) & 0xFF;
+    fields.setIndicatorSns = ((word >> 7) & 0x1) != 0;
+    fields.setIndicatorSnd = ((word >> 6) & 0x1) != 0;
     return fields;
 }
 
@@ -542,25 +537,25 @@ MegaCmdQueue::tryDispatchNext()
     const auto &cmd = queue.front();
     const CmdFields fields = parseCmdFields(cmd);
     if (fields.deviceType == 0x1 && fields.opCode == 0) {
-        if (fields.indicatorIdx >= numSyncIndicator) {
+        if (fields.syncIndicator >= numSyncIndicator) {
             DPRINTF(MegaCmdQueue,
                     "sync wait blocked by invalid idx=%u (table size=%u)\n",
-                    fields.indicatorIdx, numSyncIndicator);
+                    fields.syncIndicator, numSyncIndicator);
             return false;
         }
 
-        if (!syncIndicatorTable[fields.indicatorIdx]) {
+        if (!syncIndicatorTable[fields.syncIndicator]) {
             DPRINTF(MegaCmdQueue,
                     "sync wait blocked idx=%u indicator=0 queue=%llu\n",
-                    fields.indicatorIdx,
+                    fields.syncIndicator,
                     static_cast<unsigned long long>(queue.size()));
             return false;
         }
 
-        syncIndicatorTable[fields.indicatorIdx] = 0;
+        syncIndicatorTable[fields.syncIndicator] = 0;
         DPRINTF(MegaCmdQueue,
                 "sync wait released idx=%u indicator cleared\n",
-                fields.indicatorIdx);
+                fields.syncIndicator);
         popMegaCmd();
         return true;
     }
@@ -654,13 +649,6 @@ MegaCmdQueue::buildTargetAddr(const std::vector<uint8_t> &cmd) const
 uint32_t
 MegaCmdQueue::extractHeaderWord(const std::vector<uint8_t> &cmd) const
 {
-    if (megaCmdBytes == 64 && cmd.size() >= megaCmdBytes) {
-        uint32_t word = 0;
-        std::memcpy(&word, cmd.data() + (15 * sizeof(uint32_t)),
-                    sizeof(word));
-        return word;
-    }
-
     return extractCmdWord(cmd);
 }
 

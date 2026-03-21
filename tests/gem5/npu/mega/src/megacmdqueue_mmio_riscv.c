@@ -1,37 +1,37 @@
 #include <stdint.h>
 
-#define CMDQ_BASE 0x70000000UL
-#define CMD_BYTES 16UL
-#define CTRL_ADDR (CMDQ_BASE + CMD_BYTES)
+#include "cmd/common.hh"
+#include "npu_mmio.hh"
 
-static inline void
-mmio_write32(uint64_t addr, uint32_t value)
+enum MegaOpcode {
+    MEGA_OP_ENQUEUE = 0x0U,
+};
+
+static void
+launch_mega_cmd(uint32_t tag)
 {
-    *(volatile uint32_t *)addr = value;
+    NpuCmd cmd;
+
+    cmd.clear();
+    cmd.setDeviceType(NPU_DEVICE_TYPE_MEGA_CMD_QUEUE);
+    cmd.setDeviceId(0U);
+    cmd.setOpCode(MEGA_OP_ENQUEUE);
+    cmd.setSyncIndicator(0U);
+    cmd.clearCommonReservedBits();
+    cmd.setWord(1U, tag | 0x1U);
+    cmd.setWord(2U, tag | 0x2U);
+    cmd.setWord(3U, tag | 0x3U);
+    cmd.launchCmd();
 }
 
 int
 main(void)
 {
-    mmio_write32(CMDQ_BASE + 0x0, 0x1000);
-    mmio_write32(CMDQ_BASE + 0x4, 0x1001);
-    mmio_write32(CMDQ_BASE + 0x8, 0x1002);
-    mmio_write32(CMDQ_BASE + 0xC, 0x1003);
-    mmio_write32(CTRL_ADDR, 0);
+    launch_mega_cmd(0x1000U);
+    launch_mega_cmd(0x2000U);
 
-    mmio_write32(CMDQ_BASE + 0x0, 0x2000);
-    mmio_write32(CMDQ_BASE + 0x4, 0x2001);
-    mmio_write32(CMDQ_BASE + 0x8, 0x2002);
-    mmio_write32(CMDQ_BASE + 0xC, 0x2003);
-    mmio_write32(CTRL_ADDR, 0);
+    npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(NPU_CMD_PORT_BASE), 1U);
 
-    mmio_write32(CTRL_ADDR, 1);
-
-    mmio_write32(CMDQ_BASE + 0x0, 0x3000);
-    mmio_write32(CMDQ_BASE + 0x4, 0x3001);
-    mmio_write32(CMDQ_BASE + 0x8, 0x3002);
-    mmio_write32(CMDQ_BASE + 0xC, 0x3003);
-    mmio_write32(CTRL_ADDR, 0);
-
+    launch_mega_cmd(0x3000U);
     return 0;
 }

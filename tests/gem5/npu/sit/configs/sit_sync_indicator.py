@@ -63,6 +63,7 @@ system.seu = SpecializedExecutionUnit(
     sync_enqueue_on_data_write=True,
 )
 system.seu.cpu_side = system.membus.mem_side_ports
+system.seu.mem_side = system.membus.cpu_side_ports
 
 root = Root(full_system=False, system=system)
 m5.instantiate()

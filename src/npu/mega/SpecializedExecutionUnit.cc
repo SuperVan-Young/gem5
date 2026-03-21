@@ -395,14 +395,14 @@ SpecializedExecutionUnit::buildCompletionSyncWord(
     const std::vector<uint8_t> &cmd, uint32_t &word) const
 {
     const CmdFields fields = parseCmdFields(extractCmdWord(cmd));
-    if (fields.opCode != 1) {
+    if (!fields.setIndicatorSns && !fields.setIndicatorSnd) {
         return false;
     }
 
-    word = (static_cast<uint32_t>(fields.deviceType) << 24) |
-           (static_cast<uint32_t>(fields.deviceId) << 20) |
-           (static_cast<uint32_t>(fields.opCode) << 16) |
-           fields.indicatorIdx;
+    word = (static_cast<uint32_t>(0x1U) << 28) |
+           (static_cast<uint32_t>(fields.deviceId) << 24) |
+           (static_cast<uint32_t>(1U) << 16) |
+           (static_cast<uint32_t>(fields.syncIndicator) << 8);
     return true;
 }
 
@@ -437,10 +437,12 @@ SpecializedExecutionUnit::CmdFields
 SpecializedExecutionUnit::parseCmdFields(uint32_t word) const
 {
     CmdFields fields;
-    fields.deviceType = (word >> 24) & 0xF;
-    fields.deviceId = (word >> 20) & 0xF;
-    fields.opCode = (word >> 16) & 0xF;
-    fields.indicatorIdx = word & 0xFFFF;
+    fields.deviceType = (word >> 28) & 0xF;
+    fields.deviceId = (word >> 24) & 0xF;
+    fields.opCode = (word >> 16) & 0xFF;
+    fields.syncIndicator = (word >> 8) & 0xFF;
+    fields.setIndicatorSns = ((word >> 7) & 0x1) != 0;
+    fields.setIndicatorSnd = ((word >> 6) & 0x1) != 0;
     return fields;
 }
 
