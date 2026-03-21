@@ -352,4 +352,4 @@ Before writing code:
 After writing code in this repository:
 
 - add or update relevant tests,
-- run required build/test/style commands inside docker per `.claude/CLAUDE.md`.
+- run required build/test/style commands inside docker per `.agent/CLAUDE.md`.
