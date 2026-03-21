@@ -15,11 +15,15 @@ Key parts of this repo:
 
 ## Required workflow in this repo
 
-### Always use the docker environment
+### Use the docker environment only for build/test/format
 
 ```sh
 docker exec -i "${USER}.gem5" bash -lc "cd /gem5 && <command>"
 ```
+
+Use the docker environment if and only if you need to build, test, or run formatting/style checks.
+
+For other tasks, such as code search, reading files, reviewing code, or general repository inspection, do not use the docker environment.
 
 ### Build (defaults)
 
@@ -36,27 +40,19 @@ If you need SCons options/help:
 scons -h
 ```
 
-Generate `compile_commands.json` (requires SCons 4.0+):
-```sh
-scons -j32 build/RISCV/compile_commands.json
-```
-
 ### Testing (required after changes)
 
 After *each* code change, you must:
 1) Add/extend **unit tests** covering the changed behavior.
 2) **Build and run** the relevant unit tests to validate correctness.
 
-Build+run unit tests target:
-```sh
-scons -j32 build/NULL/unittests.opt
-```
-
-The repository also has a test harness under `tests/`:
+For a single test, run:
 ```sh
 cd tests
-./main.py run -j32
+./main.py run -j32 <test-folder-name> -vvv
 ```
+
+If needed, use the debug output to find the generated run directory, then inspect `simout.txt` and `simerr.txt` there to help identify the root cause.
 
 ### Formatting / style checks (required)
 
@@ -110,14 +106,3 @@ Prefer these notes when asked about writing, reviewing, or debugging gem5 tests.
 
 These rules are enforced by the commit-msg hook (`util/git-commit-msg.py`) when pre-commit is installed.
 
-## Documentation build (Sphinx)
-
-Docs live under `docs/`. Standard-library API docs are generated via the built gem5 binary.
-
-From the repository root:
-```sh
-scons -j32 build/RISCV/gem5.opt
-cd docs
-../build/RISCV/gem5.opt gem5-sphinx-apidoc -o . ../src/python/gem5 -F -e
-SPHINXBUILD="../build/RISCV/gem5.opt gem5-sphinx" make html
-```
