@@ -49,7 +49,7 @@ After *each* code change, you must:
 For a single test, run:
 ```sh
 cd tests
-./main.py run -j32 <test-folder-name> -vvv
+./main.py run -j32 --skip-build <test-folder-name> -vvv
 ```
 
 If needed, use the debug output to find the generated run directory, then inspect `simout.txt` and `simerr.txt` there to help identify the root cause.
@@ -93,8 +93,7 @@ Practical implication: adding/changing parameters commonly touches both Python a
 
 For `tests/gem5/` structure, pass/fail conventions, build/run workflow, and the recommended pattern of automated verification plus preserved artifacts for human inspection, see:
 
-- `.claude/testing_gem5_notes.md`
-- `.claude/skill/testing-gem5.md`
+- `.agent/skill/testing-gem5.md`
 
 Prefer these notes when asked about writing, reviewing, or debugging gem5 tests. Unless explicitly requested by the user, do not retain or prioritize `tests/pyunit/` guidance.
 
