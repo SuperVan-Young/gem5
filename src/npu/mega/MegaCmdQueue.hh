@@ -64,6 +64,7 @@ class MegaCmdQueue : public ClockedObject
                     MegaCmdQueue *owner);
 
         void trySendRetry();
+        void scheduleResponse();
 
       protected:
         Tick recvAtomic(PacketPtr pkt) override
@@ -128,6 +129,7 @@ class MegaCmdQueue : public ClockedObject
     const Addr rangeAddr;
     const uint32_t numSyncIndicator;
     std::vector<uint8_t> syncIndicatorTable;
+    std::vector<bool> pendingSyncDoneResponses;
 
     bool hasEnqueuedCmd;
     bool writeInFlight;
@@ -139,6 +141,7 @@ class MegaCmdQueue : public ClockedObject
     bool writeDataChunk(PortID port_id, Addr offset, PacketPtr pkt);
     bool recvTimingPushReq(PortID port_id);
     bool recvTimingPopReq();
+    bool recvTimingSyncDoneReq(PortID port_id);
     bool handleRequest(PacketPtr pkt, PortID port_id);
     bool handleSyncIndicatorRequest(PacketPtr pkt);
     void clearEnqueueGate();
@@ -151,6 +154,7 @@ class MegaCmdQueue : public ClockedObject
     AddrRangeList getCpuAddrRanges(PortID port_id) const;
     AddrRangeList getSyncIndicatorAddrRanges() const;
     void trySendRetries();
+    void tryCompleteSyncDoneResponses();
     void popMegaCmd();
 
     bool tryDispatchNext();
@@ -159,6 +163,8 @@ class MegaCmdQueue : public ClockedObject
     Addr buildTargetAddr(const std::vector<uint8_t> &cmd) const;
     void cleanupWritePacket();
     uint32_t extractHeaderWord(const std::vector<uint8_t> &cmd) const;
+    bool isDrainComplete() const;
+    bool shouldDeferCpuResponse(PortID port_id) const;
 
     CmdFields parseCmdFields(const std::vector<uint8_t> &cmd) const;
     CmdFields parseCmdFields(uint32_t word) const;

@@ -20,9 +20,7 @@ seu_base = 0x72000000
 num_cpus = 4
 num_input_port = 4
 cmd_queue_depth = 8
-poll_step_ticks = int(1e6)
-max_poll_steps = 50000
-expected_poll_exit_cause = "simulate() limit reached"
+expected_exit_cause = "exiting with last active thread context"
 
 assert num_cpus == num_input_port
 assert args.rounds > 0
@@ -89,40 +87,23 @@ for cpu_id, process in enumerate(processes):
     process.map(port_base, port_base, 2 * cmd_bytes, False)
     process.map(sync_base, sync_base, 4, False)
 
-all_done = False
-exit_cause = ""
-last_cmdq_occupancy = 0
-last_seu_occupancy = 0
-last_seu_completed = 0
-exit_cause_ok = True
-for _ in range(max_poll_steps):
-    exit_event = m5.simulate(poll_step_ticks)
-    exit_cause = exit_event.getCause()
-    last_cmdq_occupancy = system.cmdq.queueOccupancy()
-    last_seu_occupancy = system.seu.queueOccupancy()
-    last_seu_completed = system.seu.completedCmdCount()
+exit_event = m5.simulate()
+exit_cause = exit_event.getCause()
+last_cmdq_occupancy = system.cmdq.queueOccupancy()
+last_seu_occupancy = system.seu.queueOccupancy()
+last_seu_completed = system.seu.completedCmdCount()
 
-    if exit_cause != expected_poll_exit_cause:
-        exit_cause_ok = False
-        break
-
-    if (
-        last_cmdq_occupancy == 0
-        and last_seu_occupancy == 0
-        and last_seu_completed == expected_total
-    ):
-        all_done = True
-        break
-
-if all_done:
-    print("FOUR_RV_EXIT_CAUSE=drain_complete")
-else:
-    print(f"FOUR_RV_EXIT_CAUSE={exit_cause}")
-print(f"FOUR_RV_POLL_EXIT_OK={int(exit_cause_ok)}")
+print(f"FOUR_RV_EXIT_CAUSE={exit_cause}")
+print(f"FOUR_RV_EXIT_OK={int(exit_cause == expected_exit_cause)}")
 print(f"FOUR_RV_EXPECTED_TOTAL={expected_total}")
 print(f"FOUR_RV_CMDQ_OCCUPANCY={last_cmdq_occupancy}")
 print(f"FOUR_RV_SEU_OCCUPANCY={last_seu_occupancy}")
 print(f"FOUR_RV_SEU_COMPLETED={last_seu_completed}")
 
-if all_done and exit_cause_ok:
+if (
+    exit_cause == expected_exit_cause
+    and last_cmdq_occupancy == 0
+    and last_seu_occupancy == 0
+    and last_seu_completed == expected_total
+):
     print("4RV_TEST_PASS")

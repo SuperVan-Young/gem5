@@ -46,6 +46,9 @@ namespace
 
 constexpr Addr MmioBase = 0x70000000;
 constexpr Addr SyncIndicatorBase = 0x71000000;
+constexpr uint64_t CtrlPush = 0;
+constexpr uint64_t CtrlPop = 1;
+constexpr uint64_t CtrlSyncDone = 2;
 
 uint32_t
 extractCmdWord(const std::vector<uint8_t> &cmd)
@@ -90,7 +93,9 @@ MegaCmdQueue::CPUSidePort::recvTimingReq(PacketPtr pkt)
     if (pkt->needsResponse()) {
         pkt->makeResponse();
         blockedRespPacket = pkt;
-        if (!sendResponseEvent.scheduled()) {
+        const bool defer_response = !syncIndicatorPort &&
+            owner->shouldDeferCpuResponse(id);
+        if (!defer_response && !sendResponseEvent.scheduled()) {
             owner->schedule(sendResponseEvent, owner->clockEdge(Cycles(1)));
         }
     }
@@ -145,6 +150,16 @@ MegaCmdQueue::CPUSidePort::trySendRetry()
     }
 }
 
+void
+MegaCmdQueue::CPUSidePort::scheduleResponse()
+{
+    if (blockedRespPacket == nullptr || sendResponseEvent.scheduled()) {
+        return;
+    }
+
+    owner->schedule(sendResponseEvent, owner->clockEdge(Cycles(1)));
+}
+
 MegaCmdQueue::MemSidePort::MemSidePort(
     const std::string &name, MegaCmdQueue *owner)
     : RequestPort(name, owner), owner(owner)
@@ -182,6 +197,7 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
       rangeAddr(params.range_addr),
       numSyncIndicator(params.num_sync_indicator),
       syncIndicatorTable(numSyncIndicator, 0),
+      pendingSyncDoneResponses(numInputPort, false),
       hasEnqueuedCmd(false),
       writeInFlight(false),
       writeAwaitingRetry(false),
@@ -377,12 +393,39 @@ MegaCmdQueue::popMegaCmd()
     }
 
     tryDispatchNext();
+    tryCompleteSyncDoneResponses();
 }
 
 bool
 MegaCmdQueue::recvTimingPopReq()
 {
     popMegaCmd();
+    return true;
+}
+
+bool
+MegaCmdQueue::recvTimingSyncDoneReq(PortID port_id)
+{
+    panic_if(port_id >= pendingSyncDoneResponses.size(),
+             "%s: rvSyncCmdDone port %d out of range", name(), port_id);
+
+    if (pendingSyncDoneResponses[port_id]) {
+        DPRINTF(MegaCmdQueue,
+                "rvSyncCmdDone rejected: port=%d already pending\n", port_id);
+        return false;
+    }
+
+    if (isDrainComplete()) {
+        DPRINTF(MegaCmdQueue,
+                "rvSyncCmdDone immediate completion: port=%d\n", port_id);
+        return true;
+    }
+
+    pendingSyncDoneResponses[port_id] = true;
+    DPRINTF(MegaCmdQueue,
+            "rvSyncCmdDone deferred: port=%d queue=%llu inflight=%d retry=%d\n",
+            port_id, static_cast<unsigned long long>(queue.size()),
+            writeInFlight, writeAwaitingRetry);
     return true;
 }
 
@@ -424,12 +467,16 @@ MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
             port_id, pkt->getAddr(), offset,
             static_cast<unsigned long long>(ctrl));
 
-    if (ctrl == 0) {
+    if (ctrl == CtrlPush) {
         return recvTimingPushReq(port_id);
     }
 
-    if (ctrl == 1) {
+    if (ctrl == CtrlPop) {
         return recvTimingPopReq();
+    }
+
+    if (ctrl == CtrlSyncDone) {
+        return recvTimingSyncDoneReq(port_id);
     }
 
     DPRINTF(MegaCmdQueue, "reject control val=%llu\n",
@@ -442,8 +489,7 @@ MegaCmdQueue::handleSyncIndicatorRequest(PacketPtr pkt)
 {
     if (!pkt->isWrite()) {
         DPRINTF(MegaCmdQueue,
-                "reject sync-indicator non-write req cmd=%s\n",
-                pkt->cmdString());
+                "reject sync-indicator non-write req cmd=%s\n", pkt->cmdString());
         return false;
     }
 
@@ -484,6 +530,7 @@ MegaCmdQueue::handleSyncIndicatorRequest(PacketPtr pkt)
             fields.syncIndicator, fields.deviceType, fields.deviceId);
 
     tryDispatchNext();
+    tryCompleteSyncDoneResponses();
     return true;
 }
 
@@ -493,6 +540,7 @@ MegaCmdQueue::clearEnqueueGate()
     hasEnqueuedCmd = false;
     DPRINTF(MegaCmdQueue, "clear same-cycle push gate\n");
     tryDispatchNext();
+    tryCompleteSyncDoneResponses();
     trySendRetries();
 }
 
@@ -504,6 +552,40 @@ MegaCmdQueue::trySendRetries()
     }
 
     syncIndicatorSidePort.trySendRetry();
+}
+
+void
+MegaCmdQueue::tryCompleteSyncDoneResponses()
+{
+    if (!isDrainComplete()) {
+        return;
+    }
+
+    for (PortID i = 0; i < pendingSyncDoneResponses.size(); ++i) {
+        if (!pendingSyncDoneResponses[i]) {
+            continue;
+        }
+
+        pendingSyncDoneResponses[i] = false;
+        DPRINTF(MegaCmdQueue,
+                "rvSyncCmdDone completion released: port=%d\n", i);
+        cpuSidePorts[i].scheduleResponse();
+    }
+}
+
+bool
+MegaCmdQueue::isDrainComplete() const
+{
+    return queue.empty() && !writeInFlight && !writeAwaitingRetry &&
+           writePacket == nullptr;
+}
+
+bool
+MegaCmdQueue::shouldDeferCpuResponse(PortID port_id) const
+{
+    panic_if(port_id >= pendingSyncDoneResponses.size(),
+             "%s: cpu response query port %d out of range", name(), port_id);
+    return pendingSyncDoneResponses[port_id];
 }
 
 MegaCmdQueue::CmdFields
@@ -635,6 +717,7 @@ MegaCmdQueue::handleMemResponse(PacketPtr pkt)
     }
 
     tryDispatchNext();
+    tryCompleteSyncDoneResponses();
     return true;
 }
 

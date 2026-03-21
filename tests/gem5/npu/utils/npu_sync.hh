@@ -6,11 +6,24 @@
 #include "cmd/common.hh"
 
 #define NPU_SYNC_MMIO_BASE 0x71000000UL
+#define NPU_CMD_CTRL_SYNC_DONE 2U
 
 enum NpuSyncOpcode {
     NPU_SYNC_OP_WAIT = 0x0U,
     NPU_SYNC_OP_SET = 0x1U,
 };
+
+static inline void
+npu_cmd_sync_done_at(uint64_t port_base)
+{
+    npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_SYNC_DONE);
+}
+
+static inline void
+npu_cmd_sync_done(void)
+{
+    npu_cmd_sync_done_at(NPU_CMD_PORT_BASE);
+}
 
 static inline void
 npuBuildSyncWaitCmd(NpuCmd *cmd, uint32_t device_id, uint32_t sync_indicator,
