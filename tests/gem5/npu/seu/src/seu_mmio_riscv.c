@@ -34,43 +34,41 @@
  * naturally trigger timing backpressure.
  */
 
-#define SEU_BASE 0x70000000
-#define CMD_BYTES 16
+#include <stdint.h>
 
-/* Staging area: [SEU_BASE, SEU_BASE + CMD_BYTES) */
-#define STAGING_ADDR SEU_BASE
-/* Control area: [SEU_BASE + CMD_BYTES, SEU_BASE + 2*CMD_BYTES) */
-#define CONTROL_ADDR (SEU_BASE + CMD_BYTES)
+#include "cmd/common.hh"
 
-/* Volatile pointer for MMIO access */
-volatile unsigned char *seu_staging = (volatile unsigned char *)STAGING_ADDR;
-volatile unsigned int *seu_control = (volatile unsigned int *)CONTROL_ADDR;
+enum VpuOpcode {
+    VPU_OP_EXEC = 0x0U,
+};
 
-static void write_cmd_to_staging(int cmd_id)
+#define DEVICE_ID 0x0U
+#define NUM_CMDS 5
+
+static void
+launch_seu_cmd(uint32_t cmd_id)
 {
-    int i;
-    for (i = 0; i < CMD_BYTES; i++) {
-        seu_staging[i] = (unsigned char)(cmd_id + i);
-    }
+    NpuCmd cmd;
+
+    cmd.clear();
+    cmd.setDeviceType(NPU_DEVICE_TYPE_VPU);
+    cmd.setDeviceId(DEVICE_ID);
+    cmd.setOpCode(VPU_OP_EXEC);
+    cmd.setSyncIndicator(cmd_id);
+    cmd.setSetIndicatorSns(1U);
+    cmd.clearCommonReservedBits();
+    cmd.setWord(1U, 0x03020100U + cmd_id);
+    cmd.setWord(2U, 0x07060504U + cmd_id);
+    cmd.setWord(3U, 0x0B0A0908U + cmd_id);
+    cmd.launchCmd();
 }
 
-static void launch_cmd(void)
+int
+main(void)
 {
-    /* Writing 0 to control register triggers launch */
-    *seu_control = 0;
-}
-
-int main(void)
-{
-    int num_cmds = 5;
-    int i;
-
-    /* Issue multiple commands, more than queue depth (2) */
-    for (i = 0; i < num_cmds; i++) {
-        write_cmd_to_staging(i);
-        launch_cmd();
+    for (uint32_t i = 0; i < NUM_CMDS; ++i) {
+        launch_seu_cmd(i);
     }
 
-    /* CPU exits, simulation will verify completed commands */
     return 0;
 }

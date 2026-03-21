@@ -35,6 +35,8 @@ parser.add_argument("--binary", required=True)
 args = parser.parse_args()
 
 cmd_bytes = 16
+cmd_width = cmd_bytes * 8
+cmdq_base = 0x70000000
 seu_base = 0x70000000
 queue_depth = 2
 poll_step_ticks = int(1e6)
@@ -64,6 +66,16 @@ process.cmd = [binary]
 system.cpu.workload = process
 system.cpu.createThreads()
 
+system.cmdq = MegaCmdQueue(
+    num_input_port=1,
+    mega_cmd_width=cmd_width,
+    cmd_queue_depth=queue_depth,
+    base_addr=cmdq_base,
+    range_addr=0x73000000,
+    num_sync_indicator=256,
+)
+system.cmdq.sync_indicator_side = system.membus.mem_side_ports
+
 system.seu = SpecializedExecutionUnit(
     base_addr=seu_base,
     macro_cmd_bytes=cmd_bytes,
@@ -71,6 +83,7 @@ system.seu = SpecializedExecutionUnit(
     debug_process_latency="50ns",
 )
 system.seu.cpu_side = system.membus.mem_side_ports
+system.seu.mem_side = system.membus.cpu_side_ports
 
 root = Root(full_system=False, system=system)
 m5.instantiate()

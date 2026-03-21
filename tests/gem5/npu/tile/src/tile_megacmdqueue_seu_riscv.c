@@ -1,28 +1,30 @@
 #include <stdint.h>
 
-#define CMDQ_BASE 0x70000000UL
-#define CMD_BYTES 16UL
-#define CTRL_ADDR (CMDQ_BASE + CMD_BYTES)
+#include "cmd/common.hh"
 
-#define DEVICE_TYPE 0x2U
+enum VpuOpcode {
+    VPU_OP_EXEC = 0x0U,
+};
+
 #define DEVICE_ID 0x0U
 #define NUM_CMDS 6
 
 static inline void
-mmio_write32(uint64_t addr, uint32_t value)
-{
-    *(volatile uint32_t *)addr = value;
-}
-
-static inline void
 emit_command(uint32_t seq)
 {
-    uint32_t header = (DEVICE_TYPE << 24) | (DEVICE_ID << 20) | (seq & 0xFFFFF);
-    mmio_write32(CMDQ_BASE + 0x0, header);
-    mmio_write32(CMDQ_BASE + 0x4, 0xA0000000U | seq);
-    mmio_write32(CMDQ_BASE + 0x8, 0xB0000000U | seq);
-    mmio_write32(CMDQ_BASE + 0xC, 0xC0000000U | seq);
-    mmio_write32(CTRL_ADDR, 0);
+    NpuCmd cmd;
+
+    cmd.clear();
+    cmd.setDeviceType(NPU_DEVICE_TYPE_VPU);
+    cmd.setDeviceId(DEVICE_ID);
+    cmd.setOpCode(VPU_OP_EXEC);
+    cmd.setSyncIndicator(seq);
+    cmd.setSetIndicatorSns(1U);
+    cmd.clearCommonReservedBits();
+    cmd.setWord(1U, 0xA0000000U | seq);
+    cmd.setWord(2U, 0xB0000000U | seq);
+    cmd.setWord(3U, 0xC0000000U | seq);
+    cmd.launchCmd();
 }
 
 int

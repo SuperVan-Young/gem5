@@ -47,8 +47,11 @@ system.cmdq = MegaCmdQueue(
     mega_cmd_width=cmd_width,
     cmd_queue_depth=queue_depth,
     base_addr=cmdq_base,
+    range_addr=0x73000000,
+    num_sync_indicator=256,
 )
 system.cmdq.cpu_side = system.membus.mem_side_ports
+system.cmdq.sync_indicator_side = system.membus.mem_side_ports
 system.cmdq.mem_side = system.membus.cpu_side_ports
 
 system.seu = SpecializedExecutionUnit(
@@ -59,6 +62,7 @@ system.seu = SpecializedExecutionUnit(
     sync_enqueue_on_data_write=True,
 )
 system.seu.cpu_side = system.membus.mem_side_ports
+system.seu.mem_side = system.membus.cpu_side_ports
 
 root = Root(full_system=False, system=system)
 m5.instantiate()
