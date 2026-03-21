@@ -68,7 +68,6 @@ main(int argc, char **argv)
         (void)jitter;
     }
 
-    for (;;) {
-        asm volatile("" ::: "memory");
-    }
+    npu_cmd_sync_done_at(port_base);
+    return 0;
 }

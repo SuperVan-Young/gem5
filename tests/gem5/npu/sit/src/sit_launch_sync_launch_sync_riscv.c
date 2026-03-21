@@ -41,7 +41,6 @@ main(void)
     npu_launch_sync_wait(DEVICE_ID, SYNC_IDX1, 0xB0020001U, 0xB0020002U,
                          0xB0020003U);
 
-    for (;;) {
-        asm volatile("" ::: "memory");
-    }
+    npu_cmd_sync_done();
+    return 0;
 }

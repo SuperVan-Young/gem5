@@ -15,6 +15,8 @@
 #define NPU_CMD_LAUNCH_WORDS 4U
 #define NPU_CMD_LAUNCH_BYTES (NPU_CMD_LAUNCH_WORDS * sizeof(uint32_t))
 #define NPU_CMD_CTRL_ADDR(port_base) ((port_base) + NPU_CMD_LAUNCH_BYTES)
+#define NPU_CMD_CTRL_PUSH 0U
+#define NPU_CMD_CTRL_POP 1U
 
 enum NpuDeviceType {
     NPU_DEVICE_TYPE_MEGA_CMD_QUEUE = 0x0U,
@@ -125,7 +127,7 @@ class NpuCmd
     void launchCmdWordsAt(unsigned word_count, uint64_t port_base) const
     {
         npu_mmio_write32(port_base, words, word_count);
-        npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), 0U);
+        npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_PUSH);
     }
 
     void launchCmdAt(uint64_t port_base) const

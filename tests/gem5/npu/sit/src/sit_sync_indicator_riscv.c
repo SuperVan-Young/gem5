@@ -31,8 +31,6 @@ main(void)
     cmd.launchCmd();
 
     npu_sync_signal_set(DEVICE_ID, SYNC_INDEX);
-
-    for (;;) {
-        asm volatile("" ::: "memory");
-    }
+    npu_cmd_sync_done();
+    return 0;
 }
