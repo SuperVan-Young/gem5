@@ -31,8 +31,6 @@ from pathlib import Path
 
 import m5
 
-from m5.objects import AddrRange
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
 args = parser.parse_args()
@@ -47,13 +45,13 @@ expected_exit_cause = "exiting with last active thread context"
 
 binary = os.path.abspath(args.binary)
 
-builder = NPUTestSystemBuilder(mem_ranges=[AddrRange("512MiB")])
+builder = NPUTestSystemBuilder()
 builder.build_base_system()
 builder.add_default_physmem()
 builder.add_cpu()
 builder.set_workload(binary)
 builder.add_spm()
-builder.instantiate_root(full_system=False)
+builder.instantiate_root()
 m5.instantiate()
 
 builder.map_spm()

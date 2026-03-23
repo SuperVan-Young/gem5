@@ -39,74 +39,38 @@ sys.path.append(str(Path(__file__).resolve().parents[2] / "configs"))
 
 from npu_test_system import NPUTestSystemBuilder
 
-cmd_bytes = 16
-cmd_width = cmd_bytes * 8
-cmdq_base = 0x70000000
-seu_base = 0x72000000
-queue_depth = 2
-poll_step_ticks = int(1e6)
-max_poll_steps = 50000
-expected_poll_exit_cause = "simulate() limit reached"
 expected_completed_cmds = 5
+expected_exit_cause = "exiting with last active thread context"
 
 binary = os.path.abspath(args.binary)
 builder = NPUTestSystemBuilder()
-system = builder.build_base_system()
+builder.build_base_system()
 builder.add_default_physmem()
 builder.add_cpu(cpu_id=0)
-process = builder.set_workload(binary, cpu_id=0)
-builder.add_megacmdqueue(
-    num_input_port=1,
-    mega_cmd_width=cmd_width,
-    cmd_queue_depth=queue_depth,
-    base_addr=cmdq_base,
-    range_addr=0x73000000,
-    num_sync_indicator=256,
-)
-builder.add_seu(
-    base_addr=seu_base,
-    macro_cmd_bytes=cmd_bytes,
-    cmd_queue_depth=queue_depth,
-    debug_process_latency="50ns",
-    sync_enqueue_on_data_write=True,
-)
+builder.set_workload(binary, cpu_id=0)
+builder.add_megacmdqueue()
+builder.add_seu()
 builder.instantiate_root()
 m5.instantiate()
 
-process.map(cmdq_base, cmdq_base, 2 * cmd_bytes, False)
-process.map(seu_base, seu_base, 2 * cmd_bytes, False)
+builder.map_cmdq()
+builder.map_seu()
 
-all_done = False
-exit_cause = ""
-final_occupancy = 0
-completed_cmds = 0
-issue_busy = False
-exit_cause_ok = True
+exit_event = m5.simulate()
+exit_cause = exit_event.getCause()
+final_occupancy = builder.system.seu.queueOccupancy()
+completed_cmds = builder.system.seu.completedCmdCount()
+issue_busy = builder.system.seu.isIssueBusy()
 
-for _ in range(max_poll_steps):
-    exit_event = m5.simulate(poll_step_ticks)
-    exit_cause = exit_event.getCause()
-
-    if exit_cause != expected_poll_exit_cause:
-        exit_cause_ok = False
-        break
-
-    final_occupancy = system.seu.queueOccupancy()
-    completed_cmds = system.seu.completedCmdCount()
-    issue_busy = system.seu.isIssueBusy()
-
-    if completed_cmds >= expected_completed_cmds:
-        all_done = True
-        break
-
-if all_done:
-    print("SEU_EXIT_CAUSE=drain_complete")
-else:
-    print(f"SEU_EXIT_CAUSE={exit_cause}")
-print(f"SEU_POLL_EXIT_OK={int(exit_cause_ok)}")
+print(f"SEU_EXIT_CAUSE={exit_cause}")
 print(f"SEU_COMPLETED_CMDS={completed_cmds}")
 print(f"SEU_FINAL_OCCUPANCY={final_occupancy}")
 print(f"SEU_ISSUE_BUSY={issue_busy}")
 
-if all_done and exit_cause_ok:
+if (
+    exit_cause == expected_exit_cause
+    and completed_cmds == expected_completed_cmds
+    and final_occupancy == 0
+    and not issue_busy
+):
     print("SEU_TEST_PASS")

@@ -17,14 +17,9 @@ parser.add_argument("--binary", required=True)
 parser.add_argument("--rounds", type=int, default=64)
 args = parser.parse_args()
 
-cmd_width = 128
-cmd_bytes = cmd_width // 8
 num_cpus = 4
-num_input_port = 4
-cmd_queue_depth = 8
 expected_exit_cause = "exiting with last active thread context"
 
-assert num_cpus == num_input_port
 assert args.rounds > 0
 expected_total = num_cpus * args.rounds
 
@@ -40,19 +35,9 @@ builder.set_workloads(
     pid_base=100,
 )
 builder.add_megacmdqueue(
-    num_input_port=num_input_port,
-    mega_cmd_width=cmd_width,
-    cmd_queue_depth=cmd_queue_depth,
-    range_addr=builder.addr_map.cmdq_range_base,
-    num_sync_indicator=256,
+    num_input_port=num_cpus,
 )
-builder.add_seu(
-    base_addr=builder.addr_map.seu_base,
-    macro_cmd_bytes=cmd_bytes,
-    cmd_queue_depth=cmd_queue_depth,
-    debug_process_latency="50ns",
-    sync_enqueue_on_data_write=True,
-)
+builder.add_seu()
 builder.instantiate_root(full_system=False)
 m5.instantiate()
 
