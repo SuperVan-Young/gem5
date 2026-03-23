@@ -44,6 +44,10 @@ enum VpuOpcode {
 
 #define DEVICE_ID 0x0U
 #define NUM_CMDS 5
+#define SEU_CMD_READ_MASK 0x00000000U
+#define SEU_CMD_WRITE_MASK 0x00000000U
+#define SEU_CMD_REPETITION 0x00000001U
+#define SEU_CMD_RESERVED 0x00000000U
 
 static void
 launch_seu_cmd(uint32_t cmd_id)
@@ -57,9 +61,10 @@ launch_seu_cmd(uint32_t cmd_id)
     cmd.setSyncIndicator(cmd_id);
     cmd.setSetIndicatorSns(1U);
     cmd.clearCommonReservedBits();
-    cmd.setWord(1U, 0x03020100U + cmd_id);
-    cmd.setWord(2U, 0x07060504U + cmd_id);
-    cmd.setWord(3U, 0x0B0A0908U + cmd_id);
+    cmd.setWord(1U, SEU_CMD_READ_MASK);
+    cmd.setWord(2U, SEU_CMD_WRITE_MASK);
+    cmd.setWord(3U, SEU_CMD_REPETITION);
+    cmd.setWord(4U, SEU_CMD_RESERVED);
     cmd.launchCmd();
 }
 
