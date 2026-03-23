@@ -15,35 +15,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
 args = parser.parse_args()
 
-cmd_width = 128
-cmd_bytes = cmd_width // 8
-queue_depth = 4
 expected_exit_cause = "exiting with last active thread context"
 
 builder = NPUTestSystemBuilder()
-system = builder.build_base_system()
+builder.build_base_system()
 builder.add_default_physmem()
 builder.add_cpu(cpu_id=0)
 
 binary = os.path.abspath(args.binary)
 builder.set_workload(binary)
 
-builder.add_megacmdqueue(
-    num_input_port=1,
-    mega_cmd_width=cmd_width,
-    cmd_queue_depth=queue_depth,
-    range_addr=0x73000000,
-    num_sync_indicator=256,
-)
-builder.add_seu(
-    base_addr=0x72000000,
-    macro_cmd_bytes=cmd_bytes,
-    cmd_queue_depth=queue_depth,
-    debug_process_latency="50ns",
-    sync_enqueue_on_data_write=True,
-)
+builder.add_megacmdqueue()
+builder.add_seu()
 
-root = builder.instantiate_root(full_system=False)
+builder.instantiate_root(full_system=False)
 m5.instantiate()
 
 builder.map_cmdq()

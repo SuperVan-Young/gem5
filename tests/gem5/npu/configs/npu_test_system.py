@@ -21,6 +21,12 @@ from m5.objects import (
     VoltageDomain,
 )
 
+DEFAULT_MEGA_CMD_WIDTH_BITS = 512
+DEFAULT_MACRO_CMD_BYTES = DEFAULT_MEGA_CMD_WIDTH_BITS // 8
+DEFAULT_CMD_QUEUE_DEPTH = 8
+DEFAULT_NUM_SYNC_INDICATOR = 256
+DEFAULT_SPM_SIZE = 64 * 1024
+
 
 @dataclass(frozen=True)
 class NPUAddressMap:
@@ -87,7 +93,7 @@ class NPUTestSystemBuilder:
     def add_spm(
         self,
         base_addr=None,
-        size=64 * 1024,
+        size=DEFAULT_SPM_SIZE,
         latency="10ns",
         bandwidth="100GiB/s",
         attr_name="spm",
@@ -153,17 +159,19 @@ class NPUTestSystemBuilder:
 
     def add_megacmdqueue(
         self,
-        num_input_port,
-        mega_cmd_width,
-        cmd_queue_depth,
+        num_input_port=1,
+        mega_cmd_width=DEFAULT_MEGA_CMD_WIDTH_BITS,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         base_addr=None,
         range_addr=None,
-        num_sync_indicator=None,
+        num_sync_indicator=DEFAULT_NUM_SYNC_INDICATOR,
         attr_name="cmdq",
     ):
         self._require_system()
         if base_addr is None:
             base_addr = self.addr_map.cmdq_base
+        if range_addr is None and num_sync_indicator is not None:
+            range_addr = self.addr_map.cmdq_range_base
 
         kwargs = {
             "num_input_port": num_input_port,
@@ -188,11 +196,11 @@ class NPUTestSystemBuilder:
 
     def add_seu(
         self,
-        macro_cmd_bytes,
-        cmd_queue_depth,
+        macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         base_addr=None,
         debug_process_latency="50ns",
-        sync_enqueue_on_data_write=False,
+        sync_enqueue_on_data_write=True,
         attr_name="seu",
     ):
         self._require_system()
@@ -213,9 +221,9 @@ class NPUTestSystemBuilder:
 
     def add_dma(
         self,
-        macro_cmd_bytes,
-        cmd_queue_depth,
-        buffer_size,
+        macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
+        buffer_size=4096,
         base_addr=None,
         sync_enqueue_on_data_write=True,
         attr_name="dma",
@@ -270,6 +278,16 @@ class NPUTestSystemBuilder:
             size=size,
             base_addr=base_addr,
         )
+
+    def map_seu(self, process=None, cpu_id=0, size=None, base_addr=None):
+        process = self._resolve_process(process, cpu_id)
+        seu = self.components["seu"]
+        macro_cmd_bytes = int(seu.macro_cmd_bytes)
+        if size is None:
+            size = 2 * macro_cmd_bytes
+        base_addr = self.addr_map.seu_base if base_addr is None else base_addr
+        process.map(base_addr, base_addr, size, False)
+        return process
 
     def map_sync(self, process=None, cpu_id=0, size=None, base_addr=None):
         process = self._resolve_process(process, cpu_id)
