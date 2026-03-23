@@ -31,6 +31,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "base/addr_range.hh"
@@ -46,6 +48,84 @@ namespace gem5
 
 class SpecializedExecutionUnit : public ClockedObject
 {
+  public:
+    enum class Phase
+    {
+        Idle,
+        Prologue,
+        LaunchingMvin,
+        WaitingMvin,
+        Executing,
+        LaunchingMvout,
+        WaitingMvout,
+        Epilogue,
+        Completing,
+    };
+
+    struct MemTxnContext
+    {
+        enum class Kind
+        {
+            Mvin,
+            Mvout,
+            SyncWrite,
+        };
+
+        PacketPtr pkt = nullptr;
+        PortID portId = InvalidPortID;
+        Kind kind = Kind::Mvin;
+        uint64_t iteration = 0;
+        uint64_t token = 0;
+        Addr addr = 0;
+        size_t size = 0;
+    };
+
+    struct MemRequestDesc
+    {
+        // Request description used by the base class to materialize packets.
+        // Subclasses should treat this as a declarative description, not as a
+        // live packet or transaction owner.
+        PortID portId = InvalidPortID;
+        MemTxnContext::Kind kind = MemTxnContext::Kind::Mvin;
+        Addr addr = 0;
+        size_t size = 0;
+        std::vector<uint8_t> data;
+        uint64_t iteration = 0;
+        uint64_t token = 0;
+    };
+
+    struct CmdFields
+    {
+        uint8_t deviceType = 0;
+        uint8_t deviceId = 0;
+        uint8_t opCode = 0;
+        uint8_t syncIndicator = 0;
+        bool setIndicatorSns = false;
+        bool setIndicatorSnd = false;
+    };
+
+    struct ActiveExecution
+    {
+        Phase phase = Phase::Idle;
+        std::vector<uint8_t> cmd;
+        CmdFields fields;
+        uint32_t readMask = 0;
+        uint32_t writeMask = 0;
+        uint32_t repetition = 0;
+        uint32_t reserved = 0;
+        uint64_t iteration = 0;
+        uint64_t completedIterations = 0;
+        uint64_t prologueCount = 0;
+        uint64_t executeCount = 0;
+        uint64_t epilogueCount = 0;
+        uint64_t completedReadRespCount = 0;
+        uint64_t completedWriteRespCount = 0;
+        std::vector<PortID> readPorts;
+        std::vector<PortID> writePorts;
+        std::unordered_map<PortID, std::vector<uint8_t>> readResults;
+        std::unordered_map<PortID, std::vector<uint8_t>> writeResults;
+    };
+
   private:
     class CPUSidePort : public ResponsePort
     {
@@ -91,6 +171,7 @@ class SpecializedExecutionUnit : public ClockedObject
         MemSidePort(const std::string &name, SpecializedExecutionUnit *owner);
 
         void sendPacket(PacketPtr pkt);
+        PortID portId = InvalidPortID;
 
       protected:
         bool recvTimingResp(PacketPtr pkt) override;
@@ -103,16 +184,74 @@ class SpecializedExecutionUnit : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
-    struct CmdFields
-    {
-        uint8_t deviceType;
-        uint8_t deviceId;
-        uint8_t opCode;
-        uint8_t syncIndicator;
-        bool setIndicatorSns;
-        bool setIndicatorSnd;
-    };
+  public:
+    // Port-aware buffer helpers for subclasses. The base class materializes
+    // packets, selects the port, and tracks the transaction lifecycle.
+    bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer,
+                           PortID port_id);
+    bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer,
+                            PortID port_id);
 
+    uint64_t queueOccupancy() const;
+    uint64_t completedCmdCount() const;
+    bool isIssueBusy() const;
+    uint64_t completedReadRespCount() const;
+    uint64_t completedWriteRespCount() const;
+    uint64_t completedIterationCount() const;
+    uint64_t prologueCount() const;
+    uint64_t executeCount() const;
+    uint64_t epilogueCount() const;
+
+    virtual void onCommandBegin(ActiveExecution &exec) { (void)exec; }
+    virtual void prologue(ActiveExecution &exec) { (void)exec; }
+    virtual void buildMvinRequests(ActiveExecution &exec,
+                                   std::vector<MemRequestDesc> &reqs)
+    {
+        (void)exec;
+        (void)reqs;
+    }
+    virtual void onMvinResponse(ActiveExecution &exec,
+                                const MemTxnContext &txn,
+                                PacketPtr pkt)
+    {
+        (void)exec;
+        (void)txn;
+        (void)pkt;
+    }
+    virtual Tick execute(ActiveExecution &exec)
+    {
+        (void)exec;
+        return debugProcessLatency;
+    }
+    virtual void buildMvoutRequests(ActiveExecution &exec,
+                                    std::vector<MemRequestDesc> &reqs)
+    {
+        (void)exec;
+        (void)reqs;
+    }
+    virtual void onMvoutResponse(ActiveExecution &exec,
+                                 const MemTxnContext &txn,
+                                 PacketPtr pkt)
+    {
+        (void)exec;
+        (void)txn;
+        (void)pkt;
+    }
+    virtual void epilogue(ActiveExecution &exec) { (void)exec; }
+    virtual bool shouldExit(const ActiveExecution &exec) const
+    {
+        return exec.repetition == 0 ||
+               exec.completedIterations >= exec.repetition;
+    }
+
+  protected:
+    // Compatibility entry point; completion sync defaults to port 0.
+    virtual void sendCompletionSyncWord(uint32_t word);
+    virtual bool handleMemResponse(PacketPtr pkt);
+    virtual bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
+                                         uint32_t &word) const;
+
+  protected:
     bool validMmioOffset(Addr offset, size_t size) const;
     bool writeDataBytes(Addr offset, const uint8_t *src, size_t size);
     bool writeDataChunk(Addr offset, PacketPtr pkt);
@@ -126,7 +265,6 @@ class SpecializedExecutionUnit : public ClockedObject
 
     AddrRangeList getAddrRanges() const;
 
-  protected:
     CPUSidePort cpuSidePort;
     MemSidePort memSidePort;
     StagingBuffer stagingBuffer;
@@ -140,23 +278,42 @@ class SpecializedExecutionUnit : public ClockedObject
 
     bool issueCmdBusy;
     uint64_t completedCount;
+    std::vector<std::unique_ptr<MemSidePort>> memSidePorts;
     PacketPtr activeMemPacket;
     std::vector<uint8_t> activeCmd;
+    ActiveExecution activeExecution;
+    std::unordered_map<PacketPtr, MemTxnContext> activeMemTxns;
+    uint64_t nextMemTxnToken = 0;
 
     EventFunctionWrapper issueEvent;
     EventFunctionWrapper finishExecutionEvent;
 
+    // Legacy path retained for compatibility; prefer the port-aware buffer
+    // helpers above.
     virtual void startExecuteCommand(const std::vector<uint8_t> &cmd);
-    virtual bool handleMemResponse(PacketPtr pkt);
-    virtual bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
-                                         uint32_t &word) const;
-    virtual void sendCompletionSyncWord(uint32_t word);
+    void sendCompletionSyncWord(uint32_t word, PortID port_id);
 
     void finishExecution();
     Tick process(const std::vector<uint8_t> &cmd);
     void completeActiveCommand();
     void sendMemRequest(PacketPtr pkt);
+    void sendMemRequest(PacketPtr pkt, PortID port_id);
+    bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer);
+    bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer);
     void cleanupActiveMemPacket();
+    MemSidePort &getMemSidePort(PortID idx);
+    const MemSidePort &getMemSidePort(PortID idx) const;
+    void beginActiveCommand(ActiveExecution &exec);
+    void advanceActivePhase(ActiveExecution &exec);
+    void runProloguePhase(ActiveExecution &exec);
+    void launchMvinPhase(ActiveExecution &exec);
+    bool handleMvinResponseInternal(ActiveExecution &exec, PacketPtr pkt);
+    void scheduleExecutePhase(ActiveExecution &exec);
+    void finishExecutePhase(ActiveExecution &exec);
+    void launchMvoutPhase(ActiveExecution &exec);
+    bool handleMvoutResponseInternal(ActiveExecution &exec, PacketPtr pkt);
+    void runEpiloguePhase(ActiveExecution &exec);
+    void finalizeActiveCommand(ActiveExecution &exec);
 
   public:
     SpecializedExecutionUnit(const SpecializedExecutionUnitParams &params);
@@ -168,12 +325,6 @@ class SpecializedExecutionUnit : public ClockedObject
                   PortID idx = InvalidPortID) override;
 
     void setDebugProcessLatency(Tick latency);
-    bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer);
-    bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer);
-
-    uint64_t queueOccupancy() const;
-    uint64_t completedCmdCount() const;
-    bool isIssueBusy() const;
 };
 
 } // namespace gem5

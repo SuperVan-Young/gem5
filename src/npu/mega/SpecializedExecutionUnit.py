@@ -12,11 +12,14 @@ class SpecializedExecutionUnit(ClockedObject):
     cxx_class = "gem5::SpecializedExecutionUnit"
 
     cpu_side = ResponsePort("CPU-side MMIO request input port")
-    mem_side = RequestPort("Memory-side active request port")
+    mem_side = VectorRequestPort("Memory-side active request ports")
 
     base_addr = Param.Addr(0x70000000, "SEU MMIO base address")
     macro_cmd_bytes = Param.Unsigned(16, "Macro command size in bytes")
     cmd_queue_depth = Param.Unsigned(4, "Internal command queue depth")
+    num_mem_side_ports = Param.Unsigned(
+        1, "Number of memory-side request ports"
+    )
     debug_process_latency = Param.Latency(
         "100ns", "Fixed execution latency returned by the debug process path"
     )
@@ -28,6 +31,12 @@ class SpecializedExecutionUnit(ClockedObject):
     cxx_exports = [
         PyBindMethod("queueOccupancy"),
         PyBindMethod("completedCmdCount"),
+        PyBindMethod("completedReadRespCount"),
+        PyBindMethod("completedWriteRespCount"),
+        PyBindMethod("completedIterationCount"),
+        PyBindMethod("prologueCount"),
+        PyBindMethod("executeCount"),
+        PyBindMethod("epilogueCount"),
         PyBindMethod("isIssueBusy"),
         PyBindMethod("setDebugProcessLatency"),
     ]

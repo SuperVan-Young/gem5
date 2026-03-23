@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from m5.objects import (
     AddrRange,
-    DmaUnit,
     MegaCmdQueue,
     Process,
     RiscvTimingSimpleCPU,
@@ -20,6 +19,11 @@ from m5.objects import (
     SystemXBar,
     VoltageDomain,
 )
+
+try:
+    from m5.objects import DmaUnit
+except ImportError:
+    DmaUnit = None
 
 DEFAULT_MEGA_CMD_WIDTH_BITS = 512
 DEFAULT_MACRO_CMD_BYTES = DEFAULT_MEGA_CMD_WIDTH_BITS // 8
@@ -198,6 +202,7 @@ class NPUTestSystemBuilder:
         self,
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
+        num_mem_side_ports=1,
         base_addr=None,
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
@@ -210,11 +215,13 @@ class NPUTestSystemBuilder:
             base_addr=base_addr,
             macro_cmd_bytes=macro_cmd_bytes,
             cmd_queue_depth=cmd_queue_depth,
+            num_mem_side_ports=num_mem_side_ports,
             debug_process_latency=debug_process_latency,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
         )
         seu.cpu_side = self.system.membus.mem_side_ports
-        seu.mem_side = self.system.membus.cpu_side_ports
+        for _ in range(num_mem_side_ports):
+            seu.mem_side = self.system.membus.cpu_side_ports
         setattr(self.system, attr_name, seu)
         self.components[attr_name] = seu
         return seu
@@ -229,6 +236,10 @@ class NPUTestSystemBuilder:
         attr_name="dma",
     ):
         self._require_system()
+        if DmaUnit is None:
+            raise RuntimeError(
+                "DmaUnit is not available in the current build"
+            )
         if base_addr is None:
             base_addr = self.addr_map.dma_base
         dma = DmaUnit(
