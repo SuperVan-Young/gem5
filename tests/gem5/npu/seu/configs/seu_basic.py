@@ -26,47 +26,36 @@
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import m5
-from m5.objects import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
 args = parser.parse_args()
 
+sys.path.append(str(Path(__file__).resolve().parents[2] / "configs"))
+
+from npu_test_system import NPUTestSystemBuilder
+
 cmd_bytes = 16
 cmd_width = cmd_bytes * 8
 cmdq_base = 0x70000000
-seu_base = 0x70000000
+seu_base = 0x72000000
 queue_depth = 2
 poll_step_ticks = int(1e6)
 max_poll_steps = 50000
 expected_poll_exit_cause = "simulate() limit reached"
 expected_completed_cmds = 5
 
-system = System(
-    mem_mode="timing",
-    mem_ranges=[AddrRange("512MiB")],
-    membus=SystemXBar(),
-    physmem=SimpleMemory(range=AddrRange("512MiB")),
-    clk_domain=SrcClockDomain(clock="1GHz", voltage_domain=VoltageDomain()),
-)
-system.system_port = system.membus.cpu_side_ports
-system.physmem.port = system.membus.mem_side_ports
-
-system.cpu = RiscvTimingSimpleCPU(cpu_id=0)
-system.cpu.icache_port = system.membus.cpu_side_ports
-system.cpu.dcache_port = system.membus.cpu_side_ports
-system.cpu.createInterruptController()
-
 binary = os.path.abspath(args.binary)
-system.workload = SEWorkload.init_compatible(binary)
-process = Process(executable=binary)
-process.cmd = [binary]
-system.cpu.workload = process
-system.cpu.createThreads()
-
-system.cmdq = MegaCmdQueue(
+builder = NPUTestSystemBuilder()
+system = builder.build_base_system()
+builder.add_default_physmem()
+builder.add_cpu(cpu_id=0)
+process = builder.set_workload(binary, cpu_id=0)
+builder.add_megacmdqueue(
     num_input_port=1,
     mega_cmd_width=cmd_width,
     cmd_queue_depth=queue_depth,
@@ -74,20 +63,17 @@ system.cmdq = MegaCmdQueue(
     range_addr=0x73000000,
     num_sync_indicator=256,
 )
-system.cmdq.sync_indicator_side = system.membus.mem_side_ports
-
-system.seu = SpecializedExecutionUnit(
+builder.add_seu(
     base_addr=seu_base,
     macro_cmd_bytes=cmd_bytes,
     cmd_queue_depth=queue_depth,
     debug_process_latency="50ns",
+    sync_enqueue_on_data_write=True,
 )
-system.seu.cpu_side = system.membus.mem_side_ports
-system.seu.mem_side = system.membus.cpu_side_ports
-
-root = Root(full_system=False, system=system)
+builder.instantiate_root()
 m5.instantiate()
 
+process.map(cmdq_base, cmdq_base, 2 * cmd_bytes, False)
 process.map(seu_base, seu_base, 2 * cmd_bytes, False)
 
 all_done = False

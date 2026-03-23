@@ -3,9 +3,14 @@
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import m5
-from m5.objects import *
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "configs"))
+
+from npu_test_system import NPUTestSystemBuilder
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
@@ -14,9 +19,6 @@ args = parser.parse_args()
 
 cmd_width = 128
 cmd_bytes = cmd_width // 8
-cmdq_base = 0x70000000
-sync_base = 0x71000000
-seu_base = 0x72000000
 num_cpus = 4
 num_input_port = 4
 cmd_queue_depth = 8
@@ -26,66 +28,38 @@ assert num_cpus == num_input_port
 assert args.rounds > 0
 expected_total = num_cpus * args.rounds
 
-system = System(
-    mem_mode="timing",
-    mem_ranges=[AddrRange("512MiB")],
-    membus=SystemXBar(),
-    physmem=SimpleMemory(range=AddrRange("512MiB")),
-    clk_domain=SrcClockDomain(clock="1GHz", voltage_domain=VoltageDomain()),
-)
-system.system_port = system.membus.cpu_side_ports
-system.physmem.port = system.membus.mem_side_ports
-
-cpus = [RiscvTimingSimpleCPU(cpu_id=i) for i in range(num_cpus)]
-for cpu in cpus:
-    cpu.icache_port = system.membus.cpu_side_ports
-    cpu.dcache_port = system.membus.cpu_side_ports
-    cpu.createInterruptController()
-
-system.cpu = cpus
-
 binary = os.path.abspath(args.binary)
-system.workload = SEWorkload.init_compatible(binary)
-processes = []
 
-for cpu_id, cpu in enumerate(cpus):
-    process = Process(executable=binary)
-    process.pid = 100 + cpu_id
-    process.cmd = [binary, str(cpu_id), str(args.rounds)]
-    cpu.workload = process
-    cpu.createThreads()
-    processes.append(process)
-
-system.cmdq = MegaCmdQueue(
+builder = NPUTestSystemBuilder()
+system = builder.build_base_system()
+builder.add_default_physmem()
+builder.add_cpus(num_cpus)
+builder.set_workloads(
+    binary,
+    lambda cpu_id: (cpu_id, args.rounds),
+    pid_base=100,
+)
+builder.add_megacmdqueue(
     num_input_port=num_input_port,
     mega_cmd_width=cmd_width,
     cmd_queue_depth=cmd_queue_depth,
-    base_addr=cmdq_base,
-    range_addr=0x73000000,
+    range_addr=builder.addr_map.cmdq_range_base,
     num_sync_indicator=256,
 )
-for _ in range(num_input_port):
-    system.cmdq.cpu_side = system.membus.mem_side_ports
-system.cmdq.sync_indicator_side = system.membus.mem_side_ports
-system.cmdq.mem_side = system.membus.cpu_side_ports
-
-system.seu = SpecializedExecutionUnit(
-    base_addr=seu_base,
+builder.add_seu(
+    base_addr=builder.addr_map.seu_base,
     macro_cmd_bytes=cmd_bytes,
     cmd_queue_depth=cmd_queue_depth,
     debug_process_latency="50ns",
     sync_enqueue_on_data_write=True,
 )
-system.seu.cpu_side = system.membus.mem_side_ports
-system.seu.mem_side = system.membus.cpu_side_ports
-
-root = Root(full_system=False, system=system)
+builder.instantiate_root(full_system=False)
 m5.instantiate()
 
-for cpu_id, process in enumerate(processes):
-    port_base = cmdq_base + (cpu_id << 20)
-    process.map(port_base, port_base, 2 * cmd_bytes, False)
-    process.map(sync_base, sync_base, 4, False)
+for cpu_id in range(num_cpus):
+    process = builder.get_process(cpu_id)
+    builder.map_cmdq_port(cpu_id, process=process)
+    builder.map_sync(process=process, base_addr=builder.addr_map.sync_base)
 
 exit_event = m5.simulate()
 exit_cause = exit_event.getCause()

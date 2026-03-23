@@ -26,54 +26,37 @@
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import m5
-from m5.objects import *
+
+from m5.objects import AddrRange
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
 args = parser.parse_args()
 
-spm_base = 0x60000000
-spm_size = 64 * 1024  # 64KB for testing
+config_dir = Path(__file__).resolve().parent
+sys.path.append(str(config_dir.parent.parent / "configs"))
+
+from npu_test_system import NPUTestSystemBuilder
+
 expected_exit_code = 0
 expected_exit_cause = "exiting with last active thread context"
 
-system = System(
-    mem_mode="timing",
-    mem_ranges=[AddrRange("512MiB")],
-    membus=SystemXBar(),
-    physmem=SimpleMemory(range=AddrRange("512MiB")),
-    clk_domain=SrcClockDomain(clock="1GHz", voltage_domain=VoltageDomain()),
-)
-system.system_port = system.membus.cpu_side_ports
-system.physmem.port = system.membus.mem_side_ports
-
-system.cpu = RiscvTimingSimpleCPU(cpu_id=0)
-system.cpu.icache_port = system.membus.cpu_side_ports
-system.cpu.dcache_port = system.membus.cpu_side_ports
-system.cpu.createInterruptController()
-
 binary = os.path.abspath(args.binary)
-system.workload = SEWorkload.init_compatible(binary)
-process = Process(executable=binary)
-process.cmd = [binary]
-system.cpu.workload = process
-system.cpu.createThreads()
 
-# Create Scratchpad Memory
-system.spm = ScratchpadMemory(
-    range=AddrRange(spm_base, size=spm_size),
-    latency="10ns",
-    bandwidth="100GiB/s",
-)
-system.spm.port = system.membus.mem_side_ports
-
-root = Root(full_system=False, system=system)
+builder = NPUTestSystemBuilder(mem_ranges=[AddrRange("512MiB")])
+builder.build_base_system()
+builder.add_default_physmem()
+builder.add_cpu()
+builder.set_workload(binary)
+builder.add_spm()
+builder.instantiate_root(full_system=False)
 m5.instantiate()
 
-# Map SPM address range into process address space
-process.map(spm_base, spm_base, spm_size, False)
+builder.map_spm()
 
 exit_event = m5.simulate()
 exit_cause = exit_event.getCause()

@@ -3,9 +3,16 @@
 
 import argparse
 import os
+import sys
+from pathlib import Path
 
 import m5
-from m5.objects import *
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "configs")
+)
+
+from npu_test_system import NPUTestSystemBuilder
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
@@ -17,44 +24,28 @@ cmd_bytes = cmd_width // 8
 expected_exit_cause = "exiting with last active thread context"
 expected_final_occupancy = 2
 
-system = System(
-    mem_mode="timing",
-    mem_ranges=[AddrRange("512MiB")],
-    membus=SystemXBar(),
-    physmem=SimpleMemory(range=AddrRange("512MiB")),
-    clk_domain=SrcClockDomain(clock="1GHz", voltage_domain=VoltageDomain()),
-)
-system.system_port = system.membus.cpu_side_ports
-system.physmem.port = system.membus.mem_side_ports
-
-system.cpu = RiscvTimingSimpleCPU(cpu_id=0)
-system.cpu.icache_port = system.membus.cpu_side_ports
-system.cpu.dcache_port = system.membus.cpu_side_ports
-system.cpu.createInterruptController()
-
 binary = os.path.abspath(args.binary)
-system.workload = SEWorkload.init_compatible(binary)
-process = Process(executable=binary)
-process.cmd = [binary]
-system.cpu.workload = process
-system.cpu.createThreads()
 
-system.cmdq = MegaCmdQueue(
+builder = NPUTestSystemBuilder()
+builder.build_base_system()
+builder.add_default_physmem()
+builder.add_cpu(cpu_id=0)
+process = builder.set_workload(binary)
+builder.add_megacmdqueue(
     num_input_port=1,
     mega_cmd_width=cmd_width,
     cmd_queue_depth=2,
     base_addr=cmdq_base,
 )
-system.cmdq.cpu_side = system.membus.mem_side_ports
 
-root = Root(full_system=False, system=system)
+builder.instantiate_root()
 m5.instantiate()
 
-process.map(cmdq_base, cmdq_base, 2 * cmd_bytes, False)
+builder.map_cmdq(process=process, size=2 * cmd_bytes, base_addr=cmdq_base)
 
 exit_event = m5.simulate()
 exit_cause = exit_event.getCause()
-final_occupancy = system.cmdq.queueOccupancy()
+final_occupancy = builder.system.cmdq.queueOccupancy()
 
 print(f"MEGACMDQUEUE_EXIT_CAUSE={exit_cause}")
 print(f"MEGACMDQUEUE_FINAL_OCCUPANCY={final_occupancy}")
