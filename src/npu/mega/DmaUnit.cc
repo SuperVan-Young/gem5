@@ -124,11 +124,13 @@ DmaUnit::validateParsedCommand(const ParsedCmd &cmd) const
     validateBaseAddress(cmd.dstBaseAddr, destSpace(), "destination");
 
     if (cmd.srcK > 0) {
-        panic_if(cmd.shapeW % cmd.srcK != 0,
+        const bool invalidSourceBlockedK = (cmd.shapeW % cmd.srcK) != 0;
+        panic_if(invalidSourceBlockedK,
                  "DmaUnit: source blocked layout requires W %% k == 0");
     }
     if (cmd.dstK > 0) {
-        panic_if(cmd.shapeW % cmd.dstK != 0,
+        const bool invalidDestBlockedK = (cmd.shapeW % cmd.dstK) != 0;
+        panic_if(invalidDestBlockedK,
                  "DmaUnit: destination blocked layout requires W %% k == 0");
     }
 }

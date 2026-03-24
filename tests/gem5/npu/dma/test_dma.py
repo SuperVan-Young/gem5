@@ -57,6 +57,10 @@ add_dma_test(
     "basic_spm_to_dram",
     r"DMA_SCENARIO_PASS=basic_spm_to_dram",
 )
+add_dma_test("dma_spm_to_spm", "spm_to_spm", r"DMA_SCENARIO_PASS=spm_to_spm")
+add_dma_test(
+    "dma_dram_to_dram", "dram_to_dram", r"DMA_SCENARIO_PASS=dram_to_dram"
+)
 add_dma_test(
     "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
 )
@@ -85,7 +89,7 @@ add_dma_test(
 )
 
 
-def run_expected_invalid_address(params):
+def run_expected_dma_panic(params, scenario):
     fixtures = params.fixtures
     tempdir = fixtures[constants.tempdir_fixture_name].path
     gem5 = fixtures[constants.gem5_binary_fixture_name].path
@@ -100,7 +104,7 @@ def run_expected_invalid_address(params):
         "--binary",
         str(binary),
         "--scenario",
-        "invalid_address",
+        scenario,
     ]
 
     try:
@@ -115,26 +119,57 @@ def run_expected_invalid_address(params):
         return
 
     raise AssertionError(
-        "Expected invalid_address scenario to terminate gem5 with a panic"
+        f"Expected {scenario} scenario to terminate gem5 with a panic"
     )
 
 
-for host in constants.supported_hosts:
-    for opt in constants.supported_variants:
-        for isa in (constants.riscv_tag,):
-            name = f"dma_invalid_address-{isa}-{host}-{opt}"
-            tempdir = TempdirFixture()
-            tests = [
-                TestFunction(run_expected_invalid_address, name=name),
-                verifier.MatchRegex(
-                    re.compile(r".*DmaUnit: invalid source base address.*"),
-                    match_stderr=True,
-                    match_stdout=False,
-                ).instantiate_test(name),
-            ]
-            TestSuite(
-                name=name,
-                fixtures=[build_fixture, Gem5Fixture(isa, opt, None), tempdir],
-                tags=[isa, opt, constants.quick_tag, host],
-                tests=tests,
-            )
+def add_dma_panic_test(name, scenario, stderr_regex):
+    for host in constants.supported_hosts:
+        for opt in constants.supported_variants:
+            for isa in (constants.riscv_tag,):
+                suite_name = f"{name}-{isa}-{host}-{opt}"
+                tempdir = TempdirFixture()
+
+                def runner(params, scenario=scenario):
+                    run_expected_dma_panic(params, scenario)
+
+                tests = [
+                    TestFunction(runner, name=suite_name),
+                    verifier.MatchRegex(
+                        re.compile(stderr_regex),
+                        match_stderr=True,
+                        match_stdout=False,
+                    ).instantiate_test(suite_name),
+                ]
+                TestSuite(
+                    name=suite_name,
+                    fixtures=[
+                        build_fixture,
+                        Gem5Fixture(isa, opt, None),
+                        tempdir,
+                    ],
+                    tags=[isa, opt, constants.quick_tag, host],
+                    tests=tests,
+                )
+
+
+add_dma_panic_test(
+    "dma_invalid_address",
+    "invalid_address",
+    r".*DmaUnit: invalid source base address.*",
+)
+add_dma_panic_test(
+    "dma_invalid_destination_address",
+    "invalid_destination_address",
+    r".*DmaUnit: invalid destination base address.*",
+)
+add_dma_panic_test(
+    "dma_invalid_blocked_k",
+    "invalid_blocked_k",
+    r".*DmaUnit: source blocked layout requires W % k == 0.*",
+)
+add_dma_panic_test(
+    "dma_unsupported_data_type",
+    "unsupported_data_type",
+    r".*DmaUnit: unsupported data_type=1.*",
+)

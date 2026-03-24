@@ -92,11 +92,14 @@ verify_tensor(uintptr_t base, Layout layout)
 }
 
 static void
-build_dma_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
-              Layout src_layout, Layout dst_layout, uint32_t xfer_mode,
-              uint32_t sync_idx, uint32_t set_completion_sync)
+build_dma_cmd_with_data_type(NpuCmd *cmd, uintptr_t src_base,
+                             uintptr_t dst_base, Layout src_layout,
+                             Layout dst_layout, uint32_t data_type,
+                             uint32_t xfer_mode, uint32_t sync_idx,
+                             uint32_t set_completion_sync)
 {
-    const uint32_t op = (0U << 5) | ((xfer_mode & 0x7U) << 2);
+    const uint32_t op =
+        ((data_type & 0x7U) << 5) | ((xfer_mode & 0x7U) << 2);
 
     cmd->clear();
     cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
@@ -121,6 +124,16 @@ build_dma_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
 }
 
 static void
+build_dma_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
+              Layout src_layout, Layout dst_layout, uint32_t xfer_mode,
+              uint32_t sync_idx, uint32_t set_completion_sync)
+{
+    build_dma_cmd_with_data_type(cmd, src_base, dst_base, src_layout,
+                                 dst_layout, 0U, xfer_mode, sync_idx,
+                                 set_completion_sync);
+}
+
+static void
 launch_dma(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
            Layout dst_layout, uint32_t xfer_mode, uint32_t sync_idx,
            uint32_t set_completion_sync)
@@ -129,6 +142,20 @@ launch_dma(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
 
     build_dma_cmd(&cmd, src_base, dst_base, src_layout, dst_layout,
                   xfer_mode, sync_idx, set_completion_sync);
+    cmd.launchCmd();
+}
+
+static void
+launch_dma_with_data_type(uintptr_t src_base, uintptr_t dst_base,
+                          Layout src_layout, Layout dst_layout,
+                          uint32_t data_type, uint32_t xfer_mode,
+                          uint32_t sync_idx, uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+
+    build_dma_cmd_with_data_type(&cmd, src_base, dst_base, src_layout,
+                                 dst_layout, data_type, xfer_mode, sync_idx,
+                                 set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -184,6 +211,29 @@ scenario_basic_spm_to_dram(void)
     launch_dma(SRC_SPM0, DST_DRAM0, layout, layout, XFER_SPM_TO_DRAM, 6, 0);
     npu_cmd_sync_done();
     return poll_until_match(DST_DRAM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_spm_to_spm(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    clear_region(DST_SPM0, layout.stride_h * layout.h);
+    fill_tensor(SRC_SPM0, layout);
+    launch_dma(SRC_SPM0, DST_SPM0, layout, layout, XFER_SPM_TO_SPM, 10, 0);
+    npu_cmd_sync_done();
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_dram_to_dram(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    clear_region(DST_DRAM1, layout.stride_h * layout.h);
+    fill_tensor(SRC_DRAM0, layout);
+    launch_dma(SRC_DRAM0, DST_DRAM1, layout, layout, XFER_DRAM_TO_DRAM,
+               13, 0);
+    npu_cmd_sync_done();
+    return poll_until_match(DST_DRAM1, layout) ? 0 : 1;
 }
 
 static int
@@ -257,6 +307,39 @@ scenario_queued_chain(void)
 }
 
 static int
+scenario_invalid_destination_address(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    launch_dma(SRC_DRAM0, 0x10000000UL, layout, layout,
+               XFER_DRAM_TO_SPM, 23, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_invalid_blocked_k(void)
+{
+    Layout src = make_layout(2, 4, 8, 3);
+    Layout dst = make_layout(2, 4, 8, 0);
+    launch_dma(SRC_DRAM0, DST_SPM0, src, dst, XFER_DRAM_TO_SPM, 24, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_unsupported_data_type(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    launch_dma_with_data_type(SRC_DRAM0, DST_SPM0, layout, layout, 1U,
+                              XFER_DRAM_TO_SPM, 25, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
 scenario_invalid_address(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
@@ -280,6 +363,12 @@ main(int argc, char **argv)
     if (strcmp(argv[1], "basic_spm_to_dram") == 0) {
         return scenario_basic_spm_to_dram();
     }
+    if (strcmp(argv[1], "spm_to_spm") == 0) {
+        return scenario_spm_to_spm();
+    }
+    if (strcmp(argv[1], "dram_to_dram") == 0) {
+        return scenario_dram_to_dram();
+    }
     if (strcmp(argv[1], "hwc_to_blocked") == 0) {
         return scenario_hwc_to_blocked();
     }
@@ -294,6 +383,15 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "queued_chain") == 0) {
         return scenario_queued_chain();
+    }
+    if (strcmp(argv[1], "invalid_destination_address") == 0) {
+        return scenario_invalid_destination_address();
+    }
+    if (strcmp(argv[1], "invalid_blocked_k") == 0) {
+        return scenario_invalid_blocked_k();
+    }
+    if (strcmp(argv[1], "unsupported_data_type") == 0) {
+        return scenario_unsupported_data_type();
     }
     if (strcmp(argv[1], "invalid_address") == 0) {
         return scenario_invalid_address();
