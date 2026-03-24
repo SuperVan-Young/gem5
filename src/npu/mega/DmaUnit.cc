@@ -30,7 +30,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <memory>
 
 #include "base/logging.hh"
 #include "base/trace.hh"
@@ -52,18 +51,18 @@ constexpr Addr SpmEnd = 0x6fffffffULL;
 DmaUnit::DmaUnit(const DmaUnitParams &params)
     : SpecializedExecutionUnit(params),
       bufferSize(params.buffer_size),
-      requestKind(RequestKind::None),
       parsedCmdValid(false),
       currentY(0),
-      currentX(0),
-      gatherIndex(0),
-      scatterIndex(0)
+      currentX(0)
 {
     fatal_if(macroCmdBytes != CacheLineBytes,
              "%s: DmaUnit requires 64-byte commands", name());
     fatal_if(bufferSize == 0 || bufferSize > MaxBufferBytes,
              "%s: DmaUnit buffer_size must be in the range [1, %zu]",
              name(), MaxBufferBytes);
+    fatal_if(memSidePorts.size() != 1,
+             "%s: DmaUnit currently supports exactly one mem_side port",
+             name());
 }
 
 uint32_t
@@ -91,19 +90,19 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
     parsed.dataType = (opCode >> 5) & 0x7;
     parsed.xferMode = (opCode >> 2) & 0x7;
     parsed.syncIndicator = (header >> 8) & 0xff;
-    parsed.srcBaseAddr = extractWord(cmd, 14);
-    parsed.dstBaseAddr = extractWord(cmd, 13);
-    parsed.shapeH = extractWord(cmd, 12);
-    parsed.shapeW = extractWord(cmd, 11);
-    parsed.shapeC = extractWord(cmd, 10);
-    parsed.srcStrideH = extractWord(cmd, 9);
-    parsed.srcStrideW = extractWord(cmd, 8);
-    parsed.srcStrideC = extractWord(cmd, 7);
-    parsed.dstStrideH = extractWord(cmd, 6);
-    parsed.dstStrideW = extractWord(cmd, 5);
-    parsed.dstStrideC = extractWord(cmd, 4);
+    parsed.srcBaseAddr = extractWord(cmd, 1);
+    parsed.dstBaseAddr = extractWord(cmd, 2);
+    parsed.shapeH = extractWord(cmd, 3);
+    parsed.shapeW = extractWord(cmd, 4);
+    parsed.shapeC = extractWord(cmd, 5);
+    parsed.srcStrideH = extractWord(cmd, 6);
+    parsed.srcStrideW = extractWord(cmd, 7);
+    parsed.srcStrideC = extractWord(cmd, 8);
+    parsed.dstStrideH = extractWord(cmd, 9);
+    parsed.dstStrideW = extractWord(cmd, 10);
+    parsed.dstStrideC = extractWord(cmd, 11);
 
-    const uint32_t blockCfg = extractWord(cmd, 3);
+    const uint32_t blockCfg = extractWord(cmd, 12);
     parsed.dstK = (blockCfg >> 16) & 0xffff;
     parsed.srcK = blockCfg & 0xffff;
 
@@ -226,18 +225,17 @@ DmaUnit::resetCommandState()
 {
     parsedCmd = ParsedCmd();
     batchPlan = BatchPlan();
-    requestKind = RequestKind::None;
     parsedCmdValid = false;
     currentY = 0;
     currentX = 0;
-    gatherIndex = 0;
-    scatterIndex = 0;
+    pendingMvinTxns.clear();
 }
 
 bool
 DmaUnit::done() const
 {
-    return !parsedCmdValid || currentY >= parsedCmd.shapeH;
+    return !parsedCmdValid || parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
+           parsedCmd.shapeC == 0 || currentY >= parsedCmd.shapeH;
 }
 
 void
@@ -300,8 +298,6 @@ DmaUnit::planCurrentBatch()
                               batchPlan.width * parsedCmd.shapeC;
     batchPlan.buffer.assign(batchBytes, 0);
     buildBatchLines();
-    gatherIndex = 0;
-    scatterIndex = 0;
 
     DPRINTF(DmaUnit,
             "Planned batch y=%u x=%u h=%u w=%u src_lines=%zu dst_lines=%zu\n",
@@ -359,176 +355,176 @@ DmaUnit::buildBatchLines()
     }
 }
 
-PacketPtr
-DmaUnit::makeReadPacket(Addr addr) const
-{
-    RequestPtr req = std::make_shared<Request>(
-        addr, CacheLineBytes, Request::Flags(), Request::funcRequestorId);
-    PacketPtr pkt = new Packet(req, MemCmd::ReadReq);
-    pkt->allocate();
-    return pkt;
-}
-
-PacketPtr
-DmaUnit::makeWritePacket(Addr addr, const uint8_t *data) const
-{
-    RequestPtr req = std::make_shared<Request>(
-        addr, CacheLineBytes, Request::Flags(), Request::funcRequestorId);
-    PacketPtr pkt = new Packet(req, MemCmd::WriteReq);
-    pkt->allocate();
-    pkt->setData(data);
-    return pkt;
-}
-
-void
-DmaUnit::issueNextGatherRead()
-{
-    if (gatherIndex >= batchPlan.sourceLines.size()) {
-        issueNextScatterRead();
-        return;
-    }
-
-    requestKind = RequestKind::GatherRead;
-    sendMemRequest(
-        makeReadPacket(batchPlan.sourceLines[gatherIndex].lineAddr));
-}
-
-void
-DmaUnit::issueNextScatterRead()
-{
-    if (scatterIndex >= batchPlan.destLines.size()) {
-        finishCurrentBatch();
-        return;
-    }
-
-    requestKind = RequestKind::ScatterDestRead;
-    sendMemRequest(makeReadPacket(batchPlan.destLines[scatterIndex].lineAddr));
-}
-
-void
-DmaUnit::issueScatterWrite()
-{
-    requestKind = RequestKind::ScatterWrite;
-    auto &line = batchPlan.destLines[scatterIndex];
-    sendMemRequest(makeWritePacket(line.lineAddr, line.lineData.data()));
-}
-
-void
-DmaUnit::handleGatherReadResponse(PacketPtr pkt)
-{
-    const auto &line = batchPlan.sourceLines[gatherIndex];
-    const uint8_t *data = pkt->getConstPtr<uint8_t>();
-    for (const auto &copy : line.copies) {
-        batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
-    }
-
-    cleanupActiveMemPacket();
-    requestKind = RequestKind::None;
-    gatherIndex += 1;
-    issueNextGatherRead();
-}
-
-void
-DmaUnit::handleScatterReadResponse(PacketPtr pkt)
-{
-    auto &line = batchPlan.destLines[scatterIndex];
-    std::memcpy(line.lineData.data(), pkt->getConstPtr<uint8_t>(),
-                CacheLineBytes);
-    for (const auto &copy : line.copies) {
-        line.lineData[copy.lineOffset] = batchPlan.buffer[copy.bufferOffset];
-    }
-
-    cleanupActiveMemPacket();
-    requestKind = RequestKind::None;
-    issueScatterWrite();
-}
-
-void
-DmaUnit::handleScatterWriteResponse(PacketPtr pkt)
-{
-    (void)pkt;
-    cleanupActiveMemPacket();
-    requestKind = RequestKind::None;
-    scatterIndex += 1;
-    issueNextScatterRead();
-}
-
-void
-DmaUnit::finishCurrentBatch()
-{
-    advanceBatchCursor();
-    if (done()) {
-        completeActiveCommand();
-        return;
-    }
-
-    planCurrentBatch();
-    issueNextGatherRead();
-}
-
 void
 DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
 {
-    resetCommandState();
-    parsedCmd = parseCommand(cmd);
-    parsedCmdValid = true;
-    validateParsedCommand(parsedCmd);
+    const uint64_t totalPrologues = activeExecution.prologueCount;
+    const uint64_t totalExecutes = activeExecution.executeCount;
+    const uint64_t totalEpilogues = activeExecution.epilogueCount;
+    const uint64_t totalReads = activeExecution.completedReadRespCount;
+    const uint64_t totalWrites = activeExecution.completedWriteRespCount;
+    const uint64_t totalIterations = activeExecution.completedIterations;
 
-    if (parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
-        parsedCmd.shapeC == 0) {
-        completeActiveCommand();
-        return;
-    }
+    activeExecution = ActiveExecution{};
+    activeExecution.cmd = cmd;
+    activeExecution.fields = parseCmdFields(extractCmdWord(cmd));
+    activeExecution.phase = Phase::Prologue;
+    activeExecution.prologueCount = totalPrologues;
+    activeExecution.executeCount = totalExecutes;
+    activeExecution.epilogueCount = totalEpilogues;
+    activeExecution.completedReadRespCount = totalReads;
+    activeExecution.completedWriteRespCount = totalWrites;
+    activeExecution.completedIterations = totalIterations;
+    activeExecution.readMask = 0;
+    activeExecution.writeMask = 0;
+    activeExecution.repetition = 1;
+    activeExecution.reserved = 0;
 
-    planCurrentBatch();
-    issueNextGatherRead();
-}
-
-bool
-DmaUnit::handleMemResponse(PacketPtr pkt)
-{
-    panic_if(pkt != activeMemPacket,
-             "%s: DmaUnit response packet mismatch", name());
-
-    switch (requestKind) {
-      case RequestKind::GatherRead:
-        handleGatherReadResponse(pkt);
-        return true;
-      case RequestKind::ScatterDestRead:
-        handleScatterReadResponse(pkt);
-        return true;
-      case RequestKind::ScatterWrite:
-        handleScatterWriteResponse(pkt);
-        return true;
-      case RequestKind::CompletionSyncWrite:
-        requestKind = RequestKind::None;
-        return SpecializedExecutionUnit::handleMemResponse(pkt);
-      case RequestKind::None:
-        panic("DmaUnit: received mem response with no active request kind");
-    }
-
-    panic("DmaUnit: unreachable mem response kind");
-}
-
-bool
-DmaUnit::buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
-                                 uint32_t &word) const
-{
-    (void)cmd;
-    panic_if(!parsedCmdValid,
-             "DmaUnit: completion requested without active command");
-    word = (static_cast<uint32_t>(0x1U) << 28) |
-           (static_cast<uint32_t>(parsedCmd.deviceId) << 24) |
-           (static_cast<uint32_t>(SyncSetOpCode) << 16) |
-           (static_cast<uint32_t>(parsedCmd.syncIndicator) << 8);
-    return true;
+    onCommandBegin(activeExecution);
+    advanceActivePhase(activeExecution);
 }
 
 void
-DmaUnit::sendCompletionSyncWord(uint32_t word)
+DmaUnit::onCommandBegin(ActiveExecution &exec)
 {
-    requestKind = RequestKind::CompletionSyncWrite;
-    SpecializedExecutionUnit::sendCompletionSyncWord(word);
+    (void)exec;
+    resetCommandState();
+    parsedCmd = parseCommand(exec.cmd);
+    parsedCmdValid = true;
+    validateParsedCommand(parsedCmd);
+}
+
+void
+DmaUnit::prologue(ActiveExecution &exec)
+{
+    (void)exec;
+    planCurrentBatch();
+}
+
+void
+DmaUnit::buildMvinRequests(ActiveExecution &exec,
+                           std::vector<MemRequestDesc> &reqs)
+{
+    (void)exec;
+    pendingMvinTxns.clear();
+
+    if (done()) {
+        return;
+    }
+
+    uint64_t token = nextMemTxnToken;
+    for (size_t i = 0; i < batchPlan.sourceLines.size(); ++i) {
+        const auto &line = batchPlan.sourceLines[i];
+        MemRequestDesc req;
+        req.portId = 0;
+        req.kind = MemTxnContext::Kind::Mvin;
+        req.addr = line.lineAddr;
+        req.size = CacheLineBytes;
+        reqs.push_back(req);
+        pendingMvinTxns.emplace(token++, PendingMvinTxn{
+            PendingMvinKind::SourceLine, i});
+    }
+
+    for (size_t i = 0; i < batchPlan.destLines.size(); ++i) {
+        const auto &line = batchPlan.destLines[i];
+        MemRequestDesc req;
+        req.portId = 0;
+        req.kind = MemTxnContext::Kind::Mvin;
+        req.addr = line.lineAddr;
+        req.size = CacheLineBytes;
+        reqs.push_back(req);
+        pendingMvinTxns.emplace(token++, PendingMvinTxn{
+            PendingMvinKind::DestLine, i});
+    }
+}
+
+void
+DmaUnit::onMvinResponse(ActiveExecution &exec,
+                        const MemTxnContext &txn,
+                        PacketPtr pkt)
+{
+    (void)exec;
+    auto it = pendingMvinTxns.find(txn.token);
+    panic_if(it == pendingMvinTxns.end(),
+             "%s: unexpected DMA mvin token=%llu", name(),
+             static_cast<unsigned long long>(txn.token));
+
+    const PendingMvinTxn pending = it->second;
+    pendingMvinTxns.erase(it);
+
+    switch (pending.kind) {
+      case PendingMvinKind::SourceLine: {
+        const auto &line = batchPlan.sourceLines.at(pending.index);
+        const uint8_t *data = pkt->getConstPtr<uint8_t>();
+        for (const auto &copy : line.copies) {
+            batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
+        }
+        break;
+      }
+      case PendingMvinKind::DestLine: {
+        auto &line = batchPlan.destLines.at(pending.index);
+        std::memcpy(line.lineData.data(), pkt->getConstPtr<uint8_t>(),
+                    CacheLineBytes);
+        break;
+      }
+    }
+}
+
+Tick
+DmaUnit::execute(ActiveExecution &exec)
+{
+    (void)exec;
+
+    if (done()) {
+        return 0;
+    }
+
+    for (auto &line : batchPlan.destLines) {
+        for (const auto &copy : line.copies) {
+            line.lineData[copy.lineOffset] =
+                batchPlan.buffer[copy.bufferOffset];
+        }
+    }
+
+    return 0;
+}
+
+void
+DmaUnit::buildMvoutRequests(ActiveExecution &exec,
+                            std::vector<MemRequestDesc> &reqs)
+{
+    (void)exec;
+
+    if (done()) {
+        return;
+    }
+
+    for (const auto &line : batchPlan.destLines) {
+        MemRequestDesc req;
+        req.portId = 0;
+        req.kind = MemTxnContext::Kind::Mvout;
+        req.addr = line.lineAddr;
+        req.size = CacheLineBytes;
+        req.data.assign(line.lineData.begin(), line.lineData.end());
+        reqs.push_back(req);
+    }
+}
+
+void
+DmaUnit::epilogue(ActiveExecution &exec)
+{
+    (void)exec;
+
+    if (!batchPlan.buffer.empty()) {
+        advanceBatchCursor();
+    }
+}
+
+bool
+DmaUnit::shouldExit(const ActiveExecution &exec) const
+{
+    (void)exec;
+    return done();
 }
 
 } // namespace gem5

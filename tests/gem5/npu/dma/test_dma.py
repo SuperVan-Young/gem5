@@ -75,6 +75,14 @@ add_dma_test(
     "sync_completion",
     r"DMA_SCENARIO_PASS=sync_completion",
 )
+add_dma_test(
+    "dma_queued_chain",
+    "queued_chain",
+    (
+        r"(?s)DMA_SUMMARY scenario=queued_chain cmds=2 .* "
+        r"queue=0 cmdq=0 busy=0.*DMA_SCENARIO_PASS=queued_chain"
+    ),
+)
 
 
 def run_expected_invalid_address(params):

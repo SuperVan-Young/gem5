@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "npu/mega/SpecializedExecutionUnit.hh"
@@ -58,13 +59,10 @@ class DmaUnit : public SpecializedExecutionUnit
         Spm,
     };
 
-    enum class RequestKind : uint8_t
+    enum class PendingMvinKind : uint8_t
     {
-        None,
-        GatherRead,
-        ScatterDestRead,
-        ScatterWrite,
-        CompletionSyncWrite,
+        SourceLine,
+        DestLine,
     };
 
     struct ParsedCmd
@@ -124,21 +122,24 @@ class DmaUnit : public SpecializedExecutionUnit
         std::vector<DestLine> destLines;
     };
 
+    struct PendingMvinTxn
+    {
+        PendingMvinKind kind = PendingMvinKind::SourceLine;
+        size_t index = 0;
+    };
+
     static constexpr size_t CacheLineBytes = 64;
     static constexpr uint8_t DmaDeviceType = 0x4;
-    static constexpr uint8_t SyncSetOpCode = 0x1;
     static constexpr size_t MaxBufferBytes = 256 * 1024 * 1024ULL;
 
     const size_t bufferSize;
 
     ParsedCmd parsedCmd;
     BatchPlan batchPlan;
-    RequestKind requestKind;
     bool parsedCmdValid;
     uint32_t currentY;
     uint32_t currentX;
-    size_t gatherIndex;
-    size_t scatterIndex;
+    std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
@@ -158,22 +159,21 @@ class DmaUnit : public SpecializedExecutionUnit
     void advanceBatchCursor();
     void planCurrentBatch();
     void buildBatchLines();
-    void issueNextGatherRead();
-    void issueNextScatterRead();
-    void issueScatterWrite();
-    PacketPtr makeReadPacket(Addr addr) const;
-    PacketPtr makeWritePacket(Addr addr, const uint8_t *data) const;
-    void handleGatherReadResponse(PacketPtr pkt);
-    void handleScatterReadResponse(PacketPtr pkt);
-    void handleScatterWriteResponse(PacketPtr pkt);
-    void finishCurrentBatch();
 
   protected:
     void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
-    bool handleMemResponse(PacketPtr pkt) override;
-    bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
-                                 uint32_t &word) const override;
-    void sendCompletionSyncWord(uint32_t word) override;
+    void onCommandBegin(ActiveExecution &exec) override;
+    void prologue(ActiveExecution &exec) override;
+    void buildMvinRequests(ActiveExecution &exec,
+                           std::vector<MemRequestDesc> &reqs) override;
+    void onMvinResponse(ActiveExecution &exec,
+                        const MemTxnContext &txn,
+                        PacketPtr pkt) override;
+    Tick execute(ActiveExecution &exec) override;
+    void buildMvoutRequests(ActiveExecution &exec,
+                            std::vector<MemRequestDesc> &reqs) override;
+    void epilogue(ActiveExecution &exec) override;
+    bool shouldExit(const ActiveExecution &exec) const override;
 
   public:
     DmaUnit(const DmaUnitParams &params);

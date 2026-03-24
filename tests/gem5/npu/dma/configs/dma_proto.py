@@ -93,6 +93,19 @@ print(f"DMA_EXIT_CAUSE={exit_cause}")
 print(f"DMA_EXIT_CODE={exit_code}")
 print(f"DMA_SCENARIO={args.scenario}")
 
+if args.scenario != "invalid_address":
+    print(
+        "DMA_SUMMARY "
+        f"scenario={args.scenario} "
+        f"cmds={system.dma.completedCmdCount()} "
+        f"reads={system.dma.completedReadRespCount()} "
+        f"writes={system.dma.completedWriteRespCount()} "
+        f"iters={system.dma.completedIterationCount()} "
+        f"queue={system.dma.queueOccupancy()} "
+        f"cmdq={system.cmdq.queueOccupancy()} "
+        f"busy={int(system.dma.isIssueBusy())}"
+    )
+
 if (
     args.scenario != "invalid_address"
     and exit_cause == expected_exit_cause

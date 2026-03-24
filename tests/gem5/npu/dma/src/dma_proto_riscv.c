@@ -1,14 +1,9 @@
 #include <stdint.h>
 #include <string.h>
 
-#define CMDQ_BASE 0x70000000UL
-#define CMD_BYTES 64UL
-#define CTRL_ADDR (CMDQ_BASE + CMD_BYTES)
+#include "npu_sync.hh"
 
-#define DEVICE_TYPE_SYNC 0x1U
-#define DEVICE_TYPE_DMA 0x4U
-#define DEVICE_ID 0x0U
-#define SYNC_WAIT_OPCODE 0x0U
+#define DMA_DEVICE_ID 0x0U
 
 #define XFER_DRAM_TO_SPM 0x0U
 #define XFER_SPM_TO_DRAM 0x1U
@@ -36,12 +31,6 @@ typedef struct
     uint32_t stride_c;
     uint16_t k;
 } Layout;
-
-static inline void
-mmio_write32(uint64_t addr, uint32_t value)
-{
-    *(volatile uint32_t *)addr = value;
-}
 
 static inline uintptr_t
 coord_addr(uintptr_t base, Layout layout, uint32_t y, uint32_t x, uint32_t z)
@@ -102,70 +91,45 @@ verify_tensor(uintptr_t base, Layout layout)
     return 1;
 }
 
-static uint32_t
-build_dma_header(uint32_t xfer_mode, uint32_t sync_idx)
+static void
+build_dma_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
+              Layout src_layout, Layout dst_layout, uint32_t xfer_mode,
+              uint32_t sync_idx, uint32_t set_completion_sync)
 {
     const uint32_t op = (0U << 5) | ((xfer_mode & 0x7U) << 2);
-    return ((DEVICE_TYPE_DMA & 0xFU) << 28) |
-           ((DEVICE_ID & 0xFU) << 24) |
-           ((op & 0xFFU) << 16) |
-           ((sync_idx & 0xFFU) << 8);
-}
 
-static uint32_t
-build_sync_wait_header(uint32_t sync_idx)
-{
-    return ((DEVICE_TYPE_SYNC & 0xFU) << 28) |
-           ((DEVICE_ID & 0xFU) << 24) |
-           ((SYNC_WAIT_OPCODE & 0xFFU) << 16) |
-           ((sync_idx & 0xFFU) << 8);
-}
-
-static void
-push_words(const uint32_t words[16])
-{
-    for (unsigned i = 0; i < 16; ++i) {
-        mmio_write32(CMDQ_BASE + (i * 4U), words[i]);
-    }
-    mmio_write32(CTRL_ADDR, 0);
-}
-
-static void
-push_dma(uintptr_t src_base, uintptr_t dst_base,
-         Layout src_layout, Layout dst_layout,
-         uint32_t xfer_mode, uint32_t sync_idx)
-{
-    uint32_t words[16];
-    for (unsigned i = 0; i < 16; ++i) {
-        words[i] = 0;
-    }
-
-    words[15] = build_dma_header(xfer_mode, sync_idx);
-    words[14] = (uint32_t)src_base;
-    words[13] = (uint32_t)dst_base;
-    words[12] = src_layout.h;
-    words[11] = src_layout.w;
-    words[10] = src_layout.c;
-    words[9] = src_layout.stride_h;
-    words[8] = src_layout.stride_w;
-    words[7] = src_layout.stride_c;
-    words[6] = dst_layout.stride_h;
-    words[5] = dst_layout.stride_w;
-    words[4] = dst_layout.stride_c;
-    words[3] = ((uint32_t)dst_layout.k << 16) | src_layout.k;
-
-    push_words(words);
+    cmd->clear();
+    cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
+    cmd->setDeviceId(DMA_DEVICE_ID);
+    cmd->setOpCode(op);
+    cmd->setSyncIndicator(sync_idx);
+    cmd->setSetIndicatorSns(set_completion_sync ? 1U : 0U);
+    cmd->setSetIndicatorSnd(0U);
+    cmd->clearCommonReservedBits();
+    cmd->setWord(1U, (uint32_t)src_base);
+    cmd->setWord(2U, (uint32_t)dst_base);
+    cmd->setWord(3U, src_layout.h);
+    cmd->setWord(4U, src_layout.w);
+    cmd->setWord(5U, src_layout.c);
+    cmd->setWord(6U, src_layout.stride_h);
+    cmd->setWord(7U, src_layout.stride_w);
+    cmd->setWord(8U, src_layout.stride_c);
+    cmd->setWord(9U, dst_layout.stride_h);
+    cmd->setWord(10U, dst_layout.stride_w);
+    cmd->setWord(11U, dst_layout.stride_c);
+    cmd->setWord(12U, ((uint32_t)dst_layout.k << 16) | src_layout.k);
 }
 
 static void
-push_sync_wait(uint32_t sync_idx)
+launch_dma(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
+           Layout dst_layout, uint32_t xfer_mode, uint32_t sync_idx,
+           uint32_t set_completion_sync)
 {
-    uint32_t words[16];
-    for (unsigned i = 0; i < 16; ++i) {
-        words[i] = 0;
-    }
-    words[15] = build_sync_wait_header(sync_idx);
-    push_words(words);
+    NpuCmd cmd;
+
+    build_dma_cmd(&cmd, src_base, dst_base, src_layout, dst_layout,
+                  xfer_mode, sync_idx, set_completion_sync);
+    cmd.launchCmd();
 }
 
 static int
@@ -206,7 +170,8 @@ scenario_basic_dram_to_spm(void)
     Layout layout = make_layout(2, 4, 8, 0);
     clear_region(DST_SPM0, layout.stride_h * layout.h);
     fill_tensor(SRC_DRAM0, layout);
-    push_dma(SRC_DRAM0, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 5);
+    launch_dma(SRC_DRAM0, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 5, 0);
+    npu_cmd_sync_done();
     return poll_until_match(DST_SPM0, layout) ? 0 : 1;
 }
 
@@ -216,7 +181,8 @@ scenario_basic_spm_to_dram(void)
     Layout layout = make_layout(2, 4, 8, 0);
     clear_region(DST_DRAM0, layout.stride_h * layout.h);
     fill_tensor(SRC_SPM0, layout);
-    push_dma(SRC_SPM0, DST_DRAM0, layout, layout, XFER_SPM_TO_DRAM, 6);
+    launch_dma(SRC_SPM0, DST_DRAM0, layout, layout, XFER_SPM_TO_DRAM, 6, 0);
+    npu_cmd_sync_done();
     return poll_until_match(DST_DRAM0, layout) ? 0 : 1;
 }
 
@@ -227,7 +193,8 @@ scenario_hwc_to_blocked(void)
     Layout dst = make_layout(2, 4, 8, 2);
     clear_region(DST_SPM0, dst.stride_h * dst.h);
     fill_tensor(SRC_DRAM0, src);
-    push_dma(SRC_DRAM0, DST_SPM0, src, dst, XFER_DRAM_TO_SPM, 7);
+    launch_dma(SRC_DRAM0, DST_SPM0, src, dst, XFER_DRAM_TO_SPM, 7, 0);
+    npu_cmd_sync_done();
     return poll_until_match(DST_SPM0, dst) ? 0 : 1;
 }
 
@@ -238,7 +205,8 @@ scenario_blocked_to_blocked(void)
     Layout dst = make_layout(2, 8, 4, 4);
     clear_region(DST_DRAM0, dst.stride_h * dst.h);
     fill_tensor(SRC_SPM0, src);
-    push_dma(SRC_SPM0, DST_DRAM0, src, dst, XFER_SPM_TO_DRAM, 8);
+    launch_dma(SRC_SPM0, DST_DRAM0, src, dst, XFER_SPM_TO_DRAM, 8, 0);
+    npu_cmd_sync_done();
     return poll_until_match(DST_DRAM0, dst) ? 0 : 1;
 }
 
@@ -248,7 +216,8 @@ scenario_buffer_size_forces_batching(void)
     Layout layout = make_layout(2, 8, 8, 0);
     clear_region(DST_SPM0, layout.stride_h * layout.h);
     fill_tensor(SRC_DRAM0, layout);
-    push_dma(SRC_DRAM0, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 9);
+    launch_dma(SRC_DRAM0, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 9, 0);
+    npu_cmd_sync_done();
     return poll_until_match(DST_SPM0, layout) ? 0 : 1;
 }
 
@@ -260,9 +229,29 @@ scenario_sync_completion(void)
     clear_region(DST_DRAM1, layout.stride_h * layout.h);
     fill_tensor(SRC_DRAM0, layout);
 
-    push_dma(SRC_DRAM0, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 11);
-    push_sync_wait(11);
-    push_dma(DST_SPM0, DST_DRAM1, layout, layout, XFER_SPM_TO_DRAM, 12);
+    launch_dma(SRC_DRAM0, DST_SPM0, layout, layout,
+               XFER_DRAM_TO_SPM, 11, 1);
+    npu_launch_sync_wait(DMA_DEVICE_ID, 11, 0, 0, 0);
+    launch_dma(DST_SPM0, DST_DRAM1, layout, layout,
+               XFER_SPM_TO_DRAM, 12, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_match(DST_DRAM1, layout) ? 0 : 1;
+}
+
+static int
+scenario_queued_chain(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    clear_region(DST_SPM0, layout.stride_h * layout.h);
+    clear_region(DST_DRAM1, layout.stride_h * layout.h);
+    fill_tensor(SRC_DRAM0, layout);
+
+    launch_dma(SRC_DRAM0, DST_SPM0, layout, layout,
+               XFER_DRAM_TO_SPM, 21, 0);
+    launch_dma(DST_SPM0, DST_DRAM1, layout, layout,
+               XFER_SPM_TO_DRAM, 22, 0);
+    npu_cmd_sync_done();
 
     return poll_until_match(DST_DRAM1, layout) ? 0 : 1;
 }
@@ -271,7 +260,8 @@ static int
 scenario_invalid_address(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    push_dma(0x10000000UL, DST_SPM0, layout, layout, XFER_DRAM_TO_SPM, 13);
+    launch_dma(0x10000000UL, DST_SPM0, layout, layout,
+               XFER_DRAM_TO_SPM, 13, 0);
     for (;;) {
         asm volatile("" ::: "memory");
     }
@@ -301,6 +291,9 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "sync_completion") == 0) {
         return scenario_sync_completion();
+    }
+    if (strcmp(argv[1], "queued_chain") == 0) {
+        return scenario_queued_chain();
     }
     if (strcmp(argv[1], "invalid_address") == 0) {
         return scenario_invalid_address();
