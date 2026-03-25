@@ -73,6 +73,15 @@ add_dma_test(
     ),
 )
 add_dma_test(
+    "dma_transpose_hw", "transpose_hw", r"DMA_SCENARIO_PASS=transpose_hw"
+)
+add_dma_test(
+    "dma_transpose_hc", "transpose_hc", r"DMA_SCENARIO_PASS=transpose_hc"
+)
+add_dma_test(
+    "dma_transpose_wc", "transpose_wc", r"DMA_SCENARIO_PASS=transpose_wc"
+)
+add_dma_test(
     "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
 )
 add_dma_test(
@@ -243,4 +252,24 @@ add_dma_panic_test(
     "dma_fill_exceeds_bank_size",
     "fill_exceeds_bank_size",
     r".*DmaUnit: fill required_bytes=4097 exceeds bank_size=4096.*",
+)
+add_dma_panic_test(
+    "dma_transpose_same_bank",
+    "transpose_same_bank",
+    r".*DmaUnit: transpose requires src_bank_id != dst_bank_id.*",
+)
+add_dma_panic_test(
+    "dma_transpose_equal_dims",
+    "transpose_equal_dims",
+    r".*DmaUnit: transpose requires transpose_dim_a != transpose_dim_b.*",
+)
+add_dma_panic_test(
+    "dma_transpose_nonzero_k",
+    "transpose_nonzero_k",
+    r".*DmaUnit: transpose requires src_k == 0 and dst_k == 0.*",
+)
+add_dma_panic_test(
+    "dma_transpose_exceeds_bank_size",
+    "transpose_exceeds_bank_size",
+    r".*DmaUnit: transpose required_bytes=4097 exceeds bank_size=4096.*",
 )

@@ -173,6 +173,8 @@ class DmaUnit : public SpecializedExecutionUnit
     void validateTransposeCommand(const ParsedCmd &cmd) const;
     void validateFillCommand(const ParsedCmd &cmd) const;
     size_t fillRequiredBytes(const ParsedCmd &cmd) const;
+    size_t transposeRequiredBytes(const ParsedCmd &cmd) const;
+    uint32_t axisExtent(const ParsedCmd &cmd, uint8_t dim) const;
     MemorySpace sourceSpace() const;
     MemorySpace destSpace() const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;
@@ -189,6 +191,7 @@ class DmaUnit : public SpecializedExecutionUnit
     void advanceBatchCursor();
     void planCurrentBatch();
     void buildBatchLines();
+    void buildTransposeLines();
 
   protected:
     void startExecuteCommand(const std::vector<uint8_t> &cmd) override;

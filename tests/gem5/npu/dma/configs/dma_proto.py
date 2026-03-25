@@ -68,15 +68,18 @@ system.cmdq.cpu_side = system.membus.mem_side_ports
 system.cmdq.sync_indicator_side = system.membus.mem_side_ports
 system.cmdq.mem_side = system.membus.cpu_side_ports
 
+dma_mem_ports = 2
 system.dma = DmaUnit(
     base_addr=dma_base,
     macro_cmd_bytes=cmd_bytes,
     cmd_queue_depth=8,
     sync_enqueue_on_data_write=True,
     buffer_size=buffer_size,
+    num_mem_side_ports=dma_mem_ports,
 )
 system.dma.cpu_side = system.membus.mem_side_ports
-system.dma.mem_side = system.membus.cpu_side_ports
+for _ in range(dma_mem_ports):
+    system.dma.mem_side = system.membus.cpu_side_ports
 
 root = Root(full_system=False, system=system)
 m5.instantiate()

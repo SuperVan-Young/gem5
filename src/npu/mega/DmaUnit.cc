@@ -76,8 +76,8 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
              "%s: DmaUnit bank_size must be a power of two "
              "in the range [1, %zu]",
              name(), MaxBankBytes);
-    fatal_if(memSidePorts.size() != 1,
-             "%s: DmaUnit currently supports exactly one mem_side port",
+    fatal_if(memSidePorts.empty() || memSidePorts.size() > 2,
+             "%s: DmaUnit requires one or two mem_side ports",
              name());
 }
 
@@ -255,13 +255,24 @@ DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
              cmd.dstBankId, static_cast<unsigned>(numBanks));
     panic_if(cmd.srcBankId == cmd.dstBankId,
              "DmaUnit: transpose requires src_bank_id != dst_bank_id");
+    panic_if(cmd.transposeDimA == cmd.transposeDimB,
+             "DmaUnit: transpose requires transpose_dim_a != transpose_dim_b");
 
     validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
     validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
 
     panic_if(cmd.srcK != 0 || cmd.dstK != 0,
              "DmaUnit: transpose requires src_k == 0 and dst_k == 0");
-    panic("DmaUnit: transpose mode is not implemented yet");
+
+    const uint8_t remainingDim = 3 - cmd.transposeDimA - cmd.transposeDimB;
+    panic_if(axisExtent(cmd, remainingDim) != 1,
+             "DmaUnit: transpose requires non-transposed axis extent == 1");
+
+    const size_t requiredBytes = transposeRequiredBytes(cmd);
+    panic_if(requiredBytes > bankSize,
+             "DmaUnit: transpose required_bytes=%llu exceeds bank_size=%u",
+             static_cast<unsigned long long>(requiredBytes),
+             static_cast<unsigned>(bankSize));
 }
 
 void
@@ -307,6 +318,29 @@ DmaUnit::fillRequiredBytes(const ParsedCmd &cmd) const
         static_cast<unsigned long long>(cmd.shapeC - 1) * cmd.dstStrideC +
         1ULL;
     return static_cast<size_t>(requiredBytes);
+}
+
+size_t
+DmaUnit::transposeRequiredBytes(const ParsedCmd &cmd) const
+{
+    return static_cast<size_t>(cmd.shapeH) * cmd.shapeW * cmd.shapeC;
+}
+
+uint32_t
+DmaUnit::axisExtent(const ParsedCmd &cmd, uint8_t dim) const
+{
+    switch (static_cast<CutDim>(dim)) {
+      case CutDim::H:
+        return cmd.shapeH;
+      case CutDim::W:
+        return cmd.shapeW;
+      case CutDim::C:
+        return cmd.shapeC;
+      case CutDim::Reserved:
+        break;
+    }
+
+    panic("DmaUnit: unreachable axis extent dimension");
 }
 
 DmaUnit::MemorySpace
@@ -439,7 +473,8 @@ DmaUnit::done() const
         return true;
     }
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+    const Mode mode = static_cast<Mode>(parsedCmd.mode);
+    if (mode == Mode::Fill || mode == Mode::Transpose) {
         return currentY != 0;
     }
 
@@ -476,6 +511,14 @@ DmaUnit::planCurrentBatch()
 
     if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
         batchPlan.buffer.assign(fillRequiredBytes(parsedCmd), 0);
+        return;
+    }
+
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
+        batchPlan.buffer.assign(transposeRequiredBytes(parsedCmd), 0);
+        bankWorkspace.at(parsedCmd.srcBankId).assign(bankSize, 0);
+        bankWorkspace.at(parsedCmd.dstBankId).assign(bankSize, 0);
+        buildTransposeLines();
         return;
     }
 
@@ -572,6 +615,71 @@ DmaUnit::buildBatchLines()
 }
 
 void
+DmaUnit::buildTransposeLines()
+{
+    std::map<Addr, std::vector<SourceCopy>> sourceMap;
+    std::map<Addr, std::vector<DestCopy>> destMap;
+
+    const std::array<uint32_t, 3> srcExtents = {
+        parsedCmd.shapeH, parsedCmd.shapeW, parsedCmd.shapeC};
+    std::array<uint32_t, 3> dstExtents = srcExtents;
+    std::swap(dstExtents[parsedCmd.transposeDimA],
+              dstExtents[parsedCmd.transposeDimB]);
+
+    const auto denseIndex = [](const std::array<uint32_t, 3> &coords,
+                               const std::array<uint32_t, 3> &extents) {
+        return (static_cast<size_t>(coords[0]) * extents[1] + coords[1]) *
+            extents[2] + coords[2];
+    };
+
+    for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
+        for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
+            for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
+                const std::array<uint32_t, 3> srcCoords = {y, x, z};
+                auto dstCoords = srcCoords;
+                std::swap(dstCoords[parsedCmd.transposeDimA],
+                          dstCoords[parsedCmd.transposeDimB]);
+
+                const size_t srcOffset = denseIndex(srcCoords, srcExtents);
+                const size_t dstOffset = denseIndex(dstCoords, dstExtents);
+
+                const Addr srcAddr = computeTensorAddr(
+                    parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
+                    parsedCmd.srcStrideW, parsedCmd.srcStrideC, 0,
+                    parsedCmd.shapeW, parsedCmd.shapeC,
+                    static_cast<uint8_t>(CutDim::W), y, x, z);
+                const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
+                validateBurstLine(srcLineAddr, sourceSpace(), "source");
+                sourceMap[srcLineAddr].push_back({
+                    srcOffset,
+                    static_cast<uint8_t>(srcAddr - srcLineAddr),
+                });
+
+                const Addr dstAddr = computeTensorAddr(
+                    parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
+                    parsedCmd.dstStrideW, parsedCmd.dstStrideC, 0,
+                    parsedCmd.shapeW, parsedCmd.shapeC,
+                    static_cast<uint8_t>(CutDim::W),
+                    dstCoords[0], dstCoords[1], dstCoords[2]);
+                const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
+                validateBurstLine(dstLineAddr, destSpace(), "destination");
+                destMap[dstLineAddr].push_back({
+                    static_cast<uint8_t>(dstAddr - dstLineAddr),
+                    dstOffset,
+                });
+            }
+        }
+    }
+
+    for (const auto &entry : sourceMap) {
+        batchPlan.sourceLines.push_back({entry.first, entry.second});
+    }
+    for (const auto &entry : destMap) {
+        batchPlan.destLines.push_back({entry.first, entry.second, {}});
+    }
+}
+
+void
 DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
 {
     const uint64_t totalPrologues = activeExecution.prologueCount;
@@ -632,11 +740,12 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
         return;
     }
 
+    const PortID readPort = 0;
     uint64_t token = nextMemTxnToken;
     for (size_t i = 0; i < batchPlan.sourceLines.size(); ++i) {
         const auto &line = batchPlan.sourceLines[i];
         MemRequestDesc req;
-        req.portId = 0;
+        req.portId = readPort;
         req.kind = MemTxnContext::Kind::Mvin;
         req.addr = line.lineAddr;
         req.size = CacheLineBytes;
@@ -648,7 +757,7 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
     for (size_t i = 0; i < batchPlan.destLines.size(); ++i) {
         const auto &line = batchPlan.destLines[i];
         MemRequestDesc req;
-        req.portId = 0;
+        req.portId = readPort;
         req.kind = MemTxnContext::Kind::Mvin;
         req.addr = line.lineAddr;
         req.size = CacheLineBytes;
@@ -676,8 +785,15 @@ DmaUnit::onMvinResponse(ActiveExecution &exec,
       case PendingMvinKind::SourceLine: {
         const auto &line = batchPlan.sourceLines.at(pending.index);
         const uint8_t *data = pkt->getConstPtr<uint8_t>();
-        for (const auto &copy : line.copies) {
-            batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
+        if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
+            auto &srcBank = bankWorkspace.at(parsedCmd.srcBankId);
+            for (const auto &copy : line.copies) {
+                srcBank[copy.bufferOffset] = data[copy.lineOffset];
+            }
+        } else {
+            for (const auto &copy : line.copies) {
+                batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
+            }
         }
         break;
       }
@@ -705,6 +821,50 @@ DmaUnit::execute(ActiveExecution &exec)
         return 0;
     }
 
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
+        auto &srcBank = bankWorkspace.at(parsedCmd.srcBankId);
+        auto &dstBank = bankWorkspace.at(parsedCmd.dstBankId);
+        const std::array<uint32_t, 3> srcExtents = {
+            parsedCmd.shapeH, parsedCmd.shapeW, parsedCmd.shapeC};
+        std::array<uint32_t, 3> dstExtents = srcExtents;
+        std::swap(dstExtents[parsedCmd.transposeDimA],
+                  dstExtents[parsedCmd.transposeDimB]);
+
+        const auto denseIndex = [](const std::array<uint32_t, 3> &coords,
+                                   const std::array<uint32_t, 3> &extents) {
+            return (static_cast<size_t>(coords[0]) * extents[1] + coords[1]) *
+                extents[2] + coords[2];
+        };
+
+        for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
+            for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
+                for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
+                    const std::array<uint32_t, 3> srcCoords = {y, x, z};
+                    auto dstCoords = srcCoords;
+                    std::swap(dstCoords[parsedCmd.transposeDimA],
+                              dstCoords[parsedCmd.transposeDimB]);
+
+                    const size_t srcIndex = denseIndex(srcCoords, srcExtents);
+                    const size_t dstIndex = denseIndex(dstCoords, dstExtents);
+                    const uint8_t value = srcBank[srcIndex];
+                    dstBank[dstIndex] = value;
+                    batchPlan.buffer[dstIndex] = value;
+                }
+            }
+        }
+
+        for (auto &line : batchPlan.destLines) {
+            for (const auto &copy : line.copies) {
+                line.lineData[copy.lineOffset] =
+                    batchPlan.buffer[copy.bufferOffset];
+            }
+        }
+
+        return transposeUnitLatency *
+            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA)) *
+            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
+    }
+
     for (auto &line : batchPlan.destLines) {
         for (const auto &copy : line.copies) {
             line.lineData[copy.lineOffset] =
@@ -729,9 +889,10 @@ DmaUnit::buildMvoutRequests(ActiveExecution &exec,
         return;
     }
 
+    const PortID writePort = memSidePorts.size() > 1 ? 1 : 0;
     for (const auto &line : batchPlan.destLines) {
         MemRequestDesc req;
-        req.portId = 0;
+        req.portId = writePort;
         req.kind = MemTxnContext::Kind::Mvout;
         req.addr = line.lineAddr;
         req.size = CacheLineBytes;
@@ -745,7 +906,8 @@ DmaUnit::epilogue(ActiveExecution &exec)
 {
     (void)exec;
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill ||
+        static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
         currentY = 1;
         return;
     }

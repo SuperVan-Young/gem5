@@ -119,6 +119,29 @@ verify_tensor(uintptr_t base, Layout layout)
     return 1;
 }
 
+static void
+swap_dims(uint32_t *coords, uint32_t dim_a, uint32_t dim_b);
+
+static int
+verify_transposed_tensor(uintptr_t base, Layout src_layout, Layout dst_layout,
+                         uint32_t dim_a, uint32_t dim_b)
+{
+    for (uint32_t y = 0; y < src_layout.h; ++y) {
+        for (uint32_t x = 0; x < src_layout.w; ++x) {
+            for (uint32_t z = 0; z < src_layout.c; ++z) {
+                uint32_t coords[3] = {y, x, z};
+                swap_dims(coords, dim_a, dim_b);
+                volatile uint8_t *ptr = (volatile uint8_t *)coord_addr(
+                    base, dst_layout, coords[0], coords[1], coords[2]);
+                if (*ptr != pattern(y, x, z)) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
 static inline uint32_t
 mem_space_for_base(uintptr_t base)
 {
@@ -156,6 +179,14 @@ static inline uint32_t
 transpose_bank_cfg(uint32_t src_bank_id, uint32_t dst_bank_id)
 {
     return (src_bank_id & 0xfU) | ((dst_bank_id & 0xfU) << 4);
+}
+
+static void
+swap_dims(uint32_t *coords, uint32_t dim_a, uint32_t dim_b)
+{
+    const uint32_t tmp = coords[dim_a];
+    coords[dim_a] = coords[dim_b];
+    coords[dim_b] = tmp;
 }
 
 static inline uint32_t
@@ -252,6 +283,34 @@ launch_move_layout_with_data_type(uintptr_t src_base, uintptr_t dst_base,
 }
 
 static void
+build_transpose_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
+                    Layout src_layout, Layout dst_layout, uint32_t dim_a,
+                    uint32_t dim_b, uint32_t src_bank_id,
+                    uint32_t dst_bank_id, uint32_t sync_idx,
+                    uint32_t set_completion_sync)
+{
+    build_dma_cmd_raw(cmd, src_base, dst_base, src_layout, dst_layout, 0U,
+                      DMA_MODE_TRANSPOSE,
+                      transpose_mode_cfg(src_base, dst_base, dim_a, dim_b),
+                      transpose_bank_cfg(src_bank_id, dst_bank_id), sync_idx,
+                      set_completion_sync, 0U);
+}
+
+static void
+launch_transpose(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
+                 Layout dst_layout, uint32_t dim_a, uint32_t dim_b,
+                 uint32_t src_bank_id, uint32_t dst_bank_id,
+                 uint32_t sync_idx, uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+
+    build_transpose_cmd(&cmd, src_base, dst_base, src_layout, dst_layout,
+                        dim_a, dim_b, src_bank_id, dst_bank_id, sync_idx,
+                        set_completion_sync);
+    cmd.launchCmd();
+}
+
+static void
 build_fill_cmd(NpuCmd *cmd, Layout dst_layout, uint32_t dst_bank_id,
                uint32_t sync_idx, uint32_t set_completion_sync)
 {
@@ -298,6 +357,21 @@ poll_until_match(uintptr_t base, Layout layout)
 {
     for (unsigned long iter = 0; iter < MAX_POLL_ITERS; ++iter) {
         if (verify_tensor(base, layout)) {
+            return 1;
+        }
+        asm volatile("" ::: "memory");
+    }
+    return 0;
+}
+
+static int
+poll_until_transposed_match(uintptr_t base, Layout src_layout,
+                            Layout dst_layout, uint32_t dim_a,
+                            uint32_t dim_b)
+{
+    for (unsigned long iter = 0; iter < MAX_POLL_ITERS; ++iter) {
+        if (verify_transposed_tensor(base, src_layout, dst_layout,
+                                     dim_a, dim_b)) {
             return 1;
         }
         asm volatile("" ::: "memory");
@@ -493,6 +567,96 @@ scenario_fill_zero_bank(void)
     npu_launch_sync_wait(DMA_DEVICE_ID, 40, 0, 0, 0);
     npu_cmd_sync_done();
     return 0;
+}
+
+static int
+scenario_transpose_hw(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    clear_region(DST_SPM0, tensor_bytes(dst));
+    fill_tensor(SRC_DRAM0, src);
+    launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                     DMA_CUT_DIM_W, 0U, 1U, 45, 0);
+    npu_cmd_sync_done();
+    return poll_until_transposed_match(DST_SPM0, src, dst,
+                                       DMA_CUT_DIM_H, DMA_CUT_DIM_W) ? 0 : 1;
+}
+
+static int
+scenario_transpose_hc(void)
+{
+    Layout src = make_layout(2, 1, 4, 0);
+    Layout dst = make_layout(4, 1, 2, 0);
+    clear_region(DST_DRAM0, tensor_bytes(dst));
+    fill_tensor(SRC_SPM0, src);
+    launch_transpose(SRC_SPM0, DST_DRAM0, src, dst, DMA_CUT_DIM_H,
+                     DMA_CUT_DIM_C, 0U, 1U, 46, 0);
+    npu_cmd_sync_done();
+    return poll_until_transposed_match(DST_DRAM0, src, dst,
+                                       DMA_CUT_DIM_H, DMA_CUT_DIM_C) ? 0 : 1;
+}
+
+static int
+scenario_transpose_wc(void)
+{
+    Layout src = make_layout(1, 2, 4, 0);
+    Layout dst = make_layout(1, 4, 2, 0);
+    clear_region(DST_DRAM1, tensor_bytes(dst));
+    fill_tensor(SRC_DRAM0, src);
+    launch_transpose(SRC_DRAM0, DST_DRAM1, src, dst, DMA_CUT_DIM_W,
+                     DMA_CUT_DIM_C, 0U, 1U, 47, 0);
+    npu_cmd_sync_done();
+    return poll_until_transposed_match(DST_DRAM1, src, dst,
+                                       DMA_CUT_DIM_W, DMA_CUT_DIM_C) ? 0 : 1;
+}
+
+static int
+scenario_transpose_same_bank(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                     DMA_CUT_DIM_W, 1U, 1U, 48, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_transpose_equal_dims(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(2, 4, 1, 0);
+    launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                     DMA_CUT_DIM_H, 0U, 1U, 49, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_transpose_nonzero_k(void)
+{
+    Layout src = make_layout(2, 4, 1, 2);
+    Layout dst = make_layout(4, 2, 1, 0);
+    launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                     DMA_CUT_DIM_W, 0U, 1U, 50, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_transpose_exceeds_bank_size(void)
+{
+    Layout src = make_layout(1, 1, 4097, 0);
+    Layout dst = make_layout(1, 4097, 1, 0);
+    launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_W,
+                     DMA_CUT_DIM_C, 0U, 1U, 51, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
 }
 
 static int
@@ -756,6 +920,27 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "fill_zero_bank") == 0) {
         return scenario_fill_zero_bank();
+    }
+    if (strcmp(argv[1], "transpose_hw") == 0) {
+        return scenario_transpose_hw();
+    }
+    if (strcmp(argv[1], "transpose_hc") == 0) {
+        return scenario_transpose_hc();
+    }
+    if (strcmp(argv[1], "transpose_wc") == 0) {
+        return scenario_transpose_wc();
+    }
+    if (strcmp(argv[1], "transpose_same_bank") == 0) {
+        return scenario_transpose_same_bank();
+    }
+    if (strcmp(argv[1], "transpose_equal_dims") == 0) {
+        return scenario_transpose_equal_dims();
+    }
+    if (strcmp(argv[1], "transpose_nonzero_k") == 0) {
+        return scenario_transpose_nonzero_k();
+    }
+    if (strcmp(argv[1], "transpose_exceeds_bank_size") == 0) {
+        return scenario_transpose_exceeds_bank_size();
     }
     if (strcmp(argv[1], "fill_invalid_bank_id") == 0) {
         return scenario_fill_invalid_bank_id();
