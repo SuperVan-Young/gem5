@@ -178,7 +178,8 @@ class DmaUnit : public SpecializedExecutionUnit
     void validateBurstLine(Addr addr, MemorySpace space,
                            const char *label) const;
     Addr computeTensorAddr(Addr base, uint32_t strideH, uint32_t strideW,
-                           uint32_t strideC, uint16_t k, uint32_t channels,
+                           uint32_t strideC, uint16_t k, uint32_t width,
+                           uint32_t channels, uint8_t cutDim,
                            uint32_t y, uint32_t x, uint32_t z) const;
     void resetCommandState();
     bool done() const;

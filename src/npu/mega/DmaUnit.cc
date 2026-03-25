@@ -196,23 +196,43 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
     validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
     validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
 
-    panic_if(cmd.srcCutDim != static_cast<uint8_t>(CutDim::W),
-             "DmaUnit: move_layout src_cut_dim=%u is not supported yet",
-             cmd.srcCutDim);
-    panic_if(cmd.dstCutDim != static_cast<uint8_t>(CutDim::W),
-             "DmaUnit: move_layout dst_cut_dim=%u is not supported yet",
-             cmd.dstCutDim);
+    auto validateBlockedK = [&](uint16_t k, uint8_t cutDim,
+                                const char *label) {
+        if (k == 0) {
+            return;
+        }
 
-    if (cmd.srcK > 0) {
-        const bool invalidSourceBlockedK = (cmd.shapeW % cmd.srcK) != 0;
-        panic_if(invalidSourceBlockedK,
-                 "DmaUnit: source blocked layout requires W %% k == 0");
-    }
-    if (cmd.dstK > 0) {
-        const bool invalidDestBlockedK = (cmd.shapeW % cmd.dstK) != 0;
-        panic_if(invalidDestBlockedK,
-                 "DmaUnit: destination blocked layout requires W %% k == 0");
-    }
+        switch (static_cast<CutDim>(cutDim)) {
+          case CutDim::H: {
+            const bool invalidBlockedK = (cmd.shapeH % k) != 0;
+            panic_if(invalidBlockedK,
+                     "DmaUnit: %s blocked layout requires H %% k == 0",
+                     label);
+            return;
+          }
+          case CutDim::W: {
+            const bool invalidBlockedK = (cmd.shapeW % k) != 0;
+            panic_if(invalidBlockedK,
+                     "DmaUnit: %s blocked layout requires W %% k == 0",
+                     label);
+            return;
+          }
+          case CutDim::C: {
+            const bool invalidBlockedK = (cmd.shapeC % k) != 0;
+            panic_if(invalidBlockedK,
+                     "DmaUnit: %s blocked layout requires C %% k == 0",
+                     label);
+            return;
+          }
+          case CutDim::Reserved:
+            break;
+        }
+
+        panic("DmaUnit: unreachable move_layout cut dimension");
+    };
+
+    validateBlockedK(cmd.srcK, cmd.srcCutDim, "source");
+    validateBlockedK(cmd.dstK, cmd.dstCutDim, "destination");
 }
 
 void
@@ -326,19 +346,40 @@ DmaUnit::validateBurstLine(
 
 Addr
 DmaUnit::computeTensorAddr(Addr base, uint32_t strideH, uint32_t strideW,
-                           uint32_t strideC, uint16_t k, uint32_t channels,
+                           uint32_t strideC, uint16_t k, uint32_t width,
+                           uint32_t channels, uint8_t cutDim,
                            uint32_t y, uint32_t x, uint32_t z) const
 {
-    if (k == 0) {
+    const auto linearAddr = [&]() {
         return base + static_cast<Addr>(y) * strideH +
                static_cast<Addr>(x) * strideW +
                static_cast<Addr>(z) * strideC;
+    };
+
+    if (k == 0) {
+        return linearAddr();
     }
 
-    return base + static_cast<Addr>(y) * strideH +
-           static_cast<Addr>(x / k) * static_cast<Addr>(strideC) * channels +
-           static_cast<Addr>(z) * strideC +
-           static_cast<Addr>(x % k) * strideW;
+    switch (static_cast<CutDim>(cutDim)) {
+      case CutDim::H:
+        return base +
+               static_cast<Addr>(y / k) * static_cast<Addr>(strideW) * width +
+               static_cast<Addr>(x) * strideW +
+               static_cast<Addr>(z) * strideC +
+               static_cast<Addr>(y % k) * strideH;
+      case CutDim::W:
+        return base + static_cast<Addr>(y) * strideH +
+               static_cast<Addr>(x / k) * static_cast<Addr>(strideC) *
+                   channels +
+               static_cast<Addr>(z) * strideC +
+               static_cast<Addr>(x % k) * strideW;
+      case CutDim::C:
+        return linearAddr();
+      case CutDim::Reserved:
+        break;
+    }
+
+    panic("DmaUnit: unreachable tensor cut dimension");
 }
 
 void
@@ -446,7 +487,8 @@ DmaUnit::buildBatchLines()
                 const Addr srcAddr = computeTensorAddr(
                     parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
                     parsedCmd.srcStrideW, parsedCmd.srcStrideC, parsedCmd.srcK,
-                    parsedCmd.shapeC, globalY, globalX, z);
+                    parsedCmd.shapeW, parsedCmd.shapeC, parsedCmd.srcCutDim,
+                    globalY, globalX, z);
                 const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
                 validateBurstLine(srcLineAddr, sourceSpace(), "source");
                 sourceMap[srcLineAddr].push_back({
@@ -457,7 +499,8 @@ DmaUnit::buildBatchLines()
                 const Addr dstAddr = computeTensorAddr(
                     parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
                     parsedCmd.dstStrideW, parsedCmd.dstStrideC, parsedCmd.dstK,
-                    parsedCmd.shapeC, globalY, globalX, z);
+                    parsedCmd.shapeW, parsedCmd.shapeC, parsedCmd.dstCutDim,
+                    globalY, globalX, z);
                 const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
                 validateBurstLine(dstLineAddr, destSpace(), "destination");
                 destMap[dstLineAddr].push_back({

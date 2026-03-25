@@ -37,21 +37,36 @@ typedef struct
     uint32_t stride_w;
     uint32_t stride_c;
     uint16_t k;
+    uint32_t cut_dim;
 } Layout;
 
 static inline uintptr_t
 coord_addr(uintptr_t base, Layout layout, uint32_t y, uint32_t x, uint32_t z)
 {
+    const uintptr_t linear = base + (uintptr_t)y * layout.stride_h +
+                             (uintptr_t)x * layout.stride_w +
+                             (uintptr_t)z * layout.stride_c;
+
     if (layout.k == 0) {
-        return base + (uintptr_t)y * layout.stride_h +
-               (uintptr_t)x * layout.stride_w +
-               (uintptr_t)z * layout.stride_c;
+        return linear;
     }
 
-    return base + (uintptr_t)y * layout.stride_h +
-           (uintptr_t)(x / layout.k) * layout.stride_c * layout.c +
-           (uintptr_t)z * layout.stride_c +
-           (uintptr_t)(x % layout.k) * layout.stride_w;
+    switch (layout.cut_dim) {
+      case DMA_CUT_DIM_H:
+        return base + (uintptr_t)(y / layout.k) * layout.stride_w * layout.w +
+               (uintptr_t)x * layout.stride_w +
+               (uintptr_t)z * layout.stride_c +
+               (uintptr_t)(y % layout.k) * layout.stride_h;
+      case DMA_CUT_DIM_W:
+        return base + (uintptr_t)y * layout.stride_h +
+               (uintptr_t)(x / layout.k) * layout.stride_c * layout.c +
+               (uintptr_t)z * layout.stride_c +
+               (uintptr_t)(x % layout.k) * layout.stride_w;
+      case DMA_CUT_DIM_C:
+        return linear;
+      default:
+        return linear;
+    }
 }
 
 static inline uint8_t
@@ -81,6 +96,12 @@ clear_region(uintptr_t base, size_t bytes)
     }
 }
 
+static inline size_t
+tensor_bytes(Layout layout)
+{
+    return (size_t)layout.h * layout.w * layout.c;
+}
+
 static int
 verify_tensor(uintptr_t base, Layout layout)
 {
@@ -105,13 +126,20 @@ mem_space_for_base(uintptr_t base)
 }
 
 static inline uint32_t
+move_layout_mode_cfg_raw(uint32_t src_mem_space, uint32_t dst_mem_space,
+                         uint32_t src_cut_dim, uint32_t dst_cut_dim)
+{
+    return (src_mem_space & 0x1U) | ((dst_mem_space & 0x1U) << 1) |
+           ((src_cut_dim & 0x3U) << 2) | ((dst_cut_dim & 0x3U) << 4);
+}
+
+static inline uint32_t
 move_layout_mode_cfg(uintptr_t src_base, uintptr_t dst_base,
                      uint32_t src_cut_dim, uint32_t dst_cut_dim)
 {
-    return (mem_space_for_base(src_base) & 0x1U) |
-           ((mem_space_for_base(dst_base) & 0x1U) << 1) |
-           ((src_cut_dim & 0x3U) << 2) |
-           ((dst_cut_dim & 0x3U) << 4);
+    return move_layout_mode_cfg_raw(mem_space_for_base(src_base),
+                                    mem_space_for_base(dst_base),
+                                    src_cut_dim, dst_cut_dim);
 }
 
 static inline uint32_t
@@ -170,15 +198,14 @@ static void
 build_move_layout_cmd_with_data_type(NpuCmd *cmd, uintptr_t src_base,
                                      uintptr_t dst_base, Layout src_layout,
                                      Layout dst_layout, uint32_t data_type,
-                                     uint32_t src_cut_dim,
-                                     uint32_t dst_cut_dim,
                                      uint32_t sync_idx,
                                      uint32_t set_completion_sync)
 {
     build_dma_cmd_raw(
         cmd, src_base, dst_base, src_layout, dst_layout, data_type,
         DMA_MODE_MOVE_LAYOUT,
-        move_layout_mode_cfg(src_base, dst_base, src_cut_dim, dst_cut_dim),
+        move_layout_mode_cfg(src_base, dst_base, src_layout.cut_dim,
+                             dst_layout.cut_dim),
         0U, sync_idx, set_completion_sync, 0U);
 }
 
@@ -188,8 +215,7 @@ build_move_layout_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
                       uint32_t sync_idx, uint32_t set_completion_sync)
 {
     build_move_layout_cmd_with_data_type(cmd, src_base, dst_base, src_layout,
-                                         dst_layout, 0U, DMA_CUT_DIM_W,
-                                         DMA_CUT_DIM_W, sync_idx,
+                                         dst_layout, 0U, sync_idx,
                                          set_completion_sync);
 }
 
@@ -215,7 +241,7 @@ launch_move_layout_with_data_type(uintptr_t src_base, uintptr_t dst_base,
 
     build_move_layout_cmd_with_data_type(
         &cmd, src_base, dst_base, src_layout, dst_layout, data_type,
-        DMA_CUT_DIM_W, DMA_CUT_DIM_W, sync_idx, set_completion_sync);
+        sync_idx, set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -232,30 +258,47 @@ poll_until_match(uintptr_t base, Layout layout)
 }
 
 static Layout
-make_layout(uint32_t h, uint32_t w, uint32_t c, uint16_t k)
+make_layout_with_cut(uint32_t h, uint32_t w, uint32_t c, uint16_t k,
+                     uint32_t cut_dim)
 {
     Layout layout;
     layout.h = h;
     layout.w = w;
     layout.c = c;
     layout.k = k;
-    if (k == 0) {
+    layout.cut_dim = cut_dim;
+
+    if (k == 0 || cut_dim == DMA_CUT_DIM_C) {
         layout.stride_c = 1;
         layout.stride_w = c;
         layout.stride_h = w * c;
-    } else {
-        layout.stride_w = 1;
-        layout.stride_c = k;
-        layout.stride_h = w * c;
+        return layout;
     }
+
+    if (cut_dim == DMA_CUT_DIM_H) {
+        layout.stride_h = 1;
+        layout.stride_c = k;
+        layout.stride_w = c * k;
+        return layout;
+    }
+
+    layout.stride_w = 1;
+    layout.stride_c = k;
+    layout.stride_h = w * c;
     return layout;
+}
+
+static Layout
+make_layout(uint32_t h, uint32_t w, uint32_t c, uint16_t k)
+{
+    return make_layout_with_cut(h, w, c, k, DMA_CUT_DIM_W);
 }
 
 static int
 scenario_basic_dram_to_spm(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_SPM0, layout.stride_h * layout.h);
+    clear_region(DST_SPM0, tensor_bytes(layout));
     fill_tensor(SRC_DRAM0, layout);
     launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 5, 0);
     npu_cmd_sync_done();
@@ -266,7 +309,7 @@ static int
 scenario_basic_spm_to_dram(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_DRAM0, layout.stride_h * layout.h);
+    clear_region(DST_DRAM0, tensor_bytes(layout));
     fill_tensor(SRC_SPM0, layout);
     launch_move_layout(SRC_SPM0, DST_DRAM0, layout, layout, 6, 0);
     npu_cmd_sync_done();
@@ -277,7 +320,7 @@ static int
 scenario_spm_to_spm(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_SPM0, layout.stride_h * layout.h);
+    clear_region(DST_SPM0, tensor_bytes(layout));
     fill_tensor(SRC_SPM0, layout);
     launch_move_layout(SRC_SPM0, DST_SPM0, layout, layout, 10, 0);
     npu_cmd_sync_done();
@@ -288,7 +331,7 @@ static int
 scenario_dram_to_dram(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_DRAM1, layout.stride_h * layout.h);
+    clear_region(DST_DRAM1, tensor_bytes(layout));
     fill_tensor(SRC_DRAM0, layout);
     launch_move_layout(SRC_DRAM0, DST_DRAM1, layout, layout, 13, 0);
     npu_cmd_sync_done();
@@ -300,7 +343,7 @@ scenario_hwc_to_blocked(void)
 {
     Layout src = make_layout(2, 4, 8, 0);
     Layout dst = make_layout(2, 4, 8, 2);
-    clear_region(DST_SPM0, dst.stride_h * dst.h);
+    clear_region(DST_SPM0, tensor_bytes(dst));
     fill_tensor(SRC_DRAM0, src);
     launch_move_layout(SRC_DRAM0, DST_SPM0, src, dst, 7, 0);
     npu_cmd_sync_done();
@@ -312,7 +355,7 @@ scenario_blocked_to_blocked(void)
 {
     Layout src = make_layout(2, 8, 4, 2);
     Layout dst = make_layout(2, 8, 4, 4);
-    clear_region(DST_DRAM0, dst.stride_h * dst.h);
+    clear_region(DST_DRAM0, tensor_bytes(dst));
     fill_tensor(SRC_SPM0, src);
     launch_move_layout(SRC_SPM0, DST_DRAM0, src, dst, 8, 0);
     npu_cmd_sync_done();
@@ -323,7 +366,7 @@ static int
 scenario_buffer_size_forces_batching(void)
 {
     Layout layout = make_layout(2, 8, 8, 0);
-    clear_region(DST_SPM0, layout.stride_h * layout.h);
+    clear_region(DST_SPM0, tensor_bytes(layout));
     fill_tensor(SRC_DRAM0, layout);
     launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 9, 0);
     npu_cmd_sync_done();
@@ -334,8 +377,8 @@ static int
 scenario_sync_completion(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_SPM0, layout.stride_h * layout.h);
-    clear_region(DST_DRAM1, layout.stride_h * layout.h);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    clear_region(DST_DRAM1, tensor_bytes(layout));
     fill_tensor(SRC_DRAM0, layout);
 
     launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 11, 1);
@@ -350,8 +393,8 @@ static int
 scenario_queued_chain(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
-    clear_region(DST_SPM0, layout.stride_h * layout.h);
-    clear_region(DST_DRAM1, layout.stride_h * layout.h);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    clear_region(DST_DRAM1, tensor_bytes(layout));
     fill_tensor(SRC_DRAM0, layout);
 
     launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 21, 0);
@@ -359,6 +402,80 @@ scenario_queued_chain(void)
     npu_cmd_sync_done();
 
     return poll_until_match(DST_DRAM1, layout) ? 0 : 1;
+}
+
+static int
+scenario_cut_dim_h(void)
+{
+    Layout layout = make_layout_with_cut(4, 3, 2, 2, DMA_CUT_DIM_H);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    fill_tensor(SRC_DRAM0, layout);
+    launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 31, 0);
+    npu_cmd_sync_done();
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_cut_dim_w(void)
+{
+    Layout layout = make_layout_with_cut(2, 8, 4, 2, DMA_CUT_DIM_W);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    fill_tensor(SRC_DRAM0, layout);
+    launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 32, 0);
+    npu_cmd_sync_done();
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_cut_dim_c(void)
+{
+    Layout layout = make_layout_with_cut(2, 4, 8, 2, DMA_CUT_DIM_C);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    fill_tensor(SRC_DRAM0, layout);
+    launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 33, 0);
+    npu_cmd_sync_done();
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_invalid_blocked_k_h(void)
+{
+    Layout src = make_layout_with_cut(3, 4, 8, 2, DMA_CUT_DIM_H);
+    Layout dst = make_layout(3, 4, 8, 0);
+    launch_move_layout(SRC_DRAM0, DST_SPM0, src, dst, 34, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_invalid_blocked_k_c(void)
+{
+    Layout src = make_layout_with_cut(2, 4, 6, 4, DMA_CUT_DIM_C);
+    Layout dst = make_layout(2, 4, 6, 0);
+    launch_move_layout(SRC_DRAM0, DST_SPM0, src, dst, 35, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_memory_space_mismatch(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    NpuCmd cmd;
+
+    build_dma_cmd_raw(&cmd, SRC_SPM0, DST_DRAM0, layout, layout, 0U,
+                      DMA_MODE_MOVE_LAYOUT,
+                      move_layout_mode_cfg_raw(DMA_MEM_SPACE_DRAM,
+                                               DMA_MEM_SPACE_DRAM,
+                                               DMA_CUT_DIM_W,
+                                               DMA_CUT_DIM_W),
+                      0U, 36, 0, 0U);
+    cmd.launchCmd();
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
 }
 
 static int
@@ -522,11 +639,26 @@ main(int argc, char **argv)
     if (strcmp(argv[1], "queued_chain") == 0) {
         return scenario_queued_chain();
     }
+    if (strcmp(argv[1], "cut_dim_h") == 0) {
+        return scenario_cut_dim_h();
+    }
+    if (strcmp(argv[1], "cut_dim_w") == 0) {
+        return scenario_cut_dim_w();
+    }
+    if (strcmp(argv[1], "cut_dim_c") == 0) {
+        return scenario_cut_dim_c();
+    }
     if (strcmp(argv[1], "invalid_destination_address") == 0) {
         return scenario_invalid_destination_address();
     }
     if (strcmp(argv[1], "invalid_blocked_k") == 0) {
         return scenario_invalid_blocked_k();
+    }
+    if (strcmp(argv[1], "invalid_blocked_k_h") == 0) {
+        return scenario_invalid_blocked_k_h();
+    }
+    if (strcmp(argv[1], "invalid_blocked_k_c") == 0) {
+        return scenario_invalid_blocked_k_c();
     }
     if (strcmp(argv[1], "unsupported_data_type") == 0) {
         return scenario_unsupported_data_type();
@@ -545,6 +677,9 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "out_of_range_bank_id") == 0) {
         return scenario_out_of_range_bank_id();
+    }
+    if (strcmp(argv[1], "memory_space_mismatch") == 0) {
+        return scenario_memory_space_mismatch();
     }
     if (strcmp(argv[1], "invalid_address") == 0) {
         return scenario_invalid_address();

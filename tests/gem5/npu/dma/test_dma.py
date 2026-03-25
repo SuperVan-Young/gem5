@@ -61,6 +61,9 @@ add_dma_test("dma_spm_to_spm", "spm_to_spm", r"DMA_SCENARIO_PASS=spm_to_spm")
 add_dma_test(
     "dma_dram_to_dram", "dram_to_dram", r"DMA_SCENARIO_PASS=dram_to_dram"
 )
+add_dma_test("dma_cut_dim_h", "cut_dim_h", r"DMA_SCENARIO_PASS=cut_dim_h")
+add_dma_test("dma_cut_dim_w", "cut_dim_w", r"DMA_SCENARIO_PASS=cut_dim_w")
+add_dma_test("dma_cut_dim_c", "cut_dim_c", r"DMA_SCENARIO_PASS=cut_dim_c")
 add_dma_test(
     "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
 )
@@ -169,6 +172,16 @@ add_dma_panic_test(
     r".*DmaUnit: source blocked layout requires W % k == 0.*",
 )
 add_dma_panic_test(
+    "dma_invalid_blocked_k_h",
+    "invalid_blocked_k_h",
+    r".*DmaUnit: source blocked layout requires H % k == 0.*",
+)
+add_dma_panic_test(
+    "dma_invalid_blocked_k_c",
+    "invalid_blocked_k_c",
+    r".*DmaUnit: source blocked layout requires C % k == 0.*",
+)
+add_dma_panic_test(
     "dma_unsupported_data_type",
     "unsupported_data_type",
     r".*DmaUnit: unsupported data_type=1.*",
@@ -197,4 +210,9 @@ add_dma_panic_test(
     "dma_out_of_range_bank_id",
     "out_of_range_bank_id",
     r".*DmaUnit: src_bank_id=2 exceeds num_banks=2.*",
+)
+add_dma_panic_test(
+    "dma_memory_space_mismatch",
+    "memory_space_mismatch",
+    r".*DmaUnit: invalid source base address 0x60001000.*",
 )
