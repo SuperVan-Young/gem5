@@ -158,6 +158,12 @@ transpose_bank_cfg(uint32_t src_bank_id, uint32_t dst_bank_id)
     return (src_bank_id & 0xfU) | ((dst_bank_id & 0xfU) << 4);
 }
 
+static inline uint32_t
+fill_bank_cfg(uint32_t dst_bank_id)
+{
+    return dst_bank_id & 0xfU;
+}
+
 static void
 build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base,
                   uintptr_t dst_base, Layout src_layout,
@@ -242,6 +248,48 @@ launch_move_layout_with_data_type(uintptr_t src_base, uintptr_t dst_base,
     build_move_layout_cmd_with_data_type(
         &cmd, src_base, dst_base, src_layout, dst_layout, data_type,
         sync_idx, set_completion_sync);
+    cmd.launchCmd();
+}
+
+static void
+build_fill_cmd(NpuCmd *cmd, Layout dst_layout, uint32_t dst_bank_id,
+               uint32_t sync_idx, uint32_t set_completion_sync)
+{
+    const uint32_t op = (0U << 5) | (DMA_MODE_FILL << 2);
+
+    cmd->clear();
+    cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
+    cmd->setDeviceId(DMA_DEVICE_ID);
+    cmd->setOpCode(op);
+    cmd->setSyncIndicator(sync_idx);
+    cmd->setSetIndicatorSns(set_completion_sync ? 1U : 0U);
+    cmd->setSetIndicatorSnd(0U);
+    cmd->clearCommonReservedBits();
+    cmd->setWord(1U, 0U);
+    cmd->setWord(2U, 0U);
+    cmd->setWord(3U, dst_layout.h);
+    cmd->setWord(4U, dst_layout.w);
+    cmd->setWord(5U, dst_layout.c);
+    cmd->setWord(6U, 0U);
+    cmd->setWord(7U, 0U);
+    cmd->setWord(8U, 0U);
+    cmd->setWord(9U, dst_layout.stride_h);
+    cmd->setWord(10U, dst_layout.stride_w);
+    cmd->setWord(11U, dst_layout.stride_c);
+    cmd->setWord(12U, 0U);
+    cmd->setWord(13U, 0U);
+    cmd->setWord(14U, fill_bank_cfg(dst_bank_id));
+    cmd->setWord(15U, 0U);
+}
+
+static void
+launch_fill(Layout dst_layout, uint32_t dst_bank_id, uint32_t sync_idx,
+            uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+
+    build_fill_cmd(&cmd, dst_layout, dst_bank_id, sync_idx,
+                   set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -435,6 +483,64 @@ scenario_cut_dim_c(void)
     launch_move_layout(SRC_DRAM0, DST_SPM0, layout, layout, 33, 0);
     npu_cmd_sync_done();
     return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_fill_zero_bank(void)
+{
+    Layout dst = make_layout(2, 4, 8, 0);
+    launch_fill(dst, 1U, 40, 1U);
+    npu_launch_sync_wait(DMA_DEVICE_ID, 40, 0, 0, 0);
+    npu_cmd_sync_done();
+    return 0;
+}
+
+static int
+scenario_fill_invalid_bank_id(void)
+{
+    Layout dst = make_layout(2, 4, 8, 0);
+    launch_fill(dst, 2U, 41, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_reserved_bank_cfg_bits(void)
+{
+    Layout dst = make_layout(2, 4, 8, 0);
+    NpuCmd cmd;
+
+    build_fill_cmd(&cmd, dst, 1U, 42, 0);
+    cmd.setWord(14U, fill_bank_cfg(1U) | 0x10U);
+    cmd.launchCmd();
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_invalid_contract(void)
+{
+    Layout dst = make_layout(2, 4, 8, 0);
+    NpuCmd cmd;
+
+    build_fill_cmd(&cmd, dst, 1U, 43, 0);
+    cmd.setWord(1U, (uint32_t)SRC_DRAM0);
+    cmd.launchCmd();
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_exceeds_bank_size(void)
+{
+    Layout dst = make_layout(1, 1, 4097, 0);
+    launch_fill(dst, 1U, 44, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
 }
 
 static int
@@ -647,6 +753,21 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "cut_dim_c") == 0) {
         return scenario_cut_dim_c();
+    }
+    if (strcmp(argv[1], "fill_zero_bank") == 0) {
+        return scenario_fill_zero_bank();
+    }
+    if (strcmp(argv[1], "fill_invalid_bank_id") == 0) {
+        return scenario_fill_invalid_bank_id();
+    }
+    if (strcmp(argv[1], "fill_reserved_bank_cfg_bits") == 0) {
+        return scenario_fill_reserved_bank_cfg_bits();
+    }
+    if (strcmp(argv[1], "fill_invalid_contract") == 0) {
+        return scenario_fill_invalid_contract();
+    }
+    if (strcmp(argv[1], "fill_exceeds_bank_size") == 0) {
+        return scenario_fill_exceeds_bank_size();
     }
     if (strcmp(argv[1], "invalid_destination_address") == 0) {
         return scenario_invalid_destination_address();

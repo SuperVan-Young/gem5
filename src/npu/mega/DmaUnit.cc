@@ -58,6 +58,7 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
       numBanks(params.num_banks),
       bankSize(params.bank_size ? params.bank_size : params.buffer_size),
       transposeUnitLatency(params.transpose_unit_latency),
+      bankWorkspace(numBanks),
       parsedCmdValid(false),
       currentY(0),
       currentX(0)
@@ -271,9 +272,41 @@ DmaUnit::validateFillCommand(const ParsedCmd &cmd) const
     panic_if((cmd.bankCfg & ~FillBankCfgMask) != 0,
              "DmaUnit: reserved bank_cfg bits set for fill");
     panic_if(cmd.dstBankId >= numBanks,
-             "DmaUnit: dst_bank_id=%u exceeds num_banks=%zu",
-             cmd.dstBankId, numBanks);
-    panic("DmaUnit: fill mode is not implemented yet");
+             "DmaUnit: dst_bank_id=%u exceeds num_banks=%u",
+             cmd.dstBankId, static_cast<unsigned>(numBanks));
+    panic_if(cmd.srcBaseAddr != 0,
+             "DmaUnit: fill requires src_base_addr == 0");
+    panic_if(cmd.dstBaseAddr != 0,
+             "DmaUnit: fill requires dst_base_addr == 0");
+
+    const bool hasSourceLayoutFields =
+        cmd.srcStrideH != 0 || cmd.srcStrideW != 0 || cmd.srcStrideC != 0 ||
+        cmd.srcK != 0;
+    panic_if(hasSourceLayoutFields,
+             "DmaUnit: fill requires source layout fields == 0");
+    panic_if(cmd.dstK != 0,
+             "DmaUnit: fill requires dst_k == 0");
+
+    const size_t requiredBytes = fillRequiredBytes(cmd);
+    panic_if(requiredBytes > bankSize,
+             "DmaUnit: fill required_bytes=%llu exceeds bank_size=%u",
+             static_cast<unsigned long long>(requiredBytes),
+             static_cast<unsigned>(bankSize));
+}
+
+size_t
+DmaUnit::fillRequiredBytes(const ParsedCmd &cmd) const
+{
+    if (cmd.shapeH == 0 || cmd.shapeW == 0 || cmd.shapeC == 0) {
+        return 0;
+    }
+
+    const unsigned long long requiredBytes =
+        static_cast<unsigned long long>(cmd.shapeH - 1) * cmd.dstStrideH +
+        static_cast<unsigned long long>(cmd.shapeW - 1) * cmd.dstStrideW +
+        static_cast<unsigned long long>(cmd.shapeC - 1) * cmd.dstStrideC +
+        1ULL;
+    return static_cast<size_t>(requiredBytes);
 }
 
 DmaUnit::MemorySpace
@@ -391,12 +424,26 @@ DmaUnit::resetCommandState()
     currentY = 0;
     currentX = 0;
     pendingMvinTxns.clear();
+
+    for (auto &bank : bankWorkspace) {
+        if (!bank.empty()) {
+            std::fill(bank.begin(), bank.end(), 0);
+        }
+    }
 }
 
 bool
 DmaUnit::done() const
 {
-    return !parsedCmdValid || parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
+    if (!parsedCmdValid) {
+        return true;
+    }
+
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        return currentY != 0;
+    }
+
+    return parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
            parsedCmd.shapeC == 0 || currentY >= parsedCmd.shapeH;
 }
 
@@ -424,6 +471,11 @@ DmaUnit::planCurrentBatch()
     batchPlan.startX = currentX;
 
     if (done()) {
+        return;
+    }
+
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        batchPlan.buffer.assign(fillRequiredBytes(parsedCmd), 0);
         return;
     }
 
@@ -576,6 +628,10 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
         return;
     }
 
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        return;
+    }
+
     uint64_t token = nextMemTxnToken;
     for (size_t i = 0; i < batchPlan.sourceLines.size(); ++i) {
         const auto &line = batchPlan.sourceLines[i];
@@ -643,6 +699,12 @@ DmaUnit::execute(ActiveExecution &exec)
         return 0;
     }
 
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        auto &bank = bankWorkspace.at(parsedCmd.dstBankId);
+        bank.assign(bankSize, 0);
+        return 0;
+    }
+
     for (auto &line : batchPlan.destLines) {
         for (const auto &copy : line.copies) {
             line.lineData[copy.lineOffset] =
@@ -663,6 +725,10 @@ DmaUnit::buildMvoutRequests(ActiveExecution &exec,
         return;
     }
 
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        return;
+    }
+
     for (const auto &line : batchPlan.destLines) {
         MemRequestDesc req;
         req.portId = 0;
@@ -678,6 +744,11 @@ void
 DmaUnit::epilogue(ActiveExecution &exec)
 {
     (void)exec;
+
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+        currentY = 1;
+        return;
+    }
 
     if (!batchPlan.buffer.empty()) {
         advanceBatchCursor();

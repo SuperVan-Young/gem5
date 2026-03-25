@@ -65,6 +65,14 @@ add_dma_test("dma_cut_dim_h", "cut_dim_h", r"DMA_SCENARIO_PASS=cut_dim_h")
 add_dma_test("dma_cut_dim_w", "cut_dim_w", r"DMA_SCENARIO_PASS=cut_dim_w")
 add_dma_test("dma_cut_dim_c", "cut_dim_c", r"DMA_SCENARIO_PASS=cut_dim_c")
 add_dma_test(
+    "dma_fill_zero_bank",
+    "fill_zero_bank",
+    (
+        r"(?s)DMA_SUMMARY scenario=fill_zero_bank cmds=1 reads=0 writes=0 .*"
+        r"DMA_SCENARIO_PASS=fill_zero_bank"
+    ),
+)
+add_dma_test(
     "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
 )
 add_dma_test(
@@ -215,4 +223,24 @@ add_dma_panic_test(
     "dma_memory_space_mismatch",
     "memory_space_mismatch",
     r".*DmaUnit: invalid source base address 0x60001000.*",
+)
+add_dma_panic_test(
+    "dma_fill_invalid_bank_id",
+    "fill_invalid_bank_id",
+    r".*DmaUnit: dst_bank_id=2 exceeds num_banks=2.*",
+)
+add_dma_panic_test(
+    "dma_fill_reserved_bank_cfg_bits",
+    "fill_reserved_bank_cfg_bits",
+    r".*DmaUnit: reserved bank_cfg bits set for fill.*",
+)
+add_dma_panic_test(
+    "dma_fill_invalid_contract",
+    "fill_invalid_contract",
+    r".*DmaUnit: fill requires src_base_addr == 0.*",
+)
+add_dma_panic_test(
+    "dma_fill_exceeds_bank_size",
+    "fill_exceeds_bank_size",
+    r".*DmaUnit: fill required_bytes=4097 exceeds bank_size=4096.*",
 )

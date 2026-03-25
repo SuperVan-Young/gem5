@@ -157,6 +157,8 @@ class DmaUnit : public SpecializedExecutionUnit
     const size_t bankSize;
     const Tick transposeUnitLatency;
 
+    std::vector<std::vector<uint8_t>> bankWorkspace;
+
     ParsedCmd parsedCmd;
     BatchPlan batchPlan;
     bool parsedCmdValid;
@@ -170,6 +172,7 @@ class DmaUnit : public SpecializedExecutionUnit
     void validateMoveLayoutCommand(const ParsedCmd &cmd) const;
     void validateTransposeCommand(const ParsedCmd &cmd) const;
     void validateFillCommand(const ParsedCmd &cmd) const;
+    size_t fillRequiredBytes(const ParsedCmd &cmd) const;
     MemorySpace sourceSpace() const;
     MemorySpace destSpace() const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;
