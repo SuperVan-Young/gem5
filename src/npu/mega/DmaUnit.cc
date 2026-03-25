@@ -45,12 +45,19 @@ constexpr Addr DramBase = 0x20000000ULL;
 constexpr Addr DramEnd = 0x5fffffffULL;
 constexpr Addr SpmBase = 0x60000000ULL;
 constexpr Addr SpmEnd = 0x6fffffffULL;
+constexpr uint32_t MoveLayoutModeCfgMask = 0x3fU;
+constexpr uint32_t TransposeModeCfgMask = 0x3fU;
+constexpr uint32_t TransposeBankCfgMask = 0xffU;
+constexpr uint32_t FillBankCfgMask = 0x0fU;
 
 } // namespace
 
 DmaUnit::DmaUnit(const DmaUnitParams &params)
     : SpecializedExecutionUnit(params),
       bufferSize(params.buffer_size),
+      numBanks(params.num_banks),
+      bankSize(params.bank_size ? params.bank_size : params.buffer_size),
+      transposeUnitLatency(params.transpose_unit_latency),
       parsedCmdValid(false),
       currentY(0),
       currentX(0)
@@ -60,6 +67,14 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
     fatal_if(bufferSize == 0 || bufferSize > MaxBufferBytes,
              "%s: DmaUnit buffer_size must be in the range [1, %zu]",
              name(), MaxBufferBytes);
+    fatal_if(numBanks == 0 || numBanks > MaxNumBanks,
+             "%s: DmaUnit num_banks must be in the range [1, %zu]",
+             name(), MaxNumBanks);
+    fatal_if(bankSize == 0 || bankSize > MaxBankBytes ||
+                 (bankSize & (bankSize - 1)) != 0,
+             "%s: DmaUnit bank_size must be a power of two "
+             "in the range [1, %zu]",
+             name(), MaxBankBytes);
     fatal_if(memSidePorts.size() != 1,
              "%s: DmaUnit currently supports exactly one mem_side port",
              name());
@@ -88,7 +103,7 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
 
     parsed.deviceId = (header >> 24) & 0xf;
     parsed.dataType = (opCode >> 5) & 0x7;
-    parsed.xferMode = (opCode >> 2) & 0x7;
+    parsed.mode = (opCode >> 2) & 0x7;
     parsed.syncIndicator = (header >> 8) & 0xff;
     parsed.srcBaseAddr = extractWord(cmd, 1);
     parsed.dstBaseAddr = extractWord(cmd, 2);
@@ -105,6 +120,35 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
     const uint32_t blockCfg = extractWord(cmd, 12);
     parsed.dstK = (blockCfg >> 16) & 0xffff;
     parsed.srcK = blockCfg & 0xffff;
+    parsed.modeCfg = extractWord(cmd, 13);
+    parsed.bankCfg = extractWord(cmd, 14);
+    parsed.reservedWord15 = extractWord(cmd, 15);
+
+    if (parsed.mode <= static_cast<uint8_t>(Mode::Fill)) {
+        switch (static_cast<Mode>(parsed.mode)) {
+          case Mode::MoveLayout:
+            parsed.srcMemSpace =
+                (parsed.modeCfg & 0x1U) ? MemorySpace::Spm : MemorySpace::Dram;
+            parsed.dstMemSpace =
+                (parsed.modeCfg & 0x2U) ? MemorySpace::Spm : MemorySpace::Dram;
+            parsed.srcCutDim = (parsed.modeCfg >> 2) & 0x3;
+            parsed.dstCutDim = (parsed.modeCfg >> 4) & 0x3;
+            break;
+          case Mode::Transpose:
+            parsed.srcMemSpace =
+                (parsed.modeCfg & 0x1U) ? MemorySpace::Spm : MemorySpace::Dram;
+            parsed.dstMemSpace =
+                (parsed.modeCfg & 0x2U) ? MemorySpace::Spm : MemorySpace::Dram;
+            parsed.transposeDimA = (parsed.modeCfg >> 2) & 0x3;
+            parsed.transposeDimB = (parsed.modeCfg >> 4) & 0x3;
+            parsed.srcBankId = parsed.bankCfg & 0xf;
+            parsed.dstBankId = (parsed.bankCfg >> 4) & 0xf;
+            break;
+          case Mode::Fill:
+            parsed.dstBankId = parsed.bankCfg & 0xf;
+            break;
+        }
+    }
 
     panic_if(((header >> 28) & 0xf) != DmaDeviceType,
              "DmaUnit: unexpected device_type=%u", (header >> 28) & 0xf);
@@ -117,11 +161,47 @@ DmaUnit::validateParsedCommand(const ParsedCmd &cmd) const
 {
     panic_if(cmd.dataType != 0,
              "DmaUnit: unsupported data_type=%u", cmd.dataType);
-    panic_if(cmd.xferMode > static_cast<uint8_t>(XferMode::DramToDram),
-             "DmaUnit: unsupported xfer_mode=%u", cmd.xferMode);
+    panic_if(cmd.mode > static_cast<uint8_t>(Mode::Fill),
+             "DmaUnit: unsupported mode=%u", cmd.mode);
+    panic_if(cmd.reservedWord15 != 0,
+             "DmaUnit: Word 15 must be zero, got %#x", cmd.reservedWord15);
 
-    validateBaseAddress(cmd.srcBaseAddr, sourceSpace(), "source");
-    validateBaseAddress(cmd.dstBaseAddr, destSpace(), "destination");
+    switch (static_cast<Mode>(cmd.mode)) {
+      case Mode::MoveLayout:
+        validateMoveLayoutCommand(cmd);
+        return;
+      case Mode::Transpose:
+        validateTransposeCommand(cmd);
+        return;
+      case Mode::Fill:
+        validateFillCommand(cmd);
+        return;
+    }
+
+    panic("DmaUnit: unreachable mode validation");
+}
+
+void
+DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
+{
+    panic_if((cmd.modeCfg & ~MoveLayoutModeCfgMask) != 0,
+             "DmaUnit: reserved mode_cfg bits set for move_layout");
+    panic_if(cmd.srcCutDim > static_cast<uint8_t>(CutDim::C),
+             "DmaUnit: reserved src_cut_dim=%u", cmd.srcCutDim);
+    panic_if(cmd.dstCutDim > static_cast<uint8_t>(CutDim::C),
+             "DmaUnit: reserved dst_cut_dim=%u", cmd.dstCutDim);
+    panic_if(cmd.bankCfg != 0,
+             "DmaUnit: move_layout requires bank_cfg == 0");
+
+    validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
+    validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
+
+    panic_if(cmd.srcCutDim != static_cast<uint8_t>(CutDim::W),
+             "DmaUnit: move_layout src_cut_dim=%u is not supported yet",
+             cmd.srcCutDim);
+    panic_if(cmd.dstCutDim != static_cast<uint8_t>(CutDim::W),
+             "DmaUnit: move_layout dst_cut_dim=%u is not supported yet",
+             cmd.dstCutDim);
 
     if (cmd.srcK > 0) {
         const bool invalidSourceBlockedK = (cmd.shapeW % cmd.srcK) != 0;
@@ -135,34 +215,73 @@ DmaUnit::validateParsedCommand(const ParsedCmd &cmd) const
     }
 }
 
+void
+DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
+{
+    panic_if((cmd.modeCfg & ~TransposeModeCfgMask) != 0,
+             "DmaUnit: reserved mode_cfg bits set for transpose");
+    panic_if(cmd.transposeDimA > static_cast<uint8_t>(CutDim::C),
+             "DmaUnit: reserved transpose_dim_a=%u", cmd.transposeDimA);
+    panic_if(cmd.transposeDimB > static_cast<uint8_t>(CutDim::C),
+             "DmaUnit: reserved transpose_dim_b=%u", cmd.transposeDimB);
+    panic_if((cmd.bankCfg & ~TransposeBankCfgMask) != 0,
+             "DmaUnit: reserved bank_cfg bits set for transpose");
+    panic_if(cmd.srcBankId >= numBanks,
+             "DmaUnit: src_bank_id=%u exceeds num_banks=%u",
+             cmd.srcBankId, static_cast<unsigned>(numBanks));
+    panic_if(cmd.dstBankId >= numBanks,
+             "DmaUnit: dst_bank_id=%u exceeds num_banks=%u",
+             cmd.dstBankId, static_cast<unsigned>(numBanks));
+    panic_if(cmd.srcBankId == cmd.dstBankId,
+             "DmaUnit: transpose requires src_bank_id != dst_bank_id");
+
+    validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
+    validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
+
+    panic_if(cmd.srcK != 0 || cmd.dstK != 0,
+             "DmaUnit: transpose requires src_k == 0 and dst_k == 0");
+    panic("DmaUnit: transpose mode is not implemented yet");
+}
+
+void
+DmaUnit::validateFillCommand(const ParsedCmd &cmd) const
+{
+    panic_if(cmd.modeCfg != 0,
+             "DmaUnit: reserved mode_cfg bits set for fill");
+    panic_if((cmd.bankCfg & ~FillBankCfgMask) != 0,
+             "DmaUnit: reserved bank_cfg bits set for fill");
+    panic_if(cmd.dstBankId >= numBanks,
+             "DmaUnit: dst_bank_id=%u exceeds num_banks=%zu",
+             cmd.dstBankId, numBanks);
+    panic("DmaUnit: fill mode is not implemented yet");
+}
+
 DmaUnit::MemorySpace
 DmaUnit::sourceSpace() const
 {
-    switch (static_cast<XferMode>(parsedCmd.xferMode)) {
-      case XferMode::DramToSpm:
-      case XferMode::DramToDram:
-        return MemorySpace::Dram;
-      case XferMode::SpmToDram:
-      case XferMode::SpmToSpm:
-        return MemorySpace::Spm;
+    switch (static_cast<Mode>(parsedCmd.mode)) {
+      case Mode::MoveLayout:
+      case Mode::Transpose:
+        return parsedCmd.srcMemSpace;
+      case Mode::Fill:
+        panic("DmaUnit: fill mode has no external source space");
     }
 
-    panic("DmaUnit: unreachable source xfer mode");
+    panic("DmaUnit: unreachable source mode");
 }
 
 DmaUnit::MemorySpace
 DmaUnit::destSpace() const
 {
-    switch (static_cast<XferMode>(parsedCmd.xferMode)) {
-      case XferMode::DramToSpm:
-      case XferMode::SpmToSpm:
-        return MemorySpace::Spm;
-      case XferMode::SpmToDram:
-      case XferMode::DramToDram:
-        return MemorySpace::Dram;
+    switch (static_cast<Mode>(parsedCmd.mode)) {
+      case Mode::MoveLayout:
+      case Mode::Transpose:
+        return parsedCmd.dstMemSpace;
+      case Mode::Fill:
+        panic("DmaUnit: fill mode has no external destination space");
     }
 
-    panic("DmaUnit: unreachable destination xfer mode");
+    panic("DmaUnit: unreachable destination mode");
 }
 
 bool

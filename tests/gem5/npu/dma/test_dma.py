@@ -173,3 +173,28 @@ add_dma_panic_test(
     "unsupported_data_type",
     r".*DmaUnit: unsupported data_type=1.*",
 )
+add_dma_panic_test(
+    "dma_reserved_mode",
+    "reserved_mode",
+    r".*DmaUnit: unsupported mode=3.*",
+)
+add_dma_panic_test(
+    "dma_reserved_cut_dim",
+    "reserved_cut_dim",
+    r".*DmaUnit: reserved src_cut_dim=3.*",
+)
+add_dma_panic_test(
+    "dma_reserved_transpose_dim",
+    "reserved_transpose_dim",
+    r".*DmaUnit: reserved transpose_dim_a=3.*",
+)
+add_dma_panic_test(
+    "dma_reserved_bank_cfg_bits",
+    "reserved_bank_cfg_bits",
+    r".*DmaUnit: reserved bank_cfg bits set for transpose.*",
+)
+add_dma_panic_test(
+    "dma_out_of_range_bank_id",
+    "out_of_range_bank_id",
+    r".*DmaUnit: src_bank_id=2 exceeds num_banks=2.*",
+)

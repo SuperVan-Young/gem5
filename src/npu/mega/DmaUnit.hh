@@ -45,12 +45,19 @@ namespace gem5
 class DmaUnit : public SpecializedExecutionUnit
 {
   private:
-    enum class XferMode : uint8_t
+    enum class Mode : uint8_t
     {
-        DramToSpm = 0,
-        SpmToDram = 1,
-        SpmToSpm = 2,
-        DramToDram = 3,
+        MoveLayout = 0,
+        Transpose = 1,
+        Fill = 2,
+    };
+
+    enum class CutDim : uint8_t
+    {
+        H = 0,
+        W = 1,
+        C = 2,
+        Reserved = 3,
     };
 
     enum class MemorySpace : uint8_t
@@ -69,8 +76,19 @@ class DmaUnit : public SpecializedExecutionUnit
     {
         uint8_t deviceId = 0;
         uint8_t dataType = 0;
-        uint8_t xferMode = 0;
+        uint8_t mode = 0;
         uint8_t syncIndicator = 0;
+        MemorySpace srcMemSpace = MemorySpace::Dram;
+        MemorySpace dstMemSpace = MemorySpace::Dram;
+        uint8_t srcCutDim = 0;
+        uint8_t dstCutDim = 0;
+        uint8_t transposeDimA = 0;
+        uint8_t transposeDimB = 0;
+        uint8_t srcBankId = 0;
+        uint8_t dstBankId = 0;
+        uint32_t modeCfg = 0;
+        uint32_t bankCfg = 0;
+        uint32_t reservedWord15 = 0;
         Addr srcBaseAddr = 0;
         Addr dstBaseAddr = 0;
         uint32_t shapeH = 0;
@@ -131,8 +149,13 @@ class DmaUnit : public SpecializedExecutionUnit
     static constexpr size_t CacheLineBytes = 64;
     static constexpr uint8_t DmaDeviceType = 0x4;
     static constexpr size_t MaxBufferBytes = 256 * 1024 * 1024ULL;
+    static constexpr size_t MaxBankBytes = 16 * 1024 * 1024ULL;
+    static constexpr size_t MaxNumBanks = 16;
 
     const size_t bufferSize;
+    const size_t numBanks;
+    const size_t bankSize;
+    const Tick transposeUnitLatency;
 
     ParsedCmd parsedCmd;
     BatchPlan batchPlan;
@@ -144,6 +167,9 @@ class DmaUnit : public SpecializedExecutionUnit
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
     void validateParsedCommand(const ParsedCmd &cmd) const;
+    void validateMoveLayoutCommand(const ParsedCmd &cmd) const;
+    void validateTransposeCommand(const ParsedCmd &cmd) const;
+    void validateFillCommand(const ParsedCmd &cmd) const;
     MemorySpace sourceSpace() const;
     MemorySpace destSpace() const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;
