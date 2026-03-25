@@ -557,10 +557,11 @@ DmaUnit::planCurrentBatch()
     buildBatchLines();
 
     DPRINTF(DmaUnit,
-            "Planned batch y=%u x=%u h=%u w=%u src_lines=%zu dst_lines=%zu\n",
+            "Planned batch y=%u x=%u h=%u w=%u src_lines=%u dst_lines=%u\n",
             batchPlan.startY, batchPlan.startX, batchPlan.height,
-            batchPlan.width, batchPlan.sourceLines.size(),
-            batchPlan.destLines.size());
+            batchPlan.width,
+            static_cast<unsigned>(batchPlan.sourceLines.size()),
+            static_cast<unsigned>(batchPlan.destLines.size()));
 }
 
 void
