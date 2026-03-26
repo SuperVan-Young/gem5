@@ -151,9 +151,12 @@ add_dma_test(
     r"DMA_SCENARIO_PASS=blocked_to_blocked",
 )
 add_dma_test(
-    "dma_buffer_size_forces_batching",
-    "buffer_size_forces_batching",
-    r"DMA_SCENARIO_PASS=buffer_size_forces_batching",
+    "dma_bank_size_forces_batching",
+    "bank_size_forces_batching",
+    (
+        r"DMA_SUMMARY scenario=bank_size_forces_batching cmds=1 reads=8 writes=4 iters=4 .*",
+        r"DMA_SCENARIO_PASS=bank_size_forces_batching",
+    ),
 )
 add_dma_test(
     "dma_sync_completion",

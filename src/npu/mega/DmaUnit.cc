@@ -55,9 +55,8 @@ constexpr uint32_t FillBankCfgMask = 0x0fU;
 
 DmaUnit::DmaUnit(const DmaUnitParams &params)
     : SpecializedExecutionUnit(params),
-      bufferSize(params.buffer_size),
       numBanks(params.num_banks),
-      bankSize(params.bank_size ? params.bank_size : params.buffer_size),
+      bankSize(params.bank_size),
       transposeUnitLatency(params.transpose_unit_latency),
       bankWorkspace(numBanks),
       parsedCmdValid(false),
@@ -66,9 +65,7 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
 {
     fatal_if(macroCmdBytes != CacheLineBytes,
              "%s: DmaUnit requires 64-byte commands", name());
-    fatal_if(bufferSize == 0 || bufferSize > MaxBufferBytes,
-             "%s: DmaUnit buffer_size must be in the range [1, %zu]",
-             name(), MaxBufferBytes);
+
     fatal_if(numBanks == 0 || numBanks > MaxNumBanks,
              "%s: DmaUnit num_banks must be in the range [1, %zu]",
              name(), MaxNumBanks);
@@ -612,9 +609,9 @@ DmaUnit::planCurrentBatch()
     }
 
     const size_t channels = parsedCmd.shapeC;
-    panic_if(channels > bufferSize,
-             "DmaUnit: buffer_size=%zu is too small for a (1,1,C) tile",
-             bufferSize);
+    panic_if(channels > bankSize,
+             "DmaUnit: bank_size=%zu is too small for a (1,1,C) tile",
+             bankSize);
 
     const uint32_t remainingH = parsedCmd.shapeH - currentY;
     const uint32_t remainingW = parsedCmd.shapeW - currentX;
@@ -622,19 +619,19 @@ DmaUnit::planCurrentBatch()
     if (currentX == 0) {
         const size_t hSliceBytes =
             static_cast<size_t>(parsedCmd.shapeW) * parsedCmd.shapeC;
-        if (hSliceBytes <= bufferSize) {
+        if (hSliceBytes <= bankSize) {
             batchPlan.height = std::max<uint32_t>(
-                1, std::min<uint32_t>(remainingH, bufferSize / hSliceBytes));
+                1, std::min<uint32_t>(remainingH, bankSize / hSliceBytes));
             batchPlan.width = parsedCmd.shapeW;
         } else {
             batchPlan.height = 1;
             batchPlan.width = std::max<uint32_t>(
-                1, std::min<uint32_t>(remainingW, bufferSize / channels));
+                1, std::min<uint32_t>(remainingW, bankSize / channels));
         }
     } else {
         batchPlan.height = 1;
         batchPlan.width = std::max<uint32_t>(
-            1, std::min<uint32_t>(remainingW, bufferSize / channels));
+            1, std::min<uint32_t>(remainingW, bankSize / channels));
     }
 
     panic_if(batchPlan.width == 0,
@@ -642,7 +639,11 @@ DmaUnit::planCurrentBatch()
 
     const size_t batchBytes = static_cast<size_t>(batchPlan.height) *
                               batchPlan.width * parsedCmd.shapeC;
-    batchPlan.buffer.assign(batchBytes, 0);
+    panic_if(batchBytes > bankSize,
+             "DmaUnit: planned move_layout batch requires %zu bytes, "
+             "exceeds bank_size=%zu",
+             batchBytes, bankSize);
+    bankWorkspace.front().assign(bankSize, 0);
     buildBatchLines();
 
     DPRINTF(DmaUnit,
@@ -881,8 +882,9 @@ DmaUnit::onMvinResponse(ActiveExecution &exec,
                 srcBank[copy.bufferOffset] = data[copy.lineOffset];
             }
         } else {
+            auto &workspace = bankWorkspace.front();
             for (const auto &copy : line.copies) {
-                batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
+                workspace[copy.bufferOffset] = data[copy.lineOffset];
             }
         }
         break;
@@ -982,10 +984,10 @@ DmaUnit::execute(ActiveExecution &exec)
             static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
     }
 
+    auto &workspace = bankWorkspace.front();
     for (auto &line : batchPlan.destLines) {
         for (const auto &copy : line.copies) {
-            line.lineData[copy.lineOffset] =
-                batchPlan.buffer[copy.bufferOffset];
+            line.lineData[copy.lineOffset] = workspace[copy.bufferOffset];
         }
     }
 
@@ -1030,7 +1032,7 @@ DmaUnit::epilogue(ActiveExecution &exec)
         return;
     }
 
-    if (!batchPlan.buffer.empty()) {
+    if (batchPlan.height != 0 && batchPlan.width != 0) {
         advanceBatchCursor();
     }
 }

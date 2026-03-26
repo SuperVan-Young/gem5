@@ -151,11 +151,9 @@ class DmaUnit : public SpecializedExecutionUnit
 
     static constexpr size_t CacheLineBytes = 64;
     static constexpr uint8_t DmaDeviceType = 0x4;
-    static constexpr size_t MaxBufferBytes = 256 * 1024 * 1024ULL;
     static constexpr size_t MaxBankBytes = 16 * 1024 * 1024ULL;
     static constexpr size_t MaxNumBanks = 16;
 
-    const size_t bufferSize;
     const size_t numBanks;
     const size_t bankSize;
     const Tick transposeUnitLatency;

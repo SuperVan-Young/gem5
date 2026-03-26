@@ -19,7 +19,7 @@ dma_base = 0x74000000
 dram_base = 0x20000000
 spm_base = 0x60000000
 spm_size = 64 * 1024
-buffer_size = 32 if args.scenario == "buffer_size_forces_batching" else 4096
+bank_size = 32 if args.scenario == "bank_size_forces_batching" else 4096
 expected_exit_cause = "exiting with last active thread context"
 expected_exit_code = 0
 
@@ -74,7 +74,7 @@ system.dma = DmaUnit(
     macro_cmd_bytes=cmd_bytes,
     cmd_queue_depth=8,
     sync_enqueue_on_data_write=True,
-    buffer_size=buffer_size,
+    bank_size=bank_size,
     num_mem_side_ports=dma_mem_ports,
 )
 system.dma.cpu_side = system.membus.mem_side_ports

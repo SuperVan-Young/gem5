@@ -524,7 +524,7 @@ scenario_blocked_to_blocked(void)
 }
 
 static int
-scenario_buffer_size_forces_batching(void)
+scenario_bank_size_forces_batching(void)
 {
     Layout layout = make_layout(2, 8, 8, 0);
     clear_region(DST_SPM0, tensor_bytes(layout));
@@ -1037,8 +1037,8 @@ main(int argc, char **argv)
     if (strcmp(argv[1], "blocked_to_blocked") == 0) {
         return scenario_blocked_to_blocked();
     }
-    if (strcmp(argv[1], "buffer_size_forces_batching") == 0) {
-        return scenario_buffer_size_forces_batching();
+    if (strcmp(argv[1], "bank_size_forces_batching") == 0) {
+        return scenario_bank_size_forces_batching();
     }
     if (strcmp(argv[1], "sync_completion") == 0) {
         return scenario_sync_completion();
