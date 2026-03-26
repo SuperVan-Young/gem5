@@ -661,8 +661,8 @@ scenario_fill_nonzero_bank(void)
 static int
 scenario_transpose_hw(void)
 {
-    Layout src = make_layout(2, 4, 1, 0);
-    Layout dst = make_layout(4, 2, 1, 0);
+    Layout src = make_layout(2, 4, 3, 0);
+    Layout dst = make_layout(4, 2, 3, 0);
     clear_region(DST_SPM0, tensor_bytes(dst));
     fill_tensor(SRC_DRAM0, src);
     launch_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
@@ -675,8 +675,8 @@ scenario_transpose_hw(void)
 static int
 scenario_transpose_hc(void)
 {
-    Layout src = make_layout(2, 1, 4, 0);
-    Layout dst = make_layout(4, 1, 2, 0);
+    Layout src = make_layout(2, 3, 4, 0);
+    Layout dst = make_layout(4, 3, 2, 0);
     clear_region(DST_DRAM0, tensor_bytes(dst));
     fill_tensor(SRC_SPM0, src);
     launch_transpose(SRC_SPM0, DST_DRAM0, src, dst, DMA_CUT_DIM_H,
@@ -689,8 +689,8 @@ scenario_transpose_hc(void)
 static int
 scenario_transpose_wc(void)
 {
-    Layout src = make_layout(1, 2, 4, 0);
-    Layout dst = make_layout(1, 4, 2, 0);
+    Layout src = make_layout(3, 2, 4, 0);
+    Layout dst = make_layout(3, 4, 2, 0);
     clear_region(DST_DRAM1, tensor_bytes(dst));
     fill_tensor(SRC_DRAM0, src);
     launch_transpose(SRC_DRAM0, DST_DRAM1, src, dst, DMA_CUT_DIM_W,

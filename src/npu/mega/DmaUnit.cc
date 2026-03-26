@@ -279,10 +279,6 @@ DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
     panic_if(cmd.srcK != 0 || cmd.dstK != 0,
              "DmaUnit: transpose requires src_k == 0 and dst_k == 0");
 
-    const uint8_t remainingDim = 3 - cmd.transposeDimA - cmd.transposeDimB;
-    panic_if(axisExtent(cmd, remainingDim) != 1,
-             "DmaUnit: transpose requires non-transposed axis extent == 1");
-
     const size_t requiredBytes = transposeRequiredBytes(cmd);
     panic_if(requiredBytes > bankSize,
              "DmaUnit: transpose required_bytes=%llu exceeds bank_size=%u",
