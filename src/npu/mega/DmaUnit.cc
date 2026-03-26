@@ -47,6 +47,7 @@ constexpr Addr SpmBase = 0x60000000ULL;
 constexpr Addr SpmEnd = 0x6fffffffULL;
 constexpr uint32_t MoveLayoutModeCfgMask = 0x3fU;
 constexpr uint32_t TransposeModeCfgMask = 0x3fU;
+constexpr uint32_t FillModeCfgMask = 0x3U;
 constexpr uint32_t TransposeBankCfgMask = 0xffU;
 constexpr uint32_t FillBankCfgMask = 0x0fU;
 
@@ -123,7 +124,8 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
     parsed.srcK = blockCfg & 0xffff;
     parsed.modeCfg = extractWord(cmd, 13);
     parsed.bankCfg = extractWord(cmd, 14);
-    parsed.reservedWord15 = extractWord(cmd, 15);
+    parsed.word15 = extractWord(cmd, 15);
+    parsed.fillValue = parsed.word15 & 0xffU;
 
     if (parsed.mode <= static_cast<uint8_t>(Mode::Fill)) {
         switch (static_cast<Mode>(parsed.mode)) {
@@ -146,6 +148,20 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
             parsed.dstBankId = (parsed.bankCfg >> 4) & 0xf;
             break;
           case Mode::Fill:
+            switch (parsed.modeCfg & FillModeCfgMask) {
+              case 0x0U:
+                parsed.dstMemSpace = MemorySpace::Dram;
+                break;
+              case 0x1U:
+                parsed.dstMemSpace = MemorySpace::Spm;
+                break;
+              case 0x2U:
+                parsed.dstMemSpace = MemorySpace::DmaBank;
+                break;
+              default:
+                parsed.dstMemSpace = MemorySpace::Invalid;
+                break;
+            }
             parsed.dstBankId = parsed.bankCfg & 0xf;
             break;
         }
@@ -164,14 +180,16 @@ DmaUnit::validateParsedCommand(const ParsedCmd &cmd) const
              "DmaUnit: unsupported data_type=%u", cmd.dataType);
     panic_if(cmd.mode > static_cast<uint8_t>(Mode::Fill),
              "DmaUnit: unsupported mode=%u", cmd.mode);
-    panic_if(cmd.reservedWord15 != 0,
-             "DmaUnit: Word 15 must be zero, got %#x", cmd.reservedWord15);
 
     switch (static_cast<Mode>(cmd.mode)) {
       case Mode::MoveLayout:
-        validateMoveLayoutCommand(cmd);
-        return;
       case Mode::Transpose:
+        panic_if(cmd.word15 != 0,
+                 "DmaUnit: Word 15 must be zero, got %#x", cmd.word15);
+        if (static_cast<Mode>(cmd.mode) == Mode::MoveLayout) {
+            validateMoveLayoutCommand(cmd);
+            return;
+        }
         validateTransposeCommand(cmd);
         return;
       case Mode::Fill:
@@ -278,17 +296,16 @@ DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
 void
 DmaUnit::validateFillCommand(const ParsedCmd &cmd) const
 {
-    panic_if(cmd.modeCfg != 0,
+    panic_if((cmd.modeCfg & ~FillModeCfgMask) != 0,
              "DmaUnit: reserved mode_cfg bits set for fill");
+    panic_if(cmd.dstMemSpace == MemorySpace::Invalid,
+             "DmaUnit: reserved dst_mem_space=3 for fill");
     panic_if((cmd.bankCfg & ~FillBankCfgMask) != 0,
              "DmaUnit: reserved bank_cfg bits set for fill");
-    panic_if(cmd.dstBankId >= numBanks,
-             "DmaUnit: dst_bank_id=%u exceeds num_banks=%u",
-             cmd.dstBankId, static_cast<unsigned>(numBanks));
+    panic_if((cmd.word15 & ~0xffU) != 0,
+             "DmaUnit: fill requires Word 15[31:8] == 0");
     panic_if(cmd.srcBaseAddr != 0,
              "DmaUnit: fill requires src_base_addr == 0");
-    panic_if(cmd.dstBaseAddr != 0,
-             "DmaUnit: fill requires dst_base_addr == 0");
 
     const bool hasSourceLayoutFields =
         cmd.srcStrideH != 0 || cmd.srcStrideW != 0 || cmd.srcStrideC != 0 ||
@@ -298,11 +315,25 @@ DmaUnit::validateFillCommand(const ParsedCmd &cmd) const
     panic_if(cmd.dstK != 0,
              "DmaUnit: fill requires dst_k == 0");
 
-    const size_t requiredBytes = fillRequiredBytes(cmd);
-    panic_if(requiredBytes > bankSize,
-             "DmaUnit: fill required_bytes=%llu exceeds bank_size=%u",
-             static_cast<unsigned long long>(requiredBytes),
-             static_cast<unsigned>(bankSize));
+    if (cmd.dstMemSpace == MemorySpace::DmaBank) {
+        panic_if(cmd.dstBankId >= numBanks,
+                 "DmaUnit: dst_bank_id=%u exceeds num_banks=%u",
+                 cmd.dstBankId, static_cast<unsigned>(numBanks));
+        panic_if(cmd.dstBaseAddr != 0,
+                 "DmaUnit: fill->DMA_BANK requires dst_base_addr == 0");
+
+        const size_t requiredBytes = fillRequiredBytes(cmd);
+        panic_if(requiredBytes > bankSize,
+                 "DmaUnit: fill required_bytes=%llu exceeds bank_size=%u",
+                 static_cast<unsigned long long>(requiredBytes),
+                 static_cast<unsigned>(bankSize));
+        return;
+    }
+
+    panic_if(cmd.dstBankId != 0,
+             "DmaUnit: external fill requires dst_bank_id == 0");
+    validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
+    externalFillLineAddrs(cmd);
 }
 
 size_t
@@ -343,6 +374,53 @@ DmaUnit::axisExtent(const ParsedCmd &cmd, uint8_t dim) const
     panic("DmaUnit: unreachable axis extent dimension");
 }
 
+bool
+DmaUnit::isExternalSpace(MemorySpace space) const
+{
+    return space == MemorySpace::Dram || space == MemorySpace::Spm;
+}
+
+std::vector<Addr>
+DmaUnit::externalFillLineAddrs(const ParsedCmd &cmd) const
+{
+    panic_if(!isExternalSpace(cmd.dstMemSpace),
+             "DmaUnit: external fill requires DRAM or SPM destination space");
+
+    std::map<Addr, std::array<bool, CacheLineBytes>> coverageMap;
+    if (cmd.shapeH == 0 || cmd.shapeW == 0 || cmd.shapeC == 0) {
+        return {};
+    }
+
+    for (uint32_t y = 0; y < cmd.shapeH; ++y) {
+        for (uint32_t x = 0; x < cmd.shapeW; ++x) {
+            for (uint32_t z = 0; z < cmd.shapeC; ++z) {
+                const Addr dstAddr = computeTensorAddr(
+                    cmd.dstBaseAddr, cmd.dstStrideH, cmd.dstStrideW,
+                    cmd.dstStrideC, 0, cmd.shapeW, cmd.shapeC,
+                    static_cast<uint8_t>(CutDim::W), y, x, z);
+                const Addr lineAddr = dstAddr & ~(CacheLineBytes - 1);
+                validateBurstLine(lineAddr, cmd.dstMemSpace,
+                                  "fill destination");
+                coverageMap[lineAddr][dstAddr - lineAddr] = true;
+            }
+        }
+    }
+
+    std::vector<Addr> lineAddrs;
+    for (const auto &entry : coverageMap) {
+        const bool fullyCovered = std::all_of(
+            entry.second.begin(), entry.second.end(),
+            [](bool covered) { return covered; });
+        panic_if(!fullyCovered,
+                 "DmaUnit: external fill requires full 64B cache-line "
+                 "coverage at %#llx",
+                 static_cast<unsigned long long>(entry.first));
+        lineAddrs.push_back(entry.first);
+    }
+
+    return lineAddrs;
+}
+
 DmaUnit::MemorySpace
 DmaUnit::sourceSpace() const
 {
@@ -374,6 +452,8 @@ DmaUnit::destSpace() const
 bool
 DmaUnit::spaceContains(MemorySpace space, Addr addr, size_t size) const
 {
+    panic_if(!isExternalSpace(space),
+             "DmaUnit: invalid external memory space validation");
     panic_if(size == 0, "DmaUnit: zero-sized memory validation is invalid");
 
     const Addr base = (space == MemorySpace::Dram) ? DramBase : SpmBase;
@@ -510,7 +590,16 @@ DmaUnit::planCurrentBatch()
     }
 
     if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
-        batchPlan.buffer.assign(fillRequiredBytes(parsedCmd), 0);
+        if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
+            return;
+        }
+
+        for (Addr lineAddr : externalFillLineAddrs(parsedCmd)) {
+            DestLine line;
+            line.lineAddr = lineAddr;
+            line.lineData.fill(parsedCmd.fillValue);
+            batchPlan.destLines.push_back(line);
+        }
         return;
     }
 
@@ -817,8 +906,35 @@ DmaUnit::execute(ActiveExecution &exec)
     }
 
     if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
-        auto &bank = bankWorkspace.at(parsedCmd.dstBankId);
-        bank.assign(bankSize, 0);
+        if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
+            auto &bank = bankWorkspace.at(parsedCmd.dstBankId);
+            bank.assign(bankSize, 0);
+
+            for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
+                for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
+                    for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
+                        const size_t bankOffset = computeTensorAddr(
+                            0, parsedCmd.dstStrideH, parsedCmd.dstStrideW,
+                            parsedCmd.dstStrideC, 0, parsedCmd.shapeW,
+                            parsedCmd.shapeC,
+                            static_cast<uint8_t>(CutDim::W), y, x, z);
+                        bank[bankOffset] = parsedCmd.fillValue;
+                    }
+                }
+            }
+
+            const size_t requiredBytes = fillRequiredBytes(parsedCmd);
+            unsigned long long checksum = 0;
+            for (size_t i = 0; i < requiredBytes; ++i) {
+                checksum += bank[i];
+            }
+
+            DPRINTF(DmaUnit,
+                    "DMA_BANK_FILL_OBSERVE bank=%u value=%u required=%llu "
+                    "checksum=%llu\n",
+                    parsedCmd.dstBankId, parsedCmd.fillValue,
+                    static_cast<unsigned long long>(requiredBytes), checksum);
+        }
         return 0;
     }
 
@@ -886,7 +1002,8 @@ DmaUnit::buildMvoutRequests(ActiveExecution &exec,
         return;
     }
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
+    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill &&
+        parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
         return;
     }
 

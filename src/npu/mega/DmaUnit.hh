@@ -62,8 +62,10 @@ class DmaUnit : public SpecializedExecutionUnit
 
     enum class MemorySpace : uint8_t
     {
-        Dram,
-        Spm,
+        Dram = 0,
+        Spm = 1,
+        DmaBank = 2,
+        Invalid = 3,
     };
 
     enum class PendingMvinKind : uint8_t
@@ -88,7 +90,8 @@ class DmaUnit : public SpecializedExecutionUnit
         uint8_t dstBankId = 0;
         uint32_t modeCfg = 0;
         uint32_t bankCfg = 0;
-        uint32_t reservedWord15 = 0;
+        uint32_t word15 = 0;
+        uint8_t fillValue = 0;
         Addr srcBaseAddr = 0;
         Addr dstBaseAddr = 0;
         uint32_t shapeH = 0;
@@ -175,6 +178,8 @@ class DmaUnit : public SpecializedExecutionUnit
     size_t fillRequiredBytes(const ParsedCmd &cmd) const;
     size_t transposeRequiredBytes(const ParsedCmd &cmd) const;
     uint32_t axisExtent(const ParsedCmd &cmd, uint8_t dim) const;
+    bool isExternalSpace(MemorySpace space) const;
+    std::vector<Addr> externalFillLineAddrs(const ParsedCmd &cmd) const;
     MemorySpace sourceSpace() const;
     MemorySpace destSpace() const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;

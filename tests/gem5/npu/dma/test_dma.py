@@ -33,10 +33,29 @@ build_fixture = MakeTarget(
 )
 
 
+def make_named_regex_verifier(
+    name, regex, *, match_stderr=True, match_stdout=True
+):
+    verifier_cls = type(name, (verifier.MatchRegex,), {})
+    return verifier_cls(
+        re.compile(regex),
+        match_stderr=match_stderr,
+        match_stdout=match_stdout,
+    )
+
+
 def add_dma_test(name, scenario, verifier_regex):
+    if isinstance(verifier_regex, str):
+        verifiers = [make_named_regex_verifier(f"{name}Regex", verifier_regex)]
+    else:
+        verifiers = [
+            make_named_regex_verifier(f"{name}Regex{index}", regex)
+            for index, regex in enumerate(verifier_regex, start=1)
+        ]
+
     gem5_verify_config(
         name=name,
-        verifiers=[verifier.MatchRegex(re.compile(verifier_regex))],
+        verifiers=verifiers,
         config=config_path,
         config_args=["--binary", str(binary), "--scenario", scenario],
         gem5_args=["--debug-flags=DmaUnit,MegaCmdQueue"],
@@ -68,8 +87,50 @@ add_dma_test(
     "dma_fill_zero_bank",
     "fill_zero_bank",
     (
-        r"(?s)DMA_SUMMARY scenario=fill_zero_bank cmds=1 reads=0 writes=0 .*"
-        r"DMA_SCENARIO_PASS=fill_zero_bank"
+        r".*DMA_BANK_FILL_OBSERVE bank=1 value=0 required=64 checksum=0",
+        r"DMA_SUMMARY scenario=fill_zero_bank cmds=1 reads=0 writes=0 .*",
+        r"DMA_SCENARIO_PASS=fill_zero_bank",
+    ),
+)
+add_dma_test(
+    "dma_fill_zero_dram",
+    "fill_zero_dram",
+    (
+        r"DMA_SUMMARY scenario=fill_zero_dram cmds=1 reads=0 writes=1 .*",
+        r"DMA_SCENARIO_PASS=fill_zero_dram",
+    ),
+)
+add_dma_test(
+    "dma_fill_zero_spm",
+    "fill_zero_spm",
+    (
+        r"DMA_SUMMARY scenario=fill_zero_spm cmds=1 reads=0 writes=1 .*",
+        r"DMA_SCENARIO_PASS=fill_zero_spm",
+    ),
+)
+add_dma_test(
+    "dma_fill_nonzero_dram",
+    "fill_nonzero_dram",
+    (
+        r"DMA_SUMMARY scenario=fill_nonzero_dram cmds=1 reads=0 writes=1 .*",
+        r"DMA_SCENARIO_PASS=fill_nonzero_dram",
+    ),
+)
+add_dma_test(
+    "dma_fill_nonzero_spm",
+    "fill_nonzero_spm",
+    (
+        r"DMA_SUMMARY scenario=fill_nonzero_spm cmds=1 reads=0 writes=1 .*",
+        r"DMA_SCENARIO_PASS=fill_nonzero_spm",
+    ),
+)
+add_dma_test(
+    "dma_fill_nonzero_bank",
+    "fill_nonzero_bank",
+    (
+        r".*DMA_BANK_FILL_OBSERVE bank=1 value=90 required=64 checksum=5760",
+        r"DMA_SUMMARY scenario=fill_nonzero_bank cmds=1 reads=0 writes=0 .*",
+        r"DMA_SCENARIO_PASS=fill_nonzero_bank",
     ),
 )
 add_dma_test(
@@ -103,8 +164,8 @@ add_dma_test(
     "dma_queued_chain",
     "queued_chain",
     (
-        r"(?s)DMA_SUMMARY scenario=queued_chain cmds=2 .* "
-        r"queue=0 cmdq=0 busy=0.*DMA_SCENARIO_PASS=queued_chain"
+        r"DMA_SUMMARY scenario=queued_chain cmds=2 .* queue=0 cmdq=0 busy=0",
+        r"DMA_SCENARIO_PASS=queued_chain",
     ),
 )
 
@@ -252,6 +313,26 @@ add_dma_panic_test(
     "dma_fill_exceeds_bank_size",
     "fill_exceeds_bank_size",
     r".*DmaUnit: fill required_bytes=4097 exceeds bank_size=4096.*",
+)
+add_dma_panic_test(
+    "dma_fill_invalid_dst_mem_space",
+    "fill_invalid_dst_mem_space",
+    r".*DmaUnit: reserved dst_mem_space=3 for fill.*",
+)
+add_dma_panic_test(
+    "dma_fill_partial_line_dram",
+    "fill_partial_line_dram",
+    r".*DmaUnit: external fill requires full 64B cache-line coverage.*",
+)
+add_dma_panic_test(
+    "dma_fill_partial_line_spm",
+    "fill_partial_line_spm",
+    r".*DmaUnit: external fill requires full 64B cache-line coverage.*",
+)
+add_dma_panic_test(
+    "dma_fill_reserved_fill_value_bits",
+    "fill_reserved_fill_value_bits",
+    r".*DmaUnit: fill requires Word 15\[31:8\] == 0.*",
 )
 add_dma_panic_test(
     "dma_transpose_same_bank",

@@ -11,6 +11,7 @@
 
 #define DMA_MEM_SPACE_DRAM 0x0U
 #define DMA_MEM_SPACE_SPM 0x1U
+#define DMA_MEM_SPACE_DMA_BANK 0x2U
 
 #define DMA_CUT_DIM_H 0x0U
 #define DMA_CUT_DIM_W 0x1U
@@ -89,6 +90,18 @@ fill_tensor(uintptr_t base, Layout layout)
 }
 
 static void
+fill_constant_tensor(uintptr_t base, Layout layout, uint8_t value)
+{
+    for (uint32_t y = 0; y < layout.h; ++y) {
+        for (uint32_t x = 0; x < layout.w; ++x) {
+            for (uint32_t z = 0; z < layout.c; ++z) {
+                *(volatile uint8_t *)coord_addr(base, layout, y, x, z) = value;
+            }
+        }
+    }
+}
+
+static void
 clear_region(uintptr_t base, size_t bytes)
 {
     for (size_t i = 0; i < bytes; ++i) {
@@ -111,6 +124,23 @@ verify_tensor(uintptr_t base, Layout layout)
                 volatile uint8_t *ptr =
                     (volatile uint8_t *)coord_addr(base, layout, y, x, z);
                 if (*ptr != pattern(y, x, z)) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+static int
+verify_constant_tensor(uintptr_t base, Layout layout, uint8_t value)
+{
+    for (uint32_t y = 0; y < layout.h; ++y) {
+        for (uint32_t x = 0; x < layout.w; ++x) {
+            for (uint32_t z = 0; z < layout.c; ++z) {
+                volatile uint8_t *ptr =
+                    (volatile uint8_t *)coord_addr(base, layout, y, x, z);
+                if (*ptr != value) {
                     return 0;
                 }
             }
@@ -179,6 +209,12 @@ static inline uint32_t
 transpose_bank_cfg(uint32_t src_bank_id, uint32_t dst_bank_id)
 {
     return (src_bank_id & 0xfU) | ((dst_bank_id & 0xfU) << 4);
+}
+
+static inline uint32_t
+fill_mode_cfg(uint32_t dst_mem_space)
+{
+    return dst_mem_space & 0x3U;
 }
 
 static void
@@ -311,8 +347,10 @@ launch_transpose(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
 }
 
 static void
-build_fill_cmd(NpuCmd *cmd, Layout dst_layout, uint32_t dst_bank_id,
-               uint32_t sync_idx, uint32_t set_completion_sync)
+build_fill_cmd(NpuCmd *cmd, uintptr_t dst_base, Layout dst_layout,
+               uint32_t dst_mem_space, uint32_t dst_bank_id,
+               uint8_t fill_value, uint32_t sync_idx,
+               uint32_t set_completion_sync)
 {
     const uint32_t op = (0U << 5) | (DMA_MODE_FILL << 2);
 
@@ -325,7 +363,7 @@ build_fill_cmd(NpuCmd *cmd, Layout dst_layout, uint32_t dst_bank_id,
     cmd->setSetIndicatorSnd(0U);
     cmd->clearCommonReservedBits();
     cmd->setWord(1U, 0U);
-    cmd->setWord(2U, 0U);
+    cmd->setWord(2U, (uint32_t)dst_base);
     cmd->setWord(3U, dst_layout.h);
     cmd->setWord(4U, dst_layout.w);
     cmd->setWord(5U, dst_layout.c);
@@ -336,19 +374,20 @@ build_fill_cmd(NpuCmd *cmd, Layout dst_layout, uint32_t dst_bank_id,
     cmd->setWord(10U, dst_layout.stride_w);
     cmd->setWord(11U, dst_layout.stride_c);
     cmd->setWord(12U, 0U);
-    cmd->setWord(13U, 0U);
+    cmd->setWord(13U, fill_mode_cfg(dst_mem_space));
     cmd->setWord(14U, fill_bank_cfg(dst_bank_id));
-    cmd->setWord(15U, 0U);
+    cmd->setWord(15U, fill_value);
 }
 
 static void
-launch_fill(Layout dst_layout, uint32_t dst_bank_id, uint32_t sync_idx,
+launch_fill(uintptr_t dst_base, Layout dst_layout, uint32_t dst_mem_space,
+            uint32_t dst_bank_id, uint8_t fill_value, uint32_t sync_idx,
             uint32_t set_completion_sync)
 {
     NpuCmd cmd;
 
-    build_fill_cmd(&cmd, dst_layout, dst_bank_id, sync_idx,
-                   set_completion_sync);
+    build_fill_cmd(&cmd, dst_base, dst_layout, dst_mem_space, dst_bank_id,
+                   fill_value, sync_idx, set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -563,8 +602,58 @@ static int
 scenario_fill_zero_bank(void)
 {
     Layout dst = make_layout(2, 4, 8, 0);
-    launch_fill(dst, 1U, 40, 1U);
+    launch_fill(0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0U, 40, 1U);
     npu_launch_sync_wait(DMA_DEVICE_ID, 40, 0, 0, 0);
+    npu_cmd_sync_done();
+    return 0;
+}
+
+static int
+scenario_fill_zero_dram(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    fill_constant_tensor(DST_DRAM0, dst, 0xa5U);
+    launch_fill(DST_DRAM0, dst, DMA_MEM_SPACE_DRAM, 0U, 0U, 52, 0);
+    npu_cmd_sync_done();
+    return verify_constant_tensor(DST_DRAM0, dst, 0U) ? 0 : 1;
+}
+
+static int
+scenario_fill_zero_spm(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    fill_constant_tensor(DST_SPM0, dst, 0xa5U);
+    launch_fill(DST_SPM0, dst, DMA_MEM_SPACE_SPM, 0U, 0U, 53, 0);
+    npu_cmd_sync_done();
+    return verify_constant_tensor(DST_SPM0, dst, 0U) ? 0 : 1;
+}
+
+static int
+scenario_fill_nonzero_dram(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    fill_constant_tensor(DST_DRAM0, dst, 0x11U);
+    launch_fill(DST_DRAM0, dst, DMA_MEM_SPACE_DRAM, 0U, 0x5aU, 54, 0);
+    npu_cmd_sync_done();
+    return verify_constant_tensor(DST_DRAM0, dst, 0x5aU) ? 0 : 1;
+}
+
+static int
+scenario_fill_nonzero_spm(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    fill_constant_tensor(DST_SPM0, dst, 0x11U);
+    launch_fill(DST_SPM0, dst, DMA_MEM_SPACE_SPM, 0U, 0x3cU, 55, 0);
+    npu_cmd_sync_done();
+    return verify_constant_tensor(DST_SPM0, dst, 0x3cU) ? 0 : 1;
+}
+
+static int
+scenario_fill_nonzero_bank(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    launch_fill(0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0x5aU, 56, 1U);
+    npu_launch_sync_wait(DMA_DEVICE_ID, 56, 0, 0, 0);
     npu_cmd_sync_done();
     return 0;
 }
@@ -663,7 +752,7 @@ static int
 scenario_fill_invalid_bank_id(void)
 {
     Layout dst = make_layout(2, 4, 8, 0);
-    launch_fill(dst, 2U, 41, 0);
+    launch_fill(0U, dst, DMA_MEM_SPACE_DMA_BANK, 2U, 0U, 41, 0);
     for (;;) {
         asm volatile("" ::: "memory");
     }
@@ -675,7 +764,7 @@ scenario_fill_reserved_bank_cfg_bits(void)
     Layout dst = make_layout(2, 4, 8, 0);
     NpuCmd cmd;
 
-    build_fill_cmd(&cmd, dst, 1U, 42, 0);
+    build_fill_cmd(&cmd, 0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0U, 42, 0);
     cmd.setWord(14U, fill_bank_cfg(1U) | 0x10U);
     cmd.launchCmd();
     for (;;) {
@@ -689,7 +778,7 @@ scenario_fill_invalid_contract(void)
     Layout dst = make_layout(2, 4, 8, 0);
     NpuCmd cmd;
 
-    build_fill_cmd(&cmd, dst, 1U, 43, 0);
+    build_fill_cmd(&cmd, 0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0U, 43, 0);
     cmd.setWord(1U, (uint32_t)SRC_DRAM0);
     cmd.launchCmd();
     for (;;) {
@@ -701,7 +790,55 @@ static int
 scenario_fill_exceeds_bank_size(void)
 {
     Layout dst = make_layout(1, 1, 4097, 0);
-    launch_fill(dst, 1U, 44, 0);
+    launch_fill(0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0U, 44, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_invalid_dst_mem_space(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    NpuCmd cmd;
+
+    build_fill_cmd(&cmd, DST_DRAM0, dst, DMA_MEM_SPACE_DRAM, 0U, 0U, 57, 0);
+    cmd.setWord(13U, 0x3U);
+    cmd.launchCmd();
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_partial_line_dram(void)
+{
+    Layout dst = make_layout(1, 1, 32, 0);
+    launch_fill(DST_DRAM0, dst, DMA_MEM_SPACE_DRAM, 0U, 0U, 58, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_partial_line_spm(void)
+{
+    Layout dst = make_layout(1, 1, 32, 0);
+    launch_fill(DST_SPM0, dst, DMA_MEM_SPACE_SPM, 0U, 0U, 59, 0);
+    for (;;) {
+        asm volatile("" ::: "memory");
+    }
+}
+
+static int
+scenario_fill_reserved_fill_value_bits(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    NpuCmd cmd;
+
+    build_fill_cmd(&cmd, 0U, dst, DMA_MEM_SPACE_DMA_BANK, 1U, 0U, 60, 0);
+    cmd.setWord(15U, 0x100U);
+    cmd.launchCmd();
     for (;;) {
         asm volatile("" ::: "memory");
     }
@@ -921,6 +1058,21 @@ main(int argc, char **argv)
     if (strcmp(argv[1], "fill_zero_bank") == 0) {
         return scenario_fill_zero_bank();
     }
+    if (strcmp(argv[1], "fill_zero_dram") == 0) {
+        return scenario_fill_zero_dram();
+    }
+    if (strcmp(argv[1], "fill_zero_spm") == 0) {
+        return scenario_fill_zero_spm();
+    }
+    if (strcmp(argv[1], "fill_nonzero_dram") == 0) {
+        return scenario_fill_nonzero_dram();
+    }
+    if (strcmp(argv[1], "fill_nonzero_spm") == 0) {
+        return scenario_fill_nonzero_spm();
+    }
+    if (strcmp(argv[1], "fill_nonzero_bank") == 0) {
+        return scenario_fill_nonzero_bank();
+    }
     if (strcmp(argv[1], "transpose_hw") == 0) {
         return scenario_transpose_hw();
     }
@@ -953,6 +1105,18 @@ main(int argc, char **argv)
     }
     if (strcmp(argv[1], "fill_exceeds_bank_size") == 0) {
         return scenario_fill_exceeds_bank_size();
+    }
+    if (strcmp(argv[1], "fill_invalid_dst_mem_space") == 0) {
+        return scenario_fill_invalid_dst_mem_space();
+    }
+    if (strcmp(argv[1], "fill_partial_line_dram") == 0) {
+        return scenario_fill_partial_line_dram();
+    }
+    if (strcmp(argv[1], "fill_partial_line_spm") == 0) {
+        return scenario_fill_partial_line_spm();
+    }
+    if (strcmp(argv[1], "fill_reserved_fill_value_bits") == 0) {
+        return scenario_fill_reserved_fill_value_bits();
     }
     if (strcmp(argv[1], "invalid_destination_address") == 0) {
         return scenario_invalid_destination_address();
