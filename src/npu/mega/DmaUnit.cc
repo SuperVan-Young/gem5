@@ -975,9 +975,30 @@ DmaUnit::execute(ActiveExecution &exec)
             }
         }
 
-        return transposeUnitLatency *
-            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA)) *
+        const uint8_t remainingDim =
+            3 - parsedCmd.transposeDimA - parsedCmd.transposeDimB;
+        const Tick extentA =
+            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA));
+        const Tick extentB =
             static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
+        const Tick extentRest =
+            static_cast<Tick>(axisExtent(parsedCmd, remainingDim));
+        const Tick totalLatency =
+            transposeUnitLatency * extentA * extentB * extentRest;
+
+        DPRINTF(DmaUnit,
+                "DMA_TRANSPOSE_LATENCY dim_a=%u dim_b=%u extent_a=%llu "
+                "extent_b=%llu extent_rest=%llu transpose_unit_latency=%llu "
+                "computed_total_latency=%llu\n",
+                static_cast<unsigned>(parsedCmd.transposeDimA),
+                static_cast<unsigned>(parsedCmd.transposeDimB),
+                static_cast<unsigned long long>(extentA),
+                static_cast<unsigned long long>(extentB),
+                static_cast<unsigned long long>(extentRest),
+                static_cast<unsigned long long>(transposeUnitLatency),
+                static_cast<unsigned long long>(totalLatency));
+
+        return totalLatency;
     }
 
     auto &workspace = bankWorkspace.front();

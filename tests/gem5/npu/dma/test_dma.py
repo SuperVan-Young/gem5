@@ -134,13 +134,28 @@ add_dma_test(
     ),
 )
 add_dma_test(
-    "dma_transpose_hw", "transpose_hw", r"DMA_SCENARIO_PASS=transpose_hw"
+    "dma_transpose_hw",
+    "transpose_hw",
+    (
+        r".*DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=1 extent_a=2 extent_b=4 extent_rest=3 transpose_unit_latency=1000 computed_total_latency=24000",
+        r"DMA_SCENARIO_PASS=transpose_hw",
+    ),
 )
 add_dma_test(
-    "dma_transpose_hc", "transpose_hc", r"DMA_SCENARIO_PASS=transpose_hc"
+    "dma_transpose_hc",
+    "transpose_hc",
+    (
+        r".*DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=2 extent_a=2 extent_b=4 extent_rest=3 transpose_unit_latency=1000 computed_total_latency=24000",
+        r"DMA_SCENARIO_PASS=transpose_hc",
+    ),
 )
 add_dma_test(
-    "dma_transpose_wc", "transpose_wc", r"DMA_SCENARIO_PASS=transpose_wc"
+    "dma_transpose_wc",
+    "transpose_wc",
+    (
+        r".*DMA_TRANSPOSE_LATENCY dim_a=1 dim_b=2 extent_a=2 extent_b=4 extent_rest=3 transpose_unit_latency=1000 computed_total_latency=24000",
+        r"DMA_SCENARIO_PASS=transpose_wc",
+    ),
 )
 add_dma_test(
     "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
