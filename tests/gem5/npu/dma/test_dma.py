@@ -18,6 +18,8 @@ from gem5.fixture import (
 
 dma_dir = Path(__file__).resolve().parent
 binary = dma_dir / "bin" / "dma_proto_riscv"
+dma_debug_flags = "--debug-flags=DMA"
+dma_max_ticks = "5000000000"
 config_path = joinpath(
     config.base_dir,
     "tests",
@@ -31,15 +33,34 @@ build_fixture = MakeTarget(
     "all",
     make_fixture=MakeFixture(str(dma_dir / "src")),
 )
+dma_scenarios = (
+    ("dma_basic_dram_to_spm", "basic_dram_to_spm"),
+    ("dma_basic_spm_to_dram", "basic_spm_to_dram"),
+    ("dma_hwc_to_blocked", "hwc_to_blocked"),
+    ("dma_blocked_to_blocked", "blocked_to_blocked"),
+    ("dma_buffer_size_forces_batching", "buffer_size_forces_batching"),
+    ("dma_sync_completion", "sync_completion"),
+)
 
 
-def add_dma_test(name, scenario, verifier_regex):
+def add_dma_test(name, scenario):
     gem5_verify_config(
         name=name,
-        verifiers=[verifier.MatchRegex(re.compile(verifier_regex))],
+        verifiers=[
+            verifier.MatchRegex(
+                re.compile(rf"DMA_SCENARIO_PASS={re.escape(scenario)}")
+            )
+        ],
         config=config_path,
-        config_args=["--binary", str(binary), "--scenario", scenario],
-        gem5_args=["--debug-flags=DmaUnit,MegaCmdQueue"],
+        config_args=[
+            "--binary",
+            str(binary),
+            "--scenario",
+            scenario,
+            "--max-ticks",
+            dma_max_ticks,
+        ],
+        gem5_args=[dma_debug_flags],
         valid_isas=(constants.riscv_tag,),
         valid_hosts=constants.supported_hosts,
         length=constants.quick_tag,
@@ -47,34 +68,8 @@ def add_dma_test(name, scenario, verifier_regex):
     )
 
 
-add_dma_test(
-    "dma_basic_dram_to_spm",
-    "basic_dram_to_spm",
-    r"DMA_SCENARIO_PASS=basic_dram_to_spm",
-)
-add_dma_test(
-    "dma_basic_spm_to_dram",
-    "basic_spm_to_dram",
-    r"DMA_SCENARIO_PASS=basic_spm_to_dram",
-)
-add_dma_test(
-    "dma_hwc_to_blocked", "hwc_to_blocked", r"DMA_SCENARIO_PASS=hwc_to_blocked"
-)
-add_dma_test(
-    "dma_blocked_to_blocked",
-    "blocked_to_blocked",
-    r"DMA_SCENARIO_PASS=blocked_to_blocked",
-)
-add_dma_test(
-    "dma_buffer_size_forces_batching",
-    "buffer_size_forces_batching",
-    r"DMA_SCENARIO_PASS=buffer_size_forces_batching",
-)
-add_dma_test(
-    "dma_sync_completion",
-    "sync_completion",
-    r"DMA_SCENARIO_PASS=sync_completion",
-)
+for test_name, scenario_name in dma_scenarios:
+    add_dma_test(test_name, scenario_name)
 
 
 def run_expected_invalid_address(params):
@@ -87,12 +82,14 @@ def run_expected_invalid_address(params):
         tempdir,
         "-re",
         "--silent-redirect",
-        "--debug-flags=DmaUnit,MegaCmdQueue",
+        dma_debug_flags,
         config_path,
         "--binary",
         str(binary),
         "--scenario",
         "invalid_address",
+        "--max-ticks",
+        dma_max_ticks,
     ]
 
     try:

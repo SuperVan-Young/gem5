@@ -163,6 +163,7 @@ class DmaUnit : public SpecializedExecutionUnit
     void issueScatterWrite();
     PacketPtr makeReadPacket(Addr addr) const;
     PacketPtr makeWritePacket(Addr addr, const uint8_t *data) const;
+    void retireActiveTxn(PacketPtr pkt);
     void handleGatherReadResponse(PacketPtr pkt);
     void handleScatterReadResponse(PacketPtr pkt);
     void handleScatterWriteResponse(PacketPtr pkt);

@@ -1,0 +1,5 @@
+# VPU decode smoke build artifacts
+bin/
+src/*.o
+src/*.d
+run_dump/

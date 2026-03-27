@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "cmd/common.hh"
+
 #define CMDQ_BASE 0x70000000UL
 #define CMD_BYTES 64UL
 #define CTRL_ADDR (CMDQ_BASE + CMD_BYTES)
@@ -36,12 +38,6 @@ typedef struct
     uint32_t stride_c;
     uint16_t k;
 } Layout;
-
-static inline void
-mmio_write32(uint64_t addr, uint32_t value)
-{
-    *(volatile uint32_t *)addr = value;
-}
 
 static inline uintptr_t
 coord_addr(uintptr_t base, Layout layout, uint32_t y, uint32_t x, uint32_t z)
@@ -102,32 +98,11 @@ verify_tensor(uintptr_t base, Layout layout)
     return 1;
 }
 
-static uint32_t
-build_dma_header(uint32_t xfer_mode, uint32_t sync_idx)
-{
-    const uint32_t op = (0U << 5) | ((xfer_mode & 0x7U) << 2);
-    return ((DEVICE_TYPE_DMA & 0xFU) << 28) |
-           ((DEVICE_ID & 0xFU) << 24) |
-           ((op & 0xFFU) << 16) |
-           ((sync_idx & 0xFFU) << 8);
-}
-
-static uint32_t
-build_sync_wait_header(uint32_t sync_idx)
-{
-    return ((DEVICE_TYPE_SYNC & 0xFU) << 28) |
-           ((DEVICE_ID & 0xFU) << 24) |
-           ((SYNC_WAIT_OPCODE & 0xFFU) << 16) |
-           ((sync_idx & 0xFFU) << 8);
-}
-
 static void
 push_words(const uint32_t words[16])
 {
-    for (unsigned i = 0; i < 16; ++i) {
-        mmio_write32(CMDQ_BASE + (i * 4U), words[i]);
-    }
-    mmio_write32(CTRL_ADDR, 0);
+    npu_mmio_write32(CMDQ_BASE, words, 16);
+    npu_mmio_write32_one(CTRL_ADDR, 0U);
 }
 
 static void
@@ -140,7 +115,16 @@ push_dma(uintptr_t src_base, uintptr_t dst_base,
         words[i] = 0;
     }
 
-    words[15] = build_dma_header(xfer_mode, sync_idx);
+    {
+        NpuCmd cmd;
+        cmd.clear();
+        cmd.setDeviceType(DEVICE_TYPE_DMA);
+        cmd.setDeviceId(DEVICE_ID);
+        cmd.setOpCode((0U << 5) | ((xfer_mode & 0x7U) << 2));
+        cmd.setSyncIndicator(sync_idx);
+        cmd.clearCommonReservedBits();
+        words[0] = cmd.getWord(0U);
+    }
     words[14] = (uint32_t)src_base;
     words[13] = (uint32_t)dst_base;
     words[12] = src_layout.h;
@@ -164,7 +148,16 @@ push_sync_wait(uint32_t sync_idx)
     for (unsigned i = 0; i < 16; ++i) {
         words[i] = 0;
     }
-    words[15] = build_sync_wait_header(sync_idx);
+    {
+        NpuCmd cmd;
+        cmd.clear();
+        cmd.setDeviceType(DEVICE_TYPE_SYNC);
+        cmd.setDeviceId(DEVICE_ID);
+        cmd.setOpCode(SYNC_WAIT_OPCODE);
+        cmd.setSyncIndicator(sync_idx);
+        cmd.clearCommonReservedBits();
+        words[0] = cmd.getWord(0U);
+    }
     push_words(words);
 }
 

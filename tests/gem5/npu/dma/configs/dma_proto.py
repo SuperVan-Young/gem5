@@ -9,7 +9,29 @@ from m5.objects import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
-parser.add_argument("--scenario", required=True)
+parser.add_argument(
+    "--scenario",
+    default="basic_dram_to_spm",
+    choices=(
+        "basic_dram_to_spm",
+        "basic_spm_to_dram",
+        "hwc_to_blocked",
+        "blocked_to_blocked",
+        "buffer_size_forces_batching",
+        "sync_completion",
+        "invalid_address",
+    ),
+    help=(
+        "DMA test scenario to execute. Defaults to basic_dram_to_spm to "
+        "keep ad hoc invocations runnable."
+    ),
+)
+parser.add_argument(
+    "--max-ticks",
+    type=int,
+    default=int(m5.MaxTick),
+    help="Maximum number of ticks to simulate before forcing a timeout exit.",
+)
 args = parser.parse_args()
 
 cmd_width = 512
@@ -85,7 +107,7 @@ process.map(cmdq_base, cmdq_base, 2 * cmd_bytes, False)
 process.map(dram_base, dram_base, 64 * 1024, False)
 process.map(spm_base, spm_base, spm_size, False)
 
-exit_event = m5.simulate()
+exit_event = m5.simulate(args.max_ticks)
 exit_cause = exit_event.getCause()
 exit_code = exit_event.getCode()
 

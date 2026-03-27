@@ -381,6 +381,18 @@ DmaUnit::makeWritePacket(Addr addr, const uint8_t *data) const
 }
 
 void
+DmaUnit::retireActiveTxn(PacketPtr pkt)
+{
+    auto it = activeMemTxns.find(pkt);
+    panic_if(it == activeMemTxns.end(),
+             "%s: DmaUnit received response for unknown packet addr=%#x",
+             name(), pkt->getAddr());
+
+    activeMemTxns.erase(it);
+    delete pkt;
+}
+
+void
 DmaUnit::issueNextGatherRead()
 {
     if (gatherIndex >= batchPlan.sourceLines.size()) {
@@ -422,7 +434,7 @@ DmaUnit::handleGatherReadResponse(PacketPtr pkt)
         batchPlan.buffer[copy.bufferOffset] = data[copy.lineOffset];
     }
 
-    cleanupActiveMemPacket();
+    retireActiveTxn(pkt);
     requestKind = RequestKind::None;
     gatherIndex += 1;
     issueNextGatherRead();
@@ -438,7 +450,7 @@ DmaUnit::handleScatterReadResponse(PacketPtr pkt)
         line.lineData[copy.lineOffset] = batchPlan.buffer[copy.bufferOffset];
     }
 
-    cleanupActiveMemPacket();
+    retireActiveTxn(pkt);
     requestKind = RequestKind::None;
     issueScatterWrite();
 }
@@ -446,8 +458,7 @@ DmaUnit::handleScatterReadResponse(PacketPtr pkt)
 void
 DmaUnit::handleScatterWriteResponse(PacketPtr pkt)
 {
-    (void)pkt;
-    cleanupActiveMemPacket();
+    retireActiveTxn(pkt);
     requestKind = RequestKind::None;
     scatterIndex += 1;
     issueNextScatterRead();
@@ -487,9 +498,6 @@ DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
 bool
 DmaUnit::handleMemResponse(PacketPtr pkt)
 {
-    panic_if(pkt != activeMemPacket,
-             "%s: DmaUnit response packet mismatch", name());
-
     switch (requestKind) {
       case RequestKind::GatherRead:
         handleGatherReadResponse(pkt);
