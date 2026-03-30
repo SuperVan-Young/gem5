@@ -58,10 +58,7 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
       numBanks(params.num_banks),
       bankSize(params.bank_size),
       transposeUnitLatency(params.transpose_unit_latency),
-      bankWorkspace(numBanks),
-      parsedCmdValid(false),
-      currentY(0),
-      currentX(0)
+      parsedCmdValid(false)
 {
     fatal_if(macroCmdBytes != CacheLineBytes,
              "%s: DmaUnit requires 64-byte commands", name());
@@ -526,81 +523,72 @@ void
 DmaUnit::resetCommandState()
 {
     parsedCmd = ParsedCmd();
-    batchPlan = BatchPlan();
     parsedCmdValid = false;
-    currentY = 0;
-    currentX = 0;
+    iterationPlans.clear();
     pendingMvinTxns.clear();
-
-    for (auto &bank : bankWorkspace) {
-        if (!bank.empty()) {
-            std::fill(bank.begin(), bank.end(), 0);
-        }
-    }
 }
 
-bool
-DmaUnit::done() const
+DmaUnit::IterationPlan &
+DmaUnit::iterationPlan(uint64_t iteration)
 {
-    if (!parsedCmdValid) {
-        return true;
-    }
-
-    const Mode mode = static_cast<Mode>(parsedCmd.mode);
-    if (mode == Mode::Fill || mode == Mode::Transpose) {
-        return currentY != 0;
-    }
-
-    return parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
-           parsedCmd.shapeC == 0 || currentY >= parsedCmd.shapeH;
+    panic_if(iteration >= iterationPlans.size(),
+             "%s: iteration %llu out of range (num plans=%llu)", name(),
+             static_cast<unsigned long long>(iteration),
+             static_cast<unsigned long long>(iterationPlans.size()));
+    return iterationPlans.at(iteration);
 }
 
-void
-DmaUnit::advanceBatchCursor()
+const DmaUnit::IterationPlan *
+DmaUnit::findIterationPlan(uint64_t iteration) const
 {
-    if (batchPlan.width == parsedCmd.shapeW && batchPlan.startX == 0) {
-        currentY += batchPlan.height;
-        currentX = 0;
-        return;
+    if (iteration >= iterationPlans.size()) {
+        return nullptr;
     }
 
-    currentX += batchPlan.width;
-    if (currentX >= parsedCmd.shapeW) {
-        currentX = 0;
-        currentY += 1;
-    }
+    return &iterationPlans.at(iteration);
 }
 
 void
-DmaUnit::planCurrentBatch()
+DmaUnit::buildIterationPlans(ActiveExecution &exec)
 {
-    batchPlan = BatchPlan();
-    batchPlan.startY = currentY;
-    batchPlan.startX = currentX;
+    iterationPlans.clear();
 
-    if (done()) {
-        return;
+    switch (static_cast<Mode>(parsedCmd.mode)) {
+      case Mode::MoveLayout:
+        buildMoveLayoutPlans();
+        break;
+      case Mode::Transpose:
+        buildTransposePlans();
+        break;
+      case Mode::Fill:
+        buildFillPlans();
+        break;
     }
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
-        if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
-            return;
-        }
-
-        for (Addr lineAddr : externalFillLineAddrs(parsedCmd)) {
-            DestLine line;
-            line.lineAddr = lineAddr;
-            line.lineData.fill(parsedCmd.fillValue);
-            batchPlan.destLines.push_back(line);
-        }
-        return;
+    const PortID readPort = 0;
+    const PortID writePort = memSidePorts.size() > 1 ? 1 : 0;
+    const bool hasPlans = !iterationPlans.empty();
+    switch (static_cast<Mode>(parsedCmd.mode)) {
+      case Mode::MoveLayout:
+      case Mode::Transpose:
+        exec.readMask = hasPlans ? (1U << readPort) : 0;
+        exec.writeMask = hasPlans ? (1U << writePort) : 0;
+        break;
+      case Mode::Fill:
+        exec.readMask = 0;
+        exec.writeMask =
+            (hasPlans && parsedCmd.dstMemSpace != MemorySpace::DmaBank) ?
+            (1U << writePort) : 0;
+        break;
     }
+    exec.repetition = std::max<uint64_t>(1, iterationPlans.size());
+}
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
-        batchPlan.buffer.assign(transposeRequiredBytes(parsedCmd), 0);
-        bankWorkspace.at(parsedCmd.srcBankId).assign(bankSize, 0);
-        bankWorkspace.at(parsedCmd.dstBankId).assign(bankSize, 0);
-        buildTransposeLines();
+void
+DmaUnit::buildMoveLayoutPlans()
+{
+    if (parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
+        parsedCmd.shapeC == 0) {
         return;
     }
 
@@ -609,60 +597,208 @@ DmaUnit::planCurrentBatch()
              "DmaUnit: bank_size=%zu is too small for a (1,1,C) tile",
              bankSize);
 
-    const uint32_t remainingH = parsedCmd.shapeH - currentY;
-    const uint32_t remainingW = parsedCmd.shapeW - currentX;
+    uint32_t currentY = 0;
+    uint32_t currentX = 0;
+    while (currentY < parsedCmd.shapeH) {
+        IterationPlan plan;
+        plan.startY = currentY;
+        plan.startX = currentX;
 
-    if (currentX == 0) {
-        const size_t hSliceBytes =
-            static_cast<size_t>(parsedCmd.shapeW) * parsedCmd.shapeC;
-        if (hSliceBytes <= bankSize) {
-            batchPlan.height = std::max<uint32_t>(
-                1, std::min<uint32_t>(remainingH, bankSize / hSliceBytes));
-            batchPlan.width = parsedCmd.shapeW;
+        const uint32_t remainingH = parsedCmd.shapeH - currentY;
+        const uint32_t remainingW = parsedCmd.shapeW - currentX;
+
+        if (currentX == 0) {
+            const size_t hSliceBytes =
+                static_cast<size_t>(parsedCmd.shapeW) * parsedCmd.shapeC;
+            if (hSliceBytes <= bankSize) {
+                plan.height = std::max<uint32_t>(
+                    1, std::min<uint32_t>(remainingH, bankSize / hSliceBytes));
+                plan.width = parsedCmd.shapeW;
+            } else {
+                plan.height = 1;
+                plan.width = std::max<uint32_t>(
+                    1, std::min<uint32_t>(remainingW, bankSize / channels));
+            }
         } else {
-            batchPlan.height = 1;
-            batchPlan.width = std::max<uint32_t>(
+            plan.height = 1;
+            plan.width = std::max<uint32_t>(
                 1, std::min<uint32_t>(remainingW, bankSize / channels));
         }
-    } else {
-        batchPlan.height = 1;
-        batchPlan.width = std::max<uint32_t>(
-            1, std::min<uint32_t>(remainingW, bankSize / channels));
+
+        panic_if(plan.width == 0,
+                 "DmaUnit: failed to plan a non-empty batch");
+
+        const size_t batchBytes = static_cast<size_t>(plan.height) *
+                                  plan.width * parsedCmd.shapeC;
+        panic_if(batchBytes > bankSize,
+                 "DmaUnit: planned move_layout batch requires %zu bytes, "
+                 "exceeds bank_size=%zu",
+                 batchBytes, bankSize);
+
+        plan.sourceBuffer.assign(batchBytes, 0);
+        buildBatchLines(plan);
+        DPRINTF(DmaUnit,
+                "Planned batch iter=%llu y=%u x=%u h=%u w=%u "
+                "src_lines=%u dst_lines=%u\n",
+                static_cast<unsigned long long>(iterationPlans.size()),
+                plan.startY, plan.startX, plan.height, plan.width,
+                static_cast<unsigned>(plan.sourceLines.size()),
+                static_cast<unsigned>(plan.destLines.size()));
+        iterationPlans.push_back(std::move(plan));
+
+        if (iterationPlans.back().width == parsedCmd.shapeW &&
+            iterationPlans.back().startX == 0) {
+            currentY += iterationPlans.back().height;
+            currentX = 0;
+        } else {
+            currentX += iterationPlans.back().width;
+            if (currentX >= parsedCmd.shapeW) {
+                currentX = 0;
+                currentY += 1;
+            }
+        }
     }
-
-    panic_if(batchPlan.width == 0,
-             "DmaUnit: failed to plan a non-empty batch");
-
-    const size_t batchBytes = static_cast<size_t>(batchPlan.height) *
-                              batchPlan.width * parsedCmd.shapeC;
-    panic_if(batchBytes > bankSize,
-             "DmaUnit: planned move_layout batch requires %zu bytes, "
-             "exceeds bank_size=%zu",
-             batchBytes, bankSize);
-    bankWorkspace.front().assign(bankSize, 0);
-    buildBatchLines();
-
-    DPRINTF(DmaUnit,
-            "Planned batch y=%u x=%u h=%u w=%u src_lines=%u dst_lines=%u\n",
-            batchPlan.startY, batchPlan.startX, batchPlan.height,
-            batchPlan.width,
-            static_cast<unsigned>(batchPlan.sourceLines.size()),
-            static_cast<unsigned>(batchPlan.destLines.size()));
 }
 
 void
-DmaUnit::buildBatchLines()
+DmaUnit::buildTransposePlans()
+{
+    if (parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
+        parsedCmd.shapeC == 0) {
+        return;
+    }
+
+    const uint8_t remainingDim =
+        3 - parsedCmd.transposeDimA - parsedCmd.transposeDimB;
+    const Tick extentA =
+        static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA));
+    const Tick extentB =
+        static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
+    const Tick extentRest =
+        static_cast<Tick>(axisExtent(parsedCmd, remainingDim));
+    const Tick totalLatency =
+        transposeUnitLatency * extentA * extentB * extentRest;
+
+    DPRINTF(DmaUnit,
+            "DMA_TRANSPOSE_LATENCY dim_a=%u dim_b=%u extent_a=%llu "
+            "extent_b=%llu extent_rest=%llu transpose_unit_latency=%llu "
+            "computed_total_latency=%llu\n",
+            static_cast<unsigned>(parsedCmd.transposeDimA),
+            static_cast<unsigned>(parsedCmd.transposeDimB),
+            static_cast<unsigned long long>(extentA),
+            static_cast<unsigned long long>(extentB),
+            static_cast<unsigned long long>(extentRest),
+            static_cast<unsigned long long>(transposeUnitLatency),
+            static_cast<unsigned long long>(totalLatency));
+
+    const size_t planeBytes =
+        static_cast<size_t>(extentA) * static_cast<size_t>(extentB);
+    for (uint32_t rest = 0; rest < extentRest; ++rest) {
+        IterationPlan plan;
+        plan.transposeRemainingDim = remainingDim;
+        plan.transposeRemainingIndex = rest;
+        plan.execLatency = transposeUnitLatency * extentA * extentB;
+        plan.sourceBuffer.assign(planeBytes, 0);
+        plan.buffer.assign(planeBytes, 0);
+        buildTransposeLines(plan);
+        iterationPlans.push_back(std::move(plan));
+    }
+}
+
+void
+DmaUnit::buildFillPlans()
+{
+    IterationPlan plan;
+    if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
+        iterationPlans.push_back(std::move(plan));
+        return;
+    }
+
+    for (Addr lineAddr : externalFillLineAddrs(parsedCmd)) {
+        DestLine line;
+        line.lineAddr = lineAddr;
+        line.lineData.fill(parsedCmd.fillValue);
+        plan.destLines.push_back(line);
+    }
+
+    if (!plan.destLines.empty()) {
+        iterationPlans.push_back(std::move(plan));
+    }
+}
+
+void
+DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
+{
+    const uint64_t totalPrologues = activeExecution.prologueCount;
+    const uint64_t totalExecutes = activeExecution.executeCount;
+    const uint64_t totalEpilogues = activeExecution.epilogueCount;
+    const uint64_t totalReads = activeExecution.completedReadRespCount;
+    const uint64_t totalWrites = activeExecution.completedWriteRespCount;
+    const uint64_t totalIterations = activeExecution.completedIterations;
+
+    activeExecution = ActiveExecution{};
+    activeExecution.cmd = cmd;
+    activeExecution.fields = parseCmdFields(extractCmdWord(cmd));
+    activeExecution.phase = Phase::Prologue;
+    activeExecution.prologueCount = totalPrologues;
+    activeExecution.executeCount = totalExecutes;
+    activeExecution.epilogueCount = totalEpilogues;
+    activeExecution.completedReadRespCount = totalReads;
+    activeExecution.completedWriteRespCount = totalWrites;
+    activeExecution.completedIterations = totalIterations;
+    activeExecution.readMask = 0;
+    activeExecution.writeMask = 0;
+    activeExecution.repetition = 1;
+    activeExecution.reserved = 0;
+    activeExecution.nextIterationToPrepare = 0;
+    activeExecution.nextIterationToRetire = 0;
+    activeExecution.completionIssued = false;
+    activeExecution.finalizePending = false;
+
+    for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
+         ++port) {
+        loadQueues[port].clear();
+        storeQueues[port].clear();
+        memPortBusy[port] = false;
+    }
+    execQueue.clear();
+    activeExecOp.reset();
+    iterationStates.clear();
+    maxConcurrentMicroOps = 0;
+
+    onCommandBegin(activeExecution);
+    prepareIteration(activeExecution, 0);
+}
+
+void
+DmaUnit::onCommandBegin(ActiveExecution &exec)
+{
+    resetCommandState();
+    parsedCmd = parseCommand(exec.cmd);
+    parsedCmdValid = true;
+    validateParsedCommand(parsedCmd);
+    buildIterationPlans(exec);
+}
+
+void
+DmaUnit::prologue(ActiveExecution &exec)
+{
+    (void)exec;
+}
+
+void
+DmaUnit::buildBatchLines(IterationPlan &plan) const
 {
     std::map<Addr, std::vector<SourceCopy>> sourceMap;
     std::map<Addr, std::vector<DestCopy>> destMap;
 
-    for (uint32_t localY = 0; localY < batchPlan.height; ++localY) {
-        for (uint32_t localX = 0; localX < batchPlan.width; ++localX) {
+    for (uint32_t localY = 0; localY < plan.height; ++localY) {
+        for (uint32_t localX = 0; localX < plan.width; ++localX) {
             for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
-                const uint32_t globalY = batchPlan.startY + localY;
-                const uint32_t globalX = batchPlan.startX + localX;
+                const uint32_t globalY = plan.startY + localY;
+                const uint32_t globalX = plan.startX + localX;
                 const size_t bufferOffset =
-                    (static_cast<size_t>(localY) * batchPlan.width + localX) *
+                    (static_cast<size_t>(localY) * plan.width + localX) *
                         parsedCmd.shapeC +
                     z;
 
@@ -694,132 +830,83 @@ DmaUnit::buildBatchLines()
     }
 
     for (const auto &entry : sourceMap) {
-        batchPlan.sourceLines.push_back({entry.first, entry.second});
+        plan.sourceLines.push_back({entry.first, entry.second});
     }
     for (const auto &entry : destMap) {
-        batchPlan.destLines.push_back({entry.first, entry.second, {}});
+        plan.destLines.push_back({entry.first, entry.second, {}});
     }
 }
 
 void
-DmaUnit::buildTransposeLines()
+DmaUnit::buildTransposeLines(IterationPlan &plan) const
 {
     std::map<Addr, std::vector<SourceCopy>> sourceMap;
     std::map<Addr, std::vector<DestCopy>> destMap;
 
-    const std::array<uint32_t, 3> srcExtents = {
-        parsedCmd.shapeH, parsedCmd.shapeW, parsedCmd.shapeC};
-    std::array<uint32_t, 3> dstExtents = srcExtents;
-    std::swap(dstExtents[parsedCmd.transposeDimA],
-              dstExtents[parsedCmd.transposeDimB]);
+    const uint32_t extentA = axisExtent(parsedCmd, parsedCmd.transposeDimA);
+    const uint32_t extentB = axisExtent(parsedCmd, parsedCmd.transposeDimB);
+    const uint8_t remainingDim = plan.transposeRemainingDim;
 
-    const auto denseIndex = [](const std::array<uint32_t, 3> &coords,
-                               const std::array<uint32_t, 3> &extents) {
-        return (static_cast<size_t>(coords[0]) * extents[1] + coords[1]) *
-            extents[2] + coords[2];
-    };
+    for (uint32_t a = 0; a < extentA; ++a) {
+        for (uint32_t b = 0; b < extentB; ++b) {
+            std::array<uint32_t, 3> srcCoords = {0, 0, 0};
+            srcCoords[parsedCmd.transposeDimA] = a;
+            srcCoords[parsedCmd.transposeDimB] = b;
+            srcCoords[remainingDim] = plan.transposeRemainingIndex;
 
-    for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
-        for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
-            for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
-                const std::array<uint32_t, 3> srcCoords = {y, x, z};
-                auto dstCoords = srcCoords;
-                std::swap(dstCoords[parsedCmd.transposeDimA],
-                          dstCoords[parsedCmd.transposeDimB]);
+            auto dstCoords = srcCoords;
+            std::swap(dstCoords[parsedCmd.transposeDimA],
+                      dstCoords[parsedCmd.transposeDimB]);
 
-                const size_t srcOffset = denseIndex(srcCoords, srcExtents);
-                const size_t dstOffset = denseIndex(dstCoords, dstExtents);
+            const size_t srcOffset =
+                static_cast<size_t>(a) * extentB + b;
+            const size_t dstOffset =
+                static_cast<size_t>(dstCoords[parsedCmd.transposeDimA]) *
+                    extentA +
+                dstCoords[parsedCmd.transposeDimB];
 
-                const Addr srcAddr = computeTensorAddr(
-                    parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
-                    parsedCmd.srcStrideW, parsedCmd.srcStrideC, 0,
-                    parsedCmd.shapeW, parsedCmd.shapeC,
-                    static_cast<uint8_t>(CutDim::W), y, x, z);
-                const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
-                validateBurstLine(srcLineAddr, sourceSpace(), "source");
-                sourceMap[srcLineAddr].push_back({
-                    srcOffset,
-                    static_cast<uint8_t>(srcAddr - srcLineAddr),
-                });
+            const Addr srcAddr = computeTensorAddr(
+                parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
+                parsedCmd.srcStrideW, parsedCmd.srcStrideC, 0,
+                parsedCmd.shapeW, parsedCmd.shapeC,
+                static_cast<uint8_t>(CutDim::W),
+                srcCoords[0], srcCoords[1], srcCoords[2]);
+            const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
+            validateBurstLine(srcLineAddr, sourceSpace(), "source");
+            sourceMap[srcLineAddr].push_back({
+                srcOffset,
+                static_cast<uint8_t>(srcAddr - srcLineAddr),
+            });
 
-                const Addr dstAddr = computeTensorAddr(
-                    parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
-                    parsedCmd.dstStrideW, parsedCmd.dstStrideC, 0,
-                    parsedCmd.shapeW, parsedCmd.shapeC,
-                    static_cast<uint8_t>(CutDim::W),
-                    dstCoords[0], dstCoords[1], dstCoords[2]);
-                const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
-                validateBurstLine(dstLineAddr, destSpace(), "destination");
-                destMap[dstLineAddr].push_back({
-                    static_cast<uint8_t>(dstAddr - dstLineAddr),
-                    dstOffset,
-                });
-            }
+            const Addr dstAddr = computeTensorAddr(
+                parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
+                parsedCmd.dstStrideW, parsedCmd.dstStrideC, 0,
+                parsedCmd.shapeW, parsedCmd.shapeC,
+                static_cast<uint8_t>(CutDim::W),
+                dstCoords[0], dstCoords[1], dstCoords[2]);
+            const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
+            validateBurstLine(dstLineAddr, destSpace(), "destination");
+            destMap[dstLineAddr].push_back({
+                static_cast<uint8_t>(dstAddr - dstLineAddr),
+                dstOffset,
+            });
         }
     }
 
     for (const auto &entry : sourceMap) {
-        batchPlan.sourceLines.push_back({entry.first, entry.second});
+        plan.sourceLines.push_back({entry.first, entry.second});
     }
     for (const auto &entry : destMap) {
-        batchPlan.destLines.push_back({entry.first, entry.second, {}});
+        plan.destLines.push_back({entry.first, entry.second, {}});
     }
-}
-
-void
-DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
-{
-    const uint64_t totalPrologues = activeExecution.prologueCount;
-    const uint64_t totalExecutes = activeExecution.executeCount;
-    const uint64_t totalEpilogues = activeExecution.epilogueCount;
-    const uint64_t totalReads = activeExecution.completedReadRespCount;
-    const uint64_t totalWrites = activeExecution.completedWriteRespCount;
-    const uint64_t totalIterations = activeExecution.completedIterations;
-
-    activeExecution = ActiveExecution{};
-    activeExecution.cmd = cmd;
-    activeExecution.fields = parseCmdFields(extractCmdWord(cmd));
-    activeExecution.phase = Phase::Prologue;
-    activeExecution.prologueCount = totalPrologues;
-    activeExecution.executeCount = totalExecutes;
-    activeExecution.epilogueCount = totalEpilogues;
-    activeExecution.completedReadRespCount = totalReads;
-    activeExecution.completedWriteRespCount = totalWrites;
-    activeExecution.completedIterations = totalIterations;
-    activeExecution.readMask = 0;
-    activeExecution.writeMask = 0;
-    activeExecution.repetition = 1;
-    activeExecution.reserved = 0;
-
-    onCommandBegin(activeExecution);
-    advanceActivePhase(activeExecution);
-}
-
-void
-DmaUnit::onCommandBegin(ActiveExecution &exec)
-{
-    (void)exec;
-    resetCommandState();
-    parsedCmd = parseCommand(exec.cmd);
-    parsedCmdValid = true;
-    validateParsedCommand(parsedCmd);
-}
-
-void
-DmaUnit::prologue(ActiveExecution &exec)
-{
-    (void)exec;
-    planCurrentBatch();
 }
 
 void
 DmaUnit::buildMvinRequests(ActiveExecution &exec,
                            std::vector<MemRequestDesc> &reqs)
 {
-    (void)exec;
-    pendingMvinTxns.clear();
-
-    if (done()) {
+    const IterationPlan *plan = findIterationPlan(exec.iteration);
+    if (plan == nullptr) {
         return;
     }
 
@@ -829,8 +916,8 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
 
     const PortID readPort = 0;
     uint64_t token = nextMemTxnToken;
-    for (size_t i = 0; i < batchPlan.sourceLines.size(); ++i) {
-        const auto &line = batchPlan.sourceLines[i];
+    for (size_t i = 0; i < plan->sourceLines.size(); ++i) {
+        const auto &line = plan->sourceLines[i];
         MemRequestDesc req;
         req.portId = readPort;
         req.kind = MemTxnContext::Kind::Mvin;
@@ -838,11 +925,12 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
         req.size = CacheLineBytes;
         reqs.push_back(req);
         pendingMvinTxns.emplace(token++, PendingMvinTxn{
+            exec.iteration,
             PendingMvinKind::SourceLine, i});
     }
 
-    for (size_t i = 0; i < batchPlan.destLines.size(); ++i) {
-        const auto &line = batchPlan.destLines[i];
+    for (size_t i = 0; i < plan->destLines.size(); ++i) {
+        const auto &line = plan->destLines[i];
         MemRequestDesc req;
         req.portId = readPort;
         req.kind = MemTxnContext::Kind::Mvin;
@@ -850,6 +938,7 @@ DmaUnit::buildMvinRequests(ActiveExecution &exec,
         req.size = CacheLineBytes;
         reqs.push_back(req);
         pendingMvinTxns.emplace(token++, PendingMvinTxn{
+            exec.iteration,
             PendingMvinKind::DestLine, i});
     }
 }
@@ -859,7 +948,6 @@ DmaUnit::onMvinResponse(ActiveExecution &exec,
                         const MemTxnContext &txn,
                         PacketPtr pkt)
 {
-    (void)exec;
     auto it = pendingMvinTxns.find(txn.token);
     panic_if(it == pendingMvinTxns.end(),
              "%s: unexpected DMA mvin token=%llu", name(),
@@ -867,26 +955,19 @@ DmaUnit::onMvinResponse(ActiveExecution &exec,
 
     const PendingMvinTxn pending = it->second;
     pendingMvinTxns.erase(it);
+    IterationPlan &plan = iterationPlan(pending.iteration);
 
     switch (pending.kind) {
       case PendingMvinKind::SourceLine: {
-        const auto &line = batchPlan.sourceLines.at(pending.index);
+        const auto &line = plan.sourceLines.at(pending.index);
         const uint8_t *data = pkt->getConstPtr<uint8_t>();
-        if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
-            auto &srcBank = bankWorkspace.at(parsedCmd.srcBankId);
-            for (const auto &copy : line.copies) {
-                srcBank[copy.bufferOffset] = data[copy.lineOffset];
-            }
-        } else {
-            auto &workspace = bankWorkspace.front();
-            for (const auto &copy : line.copies) {
-                workspace[copy.bufferOffset] = data[copy.lineOffset];
-            }
+        for (const auto &copy : line.copies) {
+            plan.sourceBuffer[copy.bufferOffset] = data[copy.lineOffset];
         }
         break;
       }
       case PendingMvinKind::DestLine: {
-        auto &line = batchPlan.destLines.at(pending.index);
+        auto &line = plan.destLines.at(pending.index);
         std::memcpy(line.lineData.data(), pkt->getConstPtr<uint8_t>(),
                     CacheLineBytes);
         break;
@@ -897,35 +978,18 @@ DmaUnit::onMvinResponse(ActiveExecution &exec,
 Tick
 DmaUnit::execute(ActiveExecution &exec)
 {
-    (void)exec;
-
-    if (done()) {
+    const IterationPlan *plan_ptr = findIterationPlan(exec.iteration);
+    if (plan_ptr == nullptr) {
         return 0;
     }
+    IterationPlan &plan = iterationPlan(exec.iteration);
 
     if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
         if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
-            auto &bank = bankWorkspace.at(parsedCmd.dstBankId);
-            bank.assign(bankSize, 0);
-
-            for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
-                for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
-                    for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
-                        const size_t bankOffset = computeTensorAddr(
-                            0, parsedCmd.dstStrideH, parsedCmd.dstStrideW,
-                            parsedCmd.dstStrideC, 0, parsedCmd.shapeW,
-                            parsedCmd.shapeC,
-                            static_cast<uint8_t>(CutDim::W), y, x, z);
-                        bank[bankOffset] = parsedCmd.fillValue;
-                    }
-                }
-            }
-
             const size_t requiredBytes = fillRequiredBytes(parsedCmd);
-            unsigned long long checksum = 0;
-            for (size_t i = 0; i < requiredBytes; ++i) {
-                checksum += bank[i];
-            }
+            const unsigned long long checksum =
+                static_cast<unsigned long long>(requiredBytes) *
+                parsedCmd.fillValue;
 
             DPRINTF(DmaUnit,
                     "DMA_BANK_FILL_OBSERVE bank=%u value=%u required=%llu "
@@ -933,91 +997,44 @@ DmaUnit::execute(ActiveExecution &exec)
                     parsedCmd.dstBankId, parsedCmd.fillValue,
                     static_cast<unsigned long long>(requiredBytes), checksum);
         }
-        return 0;
+        return plan.execLatency;
     }
 
     if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
-        auto &srcBank = bankWorkspace.at(parsedCmd.srcBankId);
-        auto &dstBank = bankWorkspace.at(parsedCmd.dstBankId);
-        const std::array<uint32_t, 3> srcExtents = {
-            parsedCmd.shapeH, parsedCmd.shapeW, parsedCmd.shapeC};
-        std::array<uint32_t, 3> dstExtents = srcExtents;
-        std::swap(dstExtents[parsedCmd.transposeDimA],
-                  dstExtents[parsedCmd.transposeDimB]);
-
-        const auto denseIndex = [](const std::array<uint32_t, 3> &coords,
-                                   const std::array<uint32_t, 3> &extents) {
-            return (static_cast<size_t>(coords[0]) * extents[1] + coords[1]) *
-                extents[2] + coords[2];
-        };
-
-        for (uint32_t y = 0; y < parsedCmd.shapeH; ++y) {
-            for (uint32_t x = 0; x < parsedCmd.shapeW; ++x) {
-                for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
-                    const std::array<uint32_t, 3> srcCoords = {y, x, z};
-                    auto dstCoords = srcCoords;
-                    std::swap(dstCoords[parsedCmd.transposeDimA],
-                              dstCoords[parsedCmd.transposeDimB]);
-
-                    const size_t srcIndex = denseIndex(srcCoords, srcExtents);
-                    const size_t dstIndex = denseIndex(dstCoords, dstExtents);
-                    const uint8_t value = srcBank[srcIndex];
-                    dstBank[dstIndex] = value;
-                    batchPlan.buffer[dstIndex] = value;
-                }
+        const uint32_t extentA = axisExtent(parsedCmd, parsedCmd.transposeDimA);
+        const uint32_t extentB = axisExtent(parsedCmd, parsedCmd.transposeDimB);
+        for (uint32_t a = 0; a < extentA; ++a) {
+            for (uint32_t b = 0; b < extentB; ++b) {
+                const size_t srcIndex = static_cast<size_t>(a) * extentB + b;
+                const size_t dstIndex = static_cast<size_t>(b) * extentA + a;
+                plan.buffer[dstIndex] = plan.sourceBuffer[srcIndex];
             }
         }
 
-        for (auto &line : batchPlan.destLines) {
+        for (auto &line : plan.destLines) {
             for (const auto &copy : line.copies) {
                 line.lineData[copy.lineOffset] =
-                    batchPlan.buffer[copy.bufferOffset];
+                    plan.buffer[copy.bufferOffset];
             }
         }
-
-        const uint8_t remainingDim =
-            3 - parsedCmd.transposeDimA - parsedCmd.transposeDimB;
-        const Tick extentA =
-            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA));
-        const Tick extentB =
-            static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
-        const Tick extentRest =
-            static_cast<Tick>(axisExtent(parsedCmd, remainingDim));
-        const Tick totalLatency =
-            transposeUnitLatency * extentA * extentB * extentRest;
-
-        DPRINTF(DmaUnit,
-                "DMA_TRANSPOSE_LATENCY dim_a=%u dim_b=%u extent_a=%llu "
-                "extent_b=%llu extent_rest=%llu transpose_unit_latency=%llu "
-                "computed_total_latency=%llu\n",
-                static_cast<unsigned>(parsedCmd.transposeDimA),
-                static_cast<unsigned>(parsedCmd.transposeDimB),
-                static_cast<unsigned long long>(extentA),
-                static_cast<unsigned long long>(extentB),
-                static_cast<unsigned long long>(extentRest),
-                static_cast<unsigned long long>(transposeUnitLatency),
-                static_cast<unsigned long long>(totalLatency));
-
-        return totalLatency;
+        return plan.execLatency;
     }
 
-    auto &workspace = bankWorkspace.front();
-    for (auto &line : batchPlan.destLines) {
+    for (auto &line : plan.destLines) {
         for (const auto &copy : line.copies) {
-            line.lineData[copy.lineOffset] = workspace[copy.bufferOffset];
+            line.lineData[copy.lineOffset] = plan.sourceBuffer[copy.bufferOffset];
         }
     }
 
-    return 0;
+    return plan.execLatency;
 }
 
 void
 DmaUnit::buildMvoutRequests(ActiveExecution &exec,
                             std::vector<MemRequestDesc> &reqs)
 {
-    (void)exec;
-
-    if (done()) {
+    const IterationPlan *plan = findIterationPlan(exec.iteration);
+    if (plan == nullptr) {
         return;
     }
 
@@ -1027,7 +1044,7 @@ DmaUnit::buildMvoutRequests(ActiveExecution &exec,
     }
 
     const PortID writePort = memSidePorts.size() > 1 ? 1 : 0;
-    for (const auto &line : batchPlan.destLines) {
+    for (const auto &line : plan->destLines) {
         MemRequestDesc req;
         req.portId = writePort;
         req.kind = MemTxnContext::Kind::Mvout;
@@ -1036,29 +1053,6 @@ DmaUnit::buildMvoutRequests(ActiveExecution &exec,
         req.data.assign(line.lineData.begin(), line.lineData.end());
         reqs.push_back(req);
     }
-}
-
-void
-DmaUnit::epilogue(ActiveExecution &exec)
-{
-    (void)exec;
-
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill ||
-        static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
-        currentY = 1;
-        return;
-    }
-
-    if (batchPlan.height != 0 && batchPlan.width != 0) {
-        advanceBatchCursor();
-    }
-}
-
-bool
-DmaUnit::shouldExit(const ActiveExecution &exec) const
-{
-    (void)exec;
-    return done();
 }
 
 } // namespace gem5

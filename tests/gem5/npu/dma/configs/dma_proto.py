@@ -106,7 +106,8 @@ if args.scenario != "invalid_address":
         f"iters={system.dma.completedIterationCount()} "
         f"queue={system.dma.queueOccupancy()} "
         f"cmdq={system.cmdq.queueOccupancy()} "
-        f"busy={int(system.dma.isIssueBusy())}"
+        f"busy={int(system.dma.isIssueBusy())} "
+        f"active={system.dma.maxActiveMicroOps()}"
     )
 
 if (
