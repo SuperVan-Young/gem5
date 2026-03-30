@@ -10,8 +10,8 @@ from m5.objects import (
     Process,
     RiscvTimingSimpleCPU,
     Root,
-    SEWorkload,
     ScratchpadMemory,
+    SEWorkload,
     SimpleMemory,
     SpecializedExecutionUnit,
     SrcClockDomain,
@@ -230,16 +230,14 @@ class NPUTestSystemBuilder:
         self,
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
-        buffer_size=4096,
+        bank_size=4096,
         base_addr=None,
         sync_enqueue_on_data_write=True,
         attr_name="dma",
     ):
         self._require_system()
         if DmaUnit is None:
-            raise RuntimeError(
-                "DmaUnit is not available in the current build"
-            )
+            raise RuntimeError("DmaUnit is not available in the current build")
         if base_addr is None:
             base_addr = self.addr_map.dma_base
         dma = DmaUnit(
@@ -247,7 +245,7 @@ class NPUTestSystemBuilder:
             macro_cmd_bytes=macro_cmd_bytes,
             cmd_queue_depth=cmd_queue_depth,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
-            buffer_size=buffer_size,
+            bank_size=bank_size,
         )
         dma.cpu_side = self.system.membus.mem_side_ports
         dma.mem_side = self.system.membus.cpu_side_ports
@@ -268,8 +266,7 @@ class NPUTestSystemBuilder:
 
     def get_cmdq_port_base(self, cpu_id):
         return (
-            self.addr_map.cmdq_base
-            + cpu_id * self.addr_map.cmdq_port_stride
+            self.addr_map.cmdq_base + cpu_id * self.addr_map.cmdq_port_stride
         )
 
     def map_cmdq(self, process=None, cpu_id=0, size=None, base_addr=None):

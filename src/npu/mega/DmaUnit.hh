@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #include "npu/mega/SpecializedExecutionUnit.hh"
@@ -44,35 +45,53 @@ namespace gem5
 class DmaUnit : public SpecializedExecutionUnit
 {
   private:
-    enum class XferMode : uint8_t
+    enum class Mode : uint8_t
     {
-        DramToSpm = 0,
-        SpmToDram = 1,
-        SpmToSpm = 2,
-        DramToDram = 3,
+        MoveLayout = 0,
+        Transpose = 1,
+        Fill = 2,
+    };
+
+    enum class CutDim : uint8_t
+    {
+        H = 0,
+        W = 1,
+        C = 2,
+        Reserved = 3,
     };
 
     enum class MemorySpace : uint8_t
     {
-        Dram,
-        Spm,
+        Dram = 0,
+        Spm = 1,
+        DmaBank = 2,
+        Invalid = 3,
     };
 
-    enum class RequestKind : uint8_t
+    enum class PendingMvinKind : uint8_t
     {
-        None,
-        GatherRead,
-        ScatterDestRead,
-        ScatterWrite,
-        CompletionSyncWrite,
+        SourceLine,
+        DestLine,
     };
 
     struct ParsedCmd
     {
         uint8_t deviceId = 0;
         uint8_t dataType = 0;
-        uint8_t xferMode = 0;
+        uint8_t mode = 0;
         uint8_t syncIndicator = 0;
+        MemorySpace srcMemSpace = MemorySpace::Dram;
+        MemorySpace dstMemSpace = MemorySpace::Dram;
+        uint8_t srcCutDim = 0;
+        uint8_t dstCutDim = 0;
+        uint8_t transposeDimA = 0;
+        uint8_t transposeDimB = 0;
+        uint8_t srcBankId = 0;
+        uint8_t dstBankId = 0;
+        uint32_t modeCfg = 0;
+        uint32_t bankCfg = 0;
+        uint32_t word15 = 0;
+        uint8_t fillValue = 0;
         Addr srcBaseAddr = 0;
         Addr dstBaseAddr = 0;
         uint32_t shapeH = 0;
@@ -124,25 +143,41 @@ class DmaUnit : public SpecializedExecutionUnit
         std::vector<DestLine> destLines;
     };
 
+    struct PendingMvinTxn
+    {
+        PendingMvinKind kind = PendingMvinKind::SourceLine;
+        size_t index = 0;
+    };
+
     static constexpr size_t CacheLineBytes = 64;
     static constexpr uint8_t DmaDeviceType = 0x4;
-    static constexpr uint8_t SyncSetOpCode = 0x1;
-    static constexpr size_t MaxBufferBytes = 256 * 1024 * 1024ULL;
+    static constexpr size_t MaxBankBytes = 16 * 1024 * 1024ULL;
+    static constexpr size_t MaxNumBanks = 16;
 
-    const size_t bufferSize;
+    const size_t numBanks;
+    const size_t bankSize;
+    const Tick transposeUnitLatency;
+
+    std::vector<std::vector<uint8_t>> bankWorkspace;
 
     ParsedCmd parsedCmd;
     BatchPlan batchPlan;
-    RequestKind requestKind;
     bool parsedCmdValid;
     uint32_t currentY;
     uint32_t currentX;
-    size_t gatherIndex;
-    size_t scatterIndex;
+    std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
     void validateParsedCommand(const ParsedCmd &cmd) const;
+    void validateMoveLayoutCommand(const ParsedCmd &cmd) const;
+    void validateTransposeCommand(const ParsedCmd &cmd) const;
+    void validateFillCommand(const ParsedCmd &cmd) const;
+    size_t fillRequiredBytes(const ParsedCmd &cmd) const;
+    size_t transposeRequiredBytes(const ParsedCmd &cmd) const;
+    uint32_t axisExtent(const ParsedCmd &cmd, uint8_t dim) const;
+    bool isExternalSpace(MemorySpace space) const;
+    std::vector<Addr> externalFillLineAddrs(const ParsedCmd &cmd) const;
     MemorySpace sourceSpace() const;
     MemorySpace destSpace() const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;
@@ -151,29 +186,30 @@ class DmaUnit : public SpecializedExecutionUnit
     void validateBurstLine(Addr addr, MemorySpace space,
                            const char *label) const;
     Addr computeTensorAddr(Addr base, uint32_t strideH, uint32_t strideW,
-                           uint32_t strideC, uint16_t k, uint32_t channels,
+                           uint32_t strideC, uint16_t k, uint32_t width,
+                           uint32_t channels, uint8_t cutDim,
                            uint32_t y, uint32_t x, uint32_t z) const;
     void resetCommandState();
     bool done() const;
     void advanceBatchCursor();
     void planCurrentBatch();
     void buildBatchLines();
-    void issueNextGatherRead();
-    void issueNextScatterRead();
-    void issueScatterWrite();
-    PacketPtr makeReadPacket(Addr addr) const;
-    PacketPtr makeWritePacket(Addr addr, const uint8_t *data) const;
-    void handleGatherReadResponse(PacketPtr pkt);
-    void handleScatterReadResponse(PacketPtr pkt);
-    void handleScatterWriteResponse(PacketPtr pkt);
-    void finishCurrentBatch();
+    void buildTransposeLines();
 
   protected:
     void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
-    bool handleMemResponse(PacketPtr pkt) override;
-    bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
-                                 uint32_t &word) const override;
-    void sendCompletionSyncWord(uint32_t word) override;
+    void onCommandBegin(ActiveExecution &exec) override;
+    void prologue(ActiveExecution &exec) override;
+    void buildMvinRequests(ActiveExecution &exec,
+                           std::vector<MemRequestDesc> &reqs) override;
+    void onMvinResponse(ActiveExecution &exec,
+                        const MemTxnContext &txn,
+                        PacketPtr pkt) override;
+    Tick execute(ActiveExecution &exec) override;
+    void buildMvoutRequests(ActiveExecution &exec,
+                            std::vector<MemRequestDesc> &reqs) override;
+    void epilogue(ActiveExecution &exec) override;
+    bool shouldExit(const ActiveExecution &exec) const override;
 
   public:
     DmaUnit(const DmaUnitParams &params);
