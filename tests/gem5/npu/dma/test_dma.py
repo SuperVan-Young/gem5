@@ -138,6 +138,7 @@ add_dma_test(
     "transpose_hw",
     (
         r".*DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=1 extent_a=2 extent_b=4 extent_rest=3 transpose_unit_latency=1000 computed_total_latency=24000",
+        r"DMA_SUMMARY scenario=transpose_hw cmds=1 .* iters=3 .* active=[2-9][0-9]*",
         r"DMA_SCENARIO_PASS=transpose_hw",
     ),
 )
@@ -169,7 +170,7 @@ add_dma_test(
     "dma_bank_size_forces_batching",
     "bank_size_forces_batching",
     (
-        r"DMA_SUMMARY scenario=bank_size_forces_batching cmds=1 reads=8 writes=4 iters=4 .*",
+        r"DMA_SUMMARY scenario=bank_size_forces_batching cmds=1 reads=8 writes=4 iters=4 .* active=[2-9][0-9]*",
         r"DMA_SCENARIO_PASS=bank_size_forces_batching",
     ),
 )

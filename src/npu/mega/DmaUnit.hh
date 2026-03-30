@@ -132,12 +132,16 @@ class DmaUnit : public SpecializedExecutionUnit
         std::array<uint8_t, 64> lineData = {};
     };
 
-    struct BatchPlan
+    struct IterationPlan
     {
         uint32_t startY = 0;
         uint32_t startX = 0;
         uint32_t height = 0;
         uint32_t width = 0;
+        uint8_t transposeRemainingDim = 0;
+        uint32_t transposeRemainingIndex = 0;
+        Tick execLatency = 0;
+        std::vector<uint8_t> sourceBuffer;
         std::vector<uint8_t> buffer;
         std::vector<SourceLine> sourceLines;
         std::vector<DestLine> destLines;
@@ -145,6 +149,7 @@ class DmaUnit : public SpecializedExecutionUnit
 
     struct PendingMvinTxn
     {
+        uint64_t iteration = 0;
         PendingMvinKind kind = PendingMvinKind::SourceLine;
         size_t index = 0;
     };
@@ -158,13 +163,9 @@ class DmaUnit : public SpecializedExecutionUnit
     const size_t bankSize;
     const Tick transposeUnitLatency;
 
-    std::vector<std::vector<uint8_t>> bankWorkspace;
-
     ParsedCmd parsedCmd;
-    BatchPlan batchPlan;
     bool parsedCmdValid;
-    uint32_t currentY;
-    uint32_t currentX;
+    std::vector<IterationPlan> iterationPlans;
     std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
@@ -190,11 +191,14 @@ class DmaUnit : public SpecializedExecutionUnit
                            uint32_t channels, uint8_t cutDim,
                            uint32_t y, uint32_t x, uint32_t z) const;
     void resetCommandState();
-    bool done() const;
-    void advanceBatchCursor();
-    void planCurrentBatch();
-    void buildBatchLines();
-    void buildTransposeLines();
+    IterationPlan &iterationPlan(uint64_t iteration);
+    const IterationPlan *findIterationPlan(uint64_t iteration) const;
+    void buildIterationPlans(ActiveExecution &exec);
+    void buildMoveLayoutPlans();
+    void buildTransposePlans();
+    void buildFillPlans();
+    void buildBatchLines(IterationPlan &plan) const;
+    void buildTransposeLines(IterationPlan &plan) const;
 
   protected:
     void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
@@ -208,8 +212,6 @@ class DmaUnit : public SpecializedExecutionUnit
     Tick execute(ActiveExecution &exec) override;
     void buildMvoutRequests(ActiveExecution &exec,
                             std::vector<MemRequestDesc> &reqs) override;
-    void epilogue(ActiveExecution &exec) override;
-    bool shouldExit(const ActiveExecution &exec) const override;
 
   public:
     DmaUnit(const DmaUnitParams &params);
