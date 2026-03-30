@@ -60,6 +60,7 @@ expected_epilogues = repetition
 expected_read_resps = popcount32(read_mask) * repetition
 expected_write_resps = popcount32(write_mask) * repetition
 expected_iterations = repetition
+expected_min_overlap = 2
 
 binary = os.path.abspath(args.binary)
 builder = NPUTestSystemBuilder()
@@ -86,6 +87,7 @@ executes = builder.system.seu.executeCount()
 write_resps = builder.system.seu.completedWriteRespCount()
 epilogues = builder.system.seu.epilogueCount()
 iterations = builder.system.seu.completedIterationCount()
+max_active_micro_ops = builder.system.seu.maxActiveMicroOps()
 
 print(f"SEU_MULTI_EXIT_CAUSE={exit_cause}")
 print(f"SEU_MULTI_COMPLETED_CMDS={completed_cmds}")
@@ -95,6 +97,7 @@ print(f"SEU_MULTI_EXECUTES={executes}")
 print(f"SEU_MULTI_WRITE_RESPS={write_resps}")
 print(f"SEU_MULTI_EPILOGUES={epilogues}")
 print(f"SEU_MULTI_ITERATIONS={iterations}")
+print(f"SEU_MULTI_MAX_ACTIVE_MICRO_OPS={max_active_micro_ops}")
 
 if (
     exit_cause == expected_exit_cause
@@ -105,5 +108,6 @@ if (
     and write_resps == expected_write_resps
     and epilogues == expected_epilogues
     and iterations == expected_iterations
+    and max_active_micro_ops >= expected_min_overlap
 ):
     print("SEU_MULTI_TEST_PASS")
