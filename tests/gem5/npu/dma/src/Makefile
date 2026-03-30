@@ -4,6 +4,8 @@
 OUTDIR := ../bin
 OUT := $(OUTDIR)/dma_proto_riscv
 SRC := dma_proto_riscv.c
+CXX := riscv64-linux-gnu-g++
+CXXFLAGS := -O0 -static -std=c++17 -x c++ -I../../utils
 
 .PHONY: all clean
 
@@ -11,7 +13,7 @@ all: $(OUT)
 
 $(OUT): $(SRC)
 	mkdir -p $(OUTDIR)
-	riscv64-linux-gnu-gcc -O0 -static -o $@ $<
+	$(CXX) $(CXXFLAGS) -o $@ $<
 
 clean:
 	rm -f $(OUT)

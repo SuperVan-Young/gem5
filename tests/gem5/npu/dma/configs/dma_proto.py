@@ -19,7 +19,7 @@ dma_base = 0x74000000
 dram_base = 0x20000000
 spm_base = 0x60000000
 spm_size = 64 * 1024
-buffer_size = 32 if args.scenario == "buffer_size_forces_batching" else 4096
+bank_size = 32 if args.scenario == "bank_size_forces_batching" else 4096
 expected_exit_cause = "exiting with last active thread context"
 expected_exit_code = 0
 
@@ -68,15 +68,18 @@ system.cmdq.cpu_side = system.membus.mem_side_ports
 system.cmdq.sync_indicator_side = system.membus.mem_side_ports
 system.cmdq.mem_side = system.membus.cpu_side_ports
 
+dma_mem_ports = 2
 system.dma = DmaUnit(
     base_addr=dma_base,
     macro_cmd_bytes=cmd_bytes,
     cmd_queue_depth=8,
     sync_enqueue_on_data_write=True,
-    buffer_size=buffer_size,
+    bank_size=bank_size,
+    num_mem_side_ports=dma_mem_ports,
 )
 system.dma.cpu_side = system.membus.mem_side_ports
-system.dma.mem_side = system.membus.cpu_side_ports
+for _ in range(dma_mem_ports):
+    system.dma.mem_side = system.membus.cpu_side_ports
 
 root = Root(full_system=False, system=system)
 m5.instantiate()
@@ -92,6 +95,19 @@ exit_code = exit_event.getCode()
 print(f"DMA_EXIT_CAUSE={exit_cause}")
 print(f"DMA_EXIT_CODE={exit_code}")
 print(f"DMA_SCENARIO={args.scenario}")
+
+if args.scenario != "invalid_address":
+    print(
+        "DMA_SUMMARY "
+        f"scenario={args.scenario} "
+        f"cmds={system.dma.completedCmdCount()} "
+        f"reads={system.dma.completedReadRespCount()} "
+        f"writes={system.dma.completedWriteRespCount()} "
+        f"iters={system.dma.completedIterationCount()} "
+        f"queue={system.dma.queueOccupancy()} "
+        f"cmdq={system.cmdq.queueOccupancy()} "
+        f"busy={int(system.dma.isIssueBusy())}"
+    )
 
 if (
     args.scenario != "invalid_address"
