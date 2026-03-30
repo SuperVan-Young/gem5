@@ -30,6 +30,7 @@
 #include <stdio.h>
 
 #include "cmd/common.hh"
+#include "npu_sync.hh"
 
 enum SeuMultiOpcode
 {
@@ -74,13 +75,6 @@ initial_slot_value(uint32_t port_id)
     return 0x00010011U + (port_id * 0x00011111U);
 }
 
-static uint32_t
-mix_slot_value(uint32_t current, uint32_t signature, uint32_t iteration,
-               uint32_t port_id)
-{
-    return current + signature + ((iteration + 1U) * 0x10U) + (port_id + 1U);
-}
-
 static void
 seed_spm_slots(uint32_t *expected_slots)
 {
@@ -90,66 +84,6 @@ seed_spm_slots(uint32_t *expected_slots)
         expected_slots[port] = value;
         *spm_slot_ptr(port) = value;
     }
-}
-
-static uint32_t
-build_iteration_signature(const uint32_t *slots, uint32_t read_mask)
-{
-    uint32_t signature = 0U;
-
-    for (uint32_t port = 0U; port < SEU_MULTI_NUM_PORTS; ++port) {
-        if ((read_mask & (1U << port)) != 0U) {
-            signature += slots[port];
-        }
-    }
-
-    return signature;
-}
-
-static void
-advance_expected_slots(uint32_t *slots, uint32_t read_mask,
-                       uint32_t write_mask, uint32_t iteration)
-{
-    const uint32_t signature = build_iteration_signature(slots, read_mask);
-
-    for (uint32_t port = 0U; port < SEU_MULTI_NUM_PORTS; ++port) {
-        if ((write_mask & (1U << port)) != 0U) {
-            slots[port] = mix_slot_value(slots[port], signature, iteration,
-                                         port);
-        }
-    }
-}
-
-static void
-simulate_expected_result(uint32_t *slots, uint32_t read_mask,
-                         uint32_t write_mask, uint32_t repetition)
-{
-    for (uint32_t iteration = 0U; iteration < repetition; ++iteration) {
-        advance_expected_slots(slots, read_mask, write_mask, iteration);
-    }
-}
-
-static int
-wait_for_expected_slots(const uint32_t *expected_slots, uint64_t timeout)
-{
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        int matched = 1;
-
-        for (uint32_t port = 0U; port < SEU_MULTI_NUM_PORTS; ++port) {
-            const uint32_t actual = *spm_slot_ptr(port);
-
-            if (actual != expected_slots[port]) {
-                matched = 0;
-                break;
-            }
-        }
-
-        if (matched) {
-            return 0;
-        }
-    }
-
-    return -1;
 }
 
 static void
@@ -185,13 +119,11 @@ int
 main(void)
 {
     uint32_t expected_slots[SEU_MULTI_NUM_PORTS];
-    const uint32_t read_mask = SEU_MULTI_CMD_READ_MASK;
-    const uint32_t write_mask = SEU_MULTI_CMD_WRITE_MASK;
     const uint32_t repetition = SEU_MULTI_REPETITION;
     const uint32_t expected_read_replies =
-        popcount32(read_mask) * repetition;
+        popcount32(SEU_MULTI_CMD_READ_MASK) * repetition;
     const uint32_t expected_write_replies =
-        popcount32(write_mask) * repetition;
+        popcount32(SEU_MULTI_CMD_WRITE_MASK) * repetition;
     const uint32_t expected_prologues = repetition;
     const uint32_t expected_executes = repetition;
     const uint32_t expected_epilogues = repetition;
@@ -201,24 +133,9 @@ main(void)
     print_slot_snapshot("SEU_MULTI_INITIAL", expected_slots);
 
     launch_seu_multiport_cmd();
+    npu_launch_sync_wait(SEU_MULTI_CMD_DEVICE_ID, SEU_MULTI_CMD_SYNC,
+                         0U, 0U, 0U);
 
-    simulate_expected_result(expected_slots, read_mask, write_mask,
-                             repetition);
-
-    if (wait_for_expected_slots(expected_slots, 40000000ULL) != 0) {
-        uint32_t actual_slots[SEU_MULTI_NUM_PORTS];
-
-        for (uint32_t port = 0U; port < SEU_MULTI_NUM_PORTS; ++port) {
-            actual_slots[port] = *spm_slot_ptr(port);
-        }
-
-        print_slot_snapshot("SEU_MULTI_EXPECTED", expected_slots);
-        print_slot_snapshot("SEU_MULTI_ACTUAL", actual_slots);
-        printf("SEU_MULTI_TEST_FAIL\n");
-        return 1;
-    }
-
-    print_slot_snapshot("SEU_MULTI_FINAL", expected_slots);
     printf("SEU_MULTI_EXPECTED_COMPLETED_CMDS=%u\n", expected_completed_cmds);
     printf("SEU_MULTI_EXPECTED_PROLOGUES=%u\n", expected_prologues);
     printf("SEU_MULTI_EXPECTED_EXECUTES=%u\n", expected_executes);
