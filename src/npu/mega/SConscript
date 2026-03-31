@@ -2,22 +2,22 @@
 
 Import('*')
 
-DebugFlag('DmaUnit')
 DebugFlag('MegaCmdQueue')
 DebugFlag('SpecializedExecutionUnit')
+DebugFlag('DmaUnit')
 DebugFlag('ScratchpadMemory')
 DebugFlag('VPU')
 
 SimObject('LutUnit.py', sim_objects=['LutUnit'])
-SimObject('DmaUnit.py', sim_objects=['DmaUnit'])
 SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
+SimObject('DmaUnit.py', sim_objects=['DmaUnit'])
 SimObject('SpecializedExecutionUnit.py',
           sim_objects=['SpecializedExecutionUnit'])
 SimObject('ScratchpadMemory.py', sim_objects=['ScratchpadMemory'])
 SimObject('VpuUnit.py', sim_objects=['VpuUnit'])
 Source('LutUnit.cc')
 Source('MegaCmdQueue.cc')
+Source('DmaUnit.cc')
 Source('SpecializedExecutionUnit.cc')
 Source('ScratchpadMemory.cc')
 Source('VpuUnit.cc')
-Source('DmaUnit.cc')

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -53,11 +54,6 @@ class SpecializedExecutionUnit : public ClockedObject
     {
         Idle,
         Prologue,
-        LaunchingMvin,
-        WaitingMvin,
-        Executing,
-        LaunchingMvout,
-        WaitingMvout,
         Epilogue,
         Completing,
     };
@@ -78,6 +74,25 @@ class SpecializedExecutionUnit : public ClockedObject
         uint64_t token = 0;
         Addr addr = 0;
         size_t size = 0;
+    };
+
+    struct MicroOpContext
+    {
+        enum class Kind
+        {
+            Load,
+            Exec,
+            Store,
+            SyncWrite,
+        };
+
+        Kind kind = Kind::Load;
+        PortID portId = InvalidPortID;
+        uint64_t iteration = 0;
+        uint64_t token = 0;
+        Addr addr = 0;
+        size_t size = 0;
+        Tick latency = 0;
     };
 
     struct MemRequestDesc
@@ -124,6 +139,20 @@ class SpecializedExecutionUnit : public ClockedObject
         std::vector<PortID> writePorts;
         std::unordered_map<PortID, std::vector<uint8_t>> readResults;
         std::unordered_map<PortID, std::vector<uint8_t>> writeResults;
+        uint64_t nextIterationToPrepare = 0;
+        uint64_t nextIterationToRetire = 0;
+        bool completionIssued = false;
+        bool finalizePending = false;
+    };
+
+    struct IterationState
+    {
+        bool prepared = false;
+        bool execQueued = false;
+        bool execCompleted = false;
+        bool epilogueDone = false;
+        size_t pendingLoads = 0;
+        size_t pendingStores = 0;
     };
 
   private:
@@ -184,6 +213,16 @@ class SpecializedExecutionUnit : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
+    struct QueuedMemOp
+    {
+        MemRequestDesc desc;
+    };
+
+    struct QueuedExecOp
+    {
+        MicroOpContext ctx;
+    };
+
   public:
     // Port-aware buffer helpers for subclasses. The base class materializes
     // packets, selects the port, and tracks the transaction lifecycle.
@@ -201,6 +240,7 @@ class SpecializedExecutionUnit : public ClockedObject
     uint64_t prologueCount() const;
     uint64_t executeCount() const;
     uint64_t epilogueCount() const;
+    uint64_t maxActiveMicroOps() const;
 
     virtual void onCommandBegin(ActiveExecution &exec) { (void)exec; }
     virtual void prologue(ActiveExecution &exec) { (void)exec; }
@@ -243,6 +283,14 @@ class SpecializedExecutionUnit : public ClockedObject
         return exec.repetition == 0 ||
                exec.completedIterations >= exec.repetition;
     }
+    virtual void onMicroOpComplete(ActiveExecution &exec,
+                                   const MicroOpContext &ctx,
+                                   PacketPtr pkt)
+    {
+        (void)exec;
+        (void)ctx;
+        (void)pkt;
+    }
 
   protected:
     // Compatibility entry point; completion sync defaults to port 0.
@@ -269,6 +317,9 @@ class SpecializedExecutionUnit : public ClockedObject
     MemSidePort memSidePort;
     StagingBuffer stagingBuffer;
     std::deque<std::vector<uint8_t>> cmdQueue;
+    std::vector<std::deque<QueuedMemOp>> loadQueues;
+    std::vector<std::deque<QueuedMemOp>> storeQueues;
+    std::deque<QueuedExecOp> execQueue;
 
     const uint32_t macroCmdBytes;
     const uint32_t cmdQueueDepth;
@@ -278,11 +329,14 @@ class SpecializedExecutionUnit : public ClockedObject
 
     bool issueCmdBusy;
     uint64_t completedCount;
+    uint64_t maxConcurrentMicroOps;
     std::vector<std::unique_ptr<MemSidePort>> memSidePorts;
-    PacketPtr activeMemPacket;
     std::vector<uint8_t> activeCmd;
     ActiveExecution activeExecution;
+    std::unordered_map<uint64_t, IterationState> iterationStates;
     std::unordered_map<PacketPtr, MemTxnContext> activeMemTxns;
+    std::optional<MicroOpContext> activeExecOp;
+    std::vector<bool> memPortBusy;
     uint64_t nextMemTxnToken = 0;
 
     EventFunctionWrapper issueEvent;
@@ -300,19 +354,25 @@ class SpecializedExecutionUnit : public ClockedObject
     void sendMemRequest(PacketPtr pkt, PortID port_id);
     bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer);
     bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer);
-    void cleanupActiveMemPacket();
     MemSidePort &getMemSidePort(PortID idx);
     const MemSidePort &getMemSidePort(PortID idx) const;
     void beginActiveCommand(ActiveExecution &exec);
-    void advanceActivePhase(ActiveExecution &exec);
-    void runProloguePhase(ActiveExecution &exec);
-    void launchMvinPhase(ActiveExecution &exec);
+    void updateConcurrentMicroOps();
+    void prepareIteration(ActiveExecution &exec, uint64_t iteration);
+    void issueLoadRequests(ActiveExecution &exec, uint64_t iteration);
+    void enqueueLoadRequest(const MemRequestDesc &req_desc);
+    void enqueueStoreRequest(const MemRequestDesc &req_desc);
+    void enqueueExecOp(uint64_t iteration, Tick latency);
+    void pumpMemPort(PortID port_id);
+    void launchExecIfReady();
     bool handleMvinResponseInternal(ActiveExecution &exec, PacketPtr pkt);
-    void scheduleExecutePhase(ActiveExecution &exec);
-    void finishExecutePhase(ActiveExecution &exec);
-    void launchMvoutPhase(ActiveExecution &exec);
     bool handleMvoutResponseInternal(ActiveExecution &exec, PacketPtr pkt);
-    void runEpiloguePhase(ActiveExecution &exec);
+    void handleIterationLoadsReady(ActiveExecution &exec, uint64_t iteration);
+    void handleExecCompletion(ActiveExecution &exec,
+                              const MicroOpContext &ctx);
+    void issueStoreRequests(ActiveExecution &exec, uint64_t iteration);
+    void retireCompletedIterations(ActiveExecution &exec);
+    void runEpiloguePhase(ActiveExecution &exec, uint64_t iteration);
     void finalizeActiveCommand(ActiveExecution &exec);
 
   public:

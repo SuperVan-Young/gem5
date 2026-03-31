@@ -249,7 +249,7 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
       debugProcessLatency(params.debug_process_latency),
       issueCmdBusy(false),
       completedCount(0),
-      activeMemPacket(nullptr),
+      maxConcurrentMicroOps(0),
       activeCmd(macroCmdBytes, 0),
       issueEvent([this] { issueOneCommand(); }, name() + ".issueEvent"),
       finishExecutionEvent([this] { finishExecution(); },
@@ -260,6 +260,9 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
 
     stagingBuffer.bytes.resize(macroCmdBytes, 0);
     memSidePorts.reserve(params.num_mem_side_ports);
+    loadQueues.resize(params.num_mem_side_ports);
+    storeQueues.resize(params.num_mem_side_ports);
+    memPortBusy.resize(params.num_mem_side_ports, false);
     for (PortID i = 0; i < params.num_mem_side_ports; ++i) {
         auto port = std::make_unique<MemSidePort>(
             csprintf("%s.mem_side[%d]", params.name, i), this);
@@ -269,13 +272,13 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
 
     DPRINTF(SpecializedExecutionUnit,
             "Created SEU: base_addr=%#x cmd_bytes=%u queue_depth=%u "
-            "mem_ports=%zu\n",
-            baseAddr, macroCmdBytes, cmdQueueDepth, memSidePorts.size());
+            "mem_ports=%llu\n",
+            baseAddr, macroCmdBytes, cmdQueueDepth,
+            static_cast<unsigned long long>(memSidePorts.size()));
 }
 
 SpecializedExecutionUnit::~SpecializedExecutionUnit()
 {
-    cleanupActiveMemPacket();
 }
 
 void
@@ -286,22 +289,6 @@ SpecializedExecutionUnit::init()
     if (cpuSidePort.isConnected()) {
         cpuSidePort.sendRangeChange();
     }
-}
-
-void
-SpecializedExecutionUnit::cleanupActiveMemPacket()
-{
-    if (activeMemPacket) {
-        delete activeMemPacket;
-        activeMemPacket = nullptr;
-    }
-
-    for (auto &[pkt, txn] : activeMemTxns) {
-        if (pkt != activeMemPacket) {
-            delete pkt;
-        }
-    }
-    activeMemTxns.clear();
 }
 
 Port &
@@ -322,8 +309,9 @@ SpecializedExecutionUnit::MemSidePort &
 SpecializedExecutionUnit::getMemSidePort(PortID idx)
 {
     panic_if(idx < 0 || static_cast<size_t>(idx) >= memSidePorts.size(),
-             "%s: mem_side port index %d out of range (num ports=%zu)",
-             name(), idx, memSidePorts.size());
+             "%s: mem_side port index %d out of range (num ports=%llu)",
+             name(), idx,
+             static_cast<unsigned long long>(memSidePorts.size()));
     return *memSidePorts[idx];
 }
 
@@ -331,8 +319,9 @@ const SpecializedExecutionUnit::MemSidePort &
 SpecializedExecutionUnit::getMemSidePort(PortID idx) const
 {
     panic_if(idx < 0 || static_cast<size_t>(idx) >= memSidePorts.size(),
-             "%s: mem_side port index %d out of range (num ports=%zu)",
-             name(), idx, memSidePorts.size());
+             "%s: mem_side port index %d out of range (num ports=%llu)",
+             name(), idx,
+             static_cast<unsigned long long>(memSidePorts.size()));
     return *memSidePorts[idx];
 }
 
@@ -385,13 +374,15 @@ SpecializedExecutionUnit::launchStagedCmd()
 {
     if (!canLaunchCmd()) {
         DPRINTF(SpecializedExecutionUnit,
-                "Launch rejected: queue full (%zu/%u)\n",
-                cmdQueue.size(), cmdQueueDepth);
+                "Launch rejected: queue full (%llu/%u)\n",
+                static_cast<unsigned long long>(cmdQueue.size()),
+                cmdQueueDepth);
         return false;
     }
     cmdQueue.push_back(stagingBuffer.bytes);
     DPRINTF(SpecializedExecutionUnit,
-            "Launched command, queue size now %zu\n", cmdQueue.size());
+            "Launched command, queue size now %llu\n",
+            static_cast<unsigned long long>(cmdQueue.size()));
     tryScheduleIssue();
     return true;
 }
@@ -455,7 +446,8 @@ SpecializedExecutionUnit::issueOneCommand()
     issueCmdBusy = true;
 
     DPRINTF(SpecializedExecutionUnit,
-            "Issuing command, queue size now %zu\n", cmdQueue.size());
+            "Issuing command, queue size now %llu\n",
+            static_cast<unsigned long long>(cmdQueue.size()));
 
     startExecuteCommand(activeCmd);
 }
@@ -465,7 +457,7 @@ SpecializedExecutionUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
 {
     activeExecution.cmd = cmd;
     beginActiveCommand(activeExecution);
-    advanceActivePhase(activeExecution);
+    prepareIteration(activeExecution, 0);
 }
 
 void
@@ -483,8 +475,9 @@ SpecializedExecutionUnit::completeActiveCommand()
     completedCount++;
 
     DPRINTF(SpecializedExecutionUnit,
-            "Finished command %lu, queue size %zu\n",
-            completedCount, cmdQueue.size());
+            "Finished command %llu, queue size %llu\n",
+            static_cast<unsigned long long>(completedCount),
+            static_cast<unsigned long long>(cmdQueue.size()));
 
     if (!sentCompletionSync && !cmdQueue.empty()) {
         schedule(issueEvent, nextCycle());
@@ -497,12 +490,12 @@ SpecializedExecutionUnit::completeActiveCommand()
 void
 SpecializedExecutionUnit::finishExecution()
 {
-    if (activeExecution.phase == Phase::Executing) {
-        finishExecutePhase(activeExecution);
-        return;
-    }
-
-    completeActiveCommand();
+    panic_if(!activeExecOp.has_value(),
+             "%s: exec completion event without active exec op", name());
+    const MicroOpContext ctx = *activeExecOp;
+    activeExecOp.reset();
+    handleExecCompletion(activeExecution, ctx);
+    launchExecIfReady();
 }
 
 Tick
@@ -533,6 +526,10 @@ SpecializedExecutionUnit::beginActiveCommand(ActiveExecution &exec)
     exec.completedReadRespCount = total_reads;
     exec.completedWriteRespCount = total_writes;
     exec.completedIterations = total_iterations;
+    exec.nextIterationToPrepare = 0;
+    exec.nextIterationToRetire = 0;
+    exec.completionIssued = false;
+    exec.finalizePending = false;
 
     exec.readMask = readCmdWord(exec.cmd, MultiportReadMaskWord);
     exec.writeMask = readCmdWord(exec.cmd, MultiportWriteMaskWord);
@@ -540,11 +537,13 @@ SpecializedExecutionUnit::beginActiveCommand(ActiveExecution &exec)
     exec.reserved = readCmdWord(exec.cmd, MultiportReservedWord);
 
     panic_if(!maskFitsPortCount(exec.readMask, memSidePorts.size()),
-             "%s: read mask %#x exceeds mem port count %zu",
-             name(), exec.readMask, memSidePorts.size());
+             "%s: read mask %#x exceeds mem port count %llu",
+             name(), exec.readMask,
+             static_cast<unsigned long long>(memSidePorts.size()));
     panic_if(!maskFitsPortCount(exec.writeMask, memSidePorts.size()),
-             "%s: write mask %#x exceeds mem port count %zu",
-             name(), exec.writeMask, memSidePorts.size());
+             "%s: write mask %#x exceeds mem port count %llu",
+             name(), exec.writeMask,
+             static_cast<unsigned long long>(memSidePorts.size()));
     if (exec.repetition == 0) {
         exec.repetition = 1;
     }
@@ -552,45 +551,38 @@ SpecializedExecutionUnit::beginActiveCommand(ActiveExecution &exec)
     for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
          ++port) {
         exec.readResults[port] = packWord(defaultInitialSlotValue(port));
+        loadQueues[port].clear();
+        storeQueues[port].clear();
+        memPortBusy[port] = false;
     }
+    execQueue.clear();
+    activeExecOp.reset();
+    iterationStates.clear();
+    maxConcurrentMicroOps = 0;
 
     onCommandBegin(exec);
 }
 
 void
-SpecializedExecutionUnit::advanceActivePhase(ActiveExecution &exec)
+SpecializedExecutionUnit::prepareIteration(ActiveExecution &exec,
+                                           uint64_t iteration)
 {
-    switch (exec.phase) {
-      case Phase::Prologue:
-        runProloguePhase(exec);
-        break;
-      case Phase::LaunchingMvin:
-        launchMvinPhase(exec);
-        break;
-      case Phase::LaunchingMvout:
-        launchMvoutPhase(exec);
-        break;
-      case Phase::Epilogue:
-        runEpiloguePhase(exec);
-        break;
-      default:
-        panic("%s: invalid phase transition request %d",
-              name(), static_cast<int>(exec.phase));
+    if (iteration >= exec.repetition) {
+        return;
     }
-}
+    auto [iter_it, inserted] =
+        iterationStates.emplace(iteration, IterationState{});
+    IterationState &state = iter_it->second;
+    if (state.prepared) {
+        return;
+    }
 
-void
-SpecializedExecutionUnit::runProloguePhase(ActiveExecution &exec)
-{
+    exec.phase = Phase::Prologue;
+    exec.iteration = iteration;
     exec.readPorts.clear();
     exec.writePorts.clear();
     exec.writeResults.clear();
     exec.prologueCount++;
-
-    if (exec.repetition == 0) {
-        exec.repetition = 1;
-    }
-
     for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
          ++port) {
         const uint32_t bit = 1U << port;
@@ -601,16 +593,18 @@ SpecializedExecutionUnit::runProloguePhase(ActiveExecution &exec)
             exec.writePorts.push_back(port);
         }
     }
-
+    state.prepared = true;
     prologue(exec);
-
-    exec.phase = Phase::LaunchingMvin;
-    advanceActivePhase(exec);
+    exec.nextIterationToPrepare = std::max(exec.nextIterationToPrepare,
+                                           iteration + 1);
+    issueLoadRequests(exec, iteration);
 }
 
 void
-SpecializedExecutionUnit::launchMvinPhase(ActiveExecution &exec)
+SpecializedExecutionUnit::issueLoadRequests(ActiveExecution &exec,
+                                            uint64_t iteration)
 {
+    exec.iteration = iteration;
     std::vector<MemRequestDesc> reqs;
     buildMvinRequests(exec, reqs);
 
@@ -627,35 +621,27 @@ SpecializedExecutionUnit::launchMvinPhase(ActiveExecution &exec)
     }
 
     if (reqs.empty()) {
-        scheduleExecutePhase(exec);
+        handleIterationLoadsReady(exec, iteration);
         return;
     }
-
-    exec.phase = Phase::WaitingMvin;
+    IterationState &state = iterationStates.at(iteration);
+    state.pendingLoads = reqs.size();
     for (auto &req_desc : reqs) {
         req_desc.kind = MemTxnContext::Kind::Mvin;
-        req_desc.iteration = exec.iteration;
+        req_desc.iteration = iteration;
         req_desc.token = nextMemTxnToken++;
-
-        RequestPtr req = std::make_shared<Request>(
-            req_desc.addr, req_desc.size, Request::Flags(),
-            Request::funcRequestorId);
-        PacketPtr pkt = buildPacketFromRequest(req, req_desc);
-
-        MemTxnContext txn;
-        txn.pkt = pkt;
-        txn.portId = req_desc.portId;
-        txn.kind = req_desc.kind;
-        txn.iteration = req_desc.iteration;
-        txn.token = req_desc.token;
-        txn.addr = req_desc.addr;
-        txn.size = req_desc.size;
-
-        auto [it, inserted] = activeMemTxns.emplace(pkt, txn);
-        panic_if(!inserted, "%s: duplicate in-flight packet registration",
-                 name());
-        getMemSidePort(req_desc.portId).sendPacket(pkt);
+        enqueueLoadRequest(req_desc);
     }
+}
+
+void
+SpecializedExecutionUnit::enqueueLoadRequest(const MemRequestDesc &req_desc)
+{
+    panic_if(req_desc.portId < 0 ||
+             static_cast<size_t>(req_desc.portId) >= loadQueues.size(),
+             "%s: invalid load queue port %d", name(), req_desc.portId);
+    loadQueues[req_desc.portId].push_back({req_desc});
+    pumpMemPort(req_desc.portId);
 }
 
 bool
@@ -669,48 +655,185 @@ SpecializedExecutionUnit::handleMvinResponseInternal(ActiveExecution &exec,
 
     const MemTxnContext txn = it->second;
     const uint8_t *data = pkt->getConstPtr<uint8_t>();
+    exec.iteration = txn.iteration;
     exec.readResults[txn.portId] =
         std::vector<uint8_t>(data, data + pkt->getSize());
     exec.completedReadRespCount++;
     onMvinResponse(exec, txn, pkt);
+    onMicroOpComplete(exec, MicroOpContext{
+        MicroOpContext::Kind::Load, txn.portId, txn.iteration,
+        txn.token, txn.addr, txn.size, 0}, pkt);
 
     activeMemTxns.erase(it);
+    memPortBusy[txn.portId] = false;
     delete pkt;
+    pumpMemPort(txn.portId);
 
-    if (exec.phase == Phase::WaitingMvin) {
-        size_t remaining = 0;
-        for (const auto &[active_pkt, active_txn] : activeMemTxns) {
-            if (active_txn.kind == MemTxnContext::Kind::Mvin &&
-                active_txn.iteration == exec.iteration) {
-                remaining++;
-            }
-        }
-        if (remaining == 0) {
-            scheduleExecutePhase(exec);
-        }
+    IterationState &state = iterationStates.at(txn.iteration);
+    panic_if(state.pendingLoads == 0,
+             "%s: unexpected mvin completion for iteration %llu", name(),
+             static_cast<unsigned long long>(txn.iteration));
+    state.pendingLoads--;
+    if (state.pendingLoads == 0) {
+        handleIterationLoadsReady(exec, txn.iteration);
     }
     return true;
 }
 
 void
-SpecializedExecutionUnit::scheduleExecutePhase(ActiveExecution &exec)
+SpecializedExecutionUnit::handleIterationLoadsReady(ActiveExecution &exec,
+                                                    uint64_t iteration)
 {
-    exec.phase = Phase::Executing;
+    exec.iteration = iteration;
+    IterationState &state = iterationStates.at(iteration);
+    if (state.execQueued) {
+        return;
+    }
+    state.execQueued = true;
     exec.executeCount++;
     const Tick execLatency = execute(exec);
-    schedule(finishExecutionEvent, curTick() + execLatency);
+    enqueueExecOp(iteration, execLatency);
+    if (iteration + 1 < exec.repetition) {
+        prepareIteration(exec, iteration + 1);
+    }
+}
+
+bool
+SpecializedExecutionUnit::handleMvoutResponseInternal(ActiveExecution &exec,
+                                                       PacketPtr pkt)
+{
+    auto it = activeMemTxns.find(pkt);
+    panic_if(it == activeMemTxns.end(),
+             "%s: missing mvout transaction for packet addr=%#x",
+             name(), pkt->getAddr());
+
+    const MemTxnContext txn = it->second;
+    exec.iteration = txn.iteration;
+    exec.completedWriteRespCount++;
+    if (auto write_it = exec.writeResults.find(txn.portId);
+        write_it != exec.writeResults.end()) {
+        exec.readResults[txn.portId] = write_it->second;
+    }
+    onMvoutResponse(exec, txn, pkt);
+    onMicroOpComplete(exec, MicroOpContext{
+        MicroOpContext::Kind::Store, txn.portId, txn.iteration,
+        txn.token, txn.addr, txn.size, 0}, pkt);
+
+    activeMemTxns.erase(it);
+    memPortBusy[txn.portId] = false;
+    delete pkt;
+    pumpMemPort(txn.portId);
+
+    IterationState &state = iterationStates.at(txn.iteration);
+    panic_if(state.pendingStores == 0,
+             "%s: unexpected mvout completion for iteration %llu", name(),
+             static_cast<unsigned long long>(txn.iteration));
+    state.pendingStores--;
+    if (state.pendingStores == 0) {
+        runEpiloguePhase(exec, txn.iteration);
+    }
+    return true;
 }
 
 void
-SpecializedExecutionUnit::finishExecutePhase(ActiveExecution &exec)
+SpecializedExecutionUnit::enqueueStoreRequest(const MemRequestDesc &req_desc)
 {
-    exec.phase = Phase::LaunchingMvout;
-    advanceActivePhase(exec);
+    panic_if(req_desc.portId < 0 ||
+             static_cast<size_t>(req_desc.portId) >= storeQueues.size(),
+             "%s: invalid store queue port %d", name(), req_desc.portId);
+    storeQueues[req_desc.portId].push_back({req_desc});
+    pumpMemPort(req_desc.portId);
 }
 
 void
-SpecializedExecutionUnit::launchMvoutPhase(ActiveExecution &exec)
+SpecializedExecutionUnit::enqueueExecOp(uint64_t iteration, Tick latency)
 {
+    execQueue.push_back({MicroOpContext{
+        MicroOpContext::Kind::Exec,
+        InvalidPortID,
+        iteration,
+        nextMemTxnToken++,
+        0,
+        0,
+        latency,
+    }});
+    launchExecIfReady();
+}
+
+void
+SpecializedExecutionUnit::pumpMemPort(PortID port_id)
+{
+    if (memPortBusy[port_id]) {
+        return;
+    }
+
+    std::deque<QueuedMemOp> *queue = nullptr;
+    if (!loadQueues[port_id].empty()) {
+        queue = &loadQueues[port_id];
+    } else if (!storeQueues[port_id].empty()) {
+        queue = &storeQueues[port_id];
+    }
+
+    if (queue == nullptr) {
+        return;
+    }
+
+    const MemRequestDesc req_desc = queue->front().desc;
+    queue->pop_front();
+
+    RequestPtr req = std::make_shared<Request>(
+        req_desc.addr, req_desc.size, Request::Flags(),
+        Request::funcRequestorId);
+    PacketPtr pkt = buildPacketFromRequest(req, req_desc);
+
+    MemTxnContext txn;
+    txn.pkt = pkt;
+    txn.portId = req_desc.portId;
+    txn.kind = req_desc.kind;
+    txn.iteration = req_desc.iteration;
+    txn.token = req_desc.token;
+    txn.addr = req_desc.addr;
+    txn.size = req_desc.size;
+
+    auto [it, inserted] = activeMemTxns.emplace(pkt, txn);
+    panic_if(!inserted, "%s: duplicate in-flight packet registration",
+             name());
+    memPortBusy[port_id] = true;
+    getMemSidePort(port_id).sendPacket(pkt);
+    updateConcurrentMicroOps();
+}
+
+void
+SpecializedExecutionUnit::launchExecIfReady()
+{
+    if (activeExecOp.has_value() || execQueue.empty()) {
+        return;
+    }
+
+    activeExecOp = execQueue.front().ctx;
+    execQueue.pop_front();
+    updateConcurrentMicroOps();
+    schedule(finishExecutionEvent,
+             curTick() + std::max<Tick>(1, activeExecOp->latency));
+}
+
+void
+SpecializedExecutionUnit::handleExecCompletion(ActiveExecution &exec,
+                                               const MicroOpContext &ctx)
+{
+    exec.iteration = ctx.iteration;
+    IterationState &state = iterationStates.at(ctx.iteration);
+    state.execCompleted = true;
+    onMicroOpComplete(exec, ctx, nullptr);
+    issueStoreRequests(exec, ctx.iteration);
+}
+
+void
+SpecializedExecutionUnit::issueStoreRequests(ActiveExecution &exec,
+                                             uint64_t iteration)
+{
+    exec.iteration = iteration;
+    exec.phase = Phase::Completing;
     std::vector<MemRequestDesc> reqs;
     buildMvoutRequests(exec, reqs);
 
@@ -723,7 +846,7 @@ SpecializedExecutionUnit::launchMvoutPhase(ActiveExecution &exec)
             if (exec.writeResults.find(port) == exec.writeResults.end()) {
                 const uint32_t current = unpackWord(exec.readResults[port]);
                 const uint32_t value = current + signature +
-                    ((static_cast<uint32_t>(exec.iteration) + 1U) * 0x10U) +
+                    ((static_cast<uint32_t>(iteration) + 1U) * 0x10U) +
                     (static_cast<uint32_t>(port) + 1U);
                 exec.writeResults[port] = packWord(value);
             }
@@ -738,100 +861,84 @@ SpecializedExecutionUnit::launchMvoutPhase(ActiveExecution &exec)
         }
     }
 
+    IterationState &state = iterationStates.at(iteration);
+    state.pendingStores = reqs.size();
     if (reqs.empty()) {
-        exec.phase = Phase::Epilogue;
-        advanceActivePhase(exec);
+        runEpiloguePhase(exec, iteration);
         return;
     }
 
-    exec.phase = Phase::WaitingMvout;
     for (auto &req_desc : reqs) {
         req_desc.kind = MemTxnContext::Kind::Mvout;
-        req_desc.iteration = exec.iteration;
+        req_desc.iteration = iteration;
         req_desc.token = nextMemTxnToken++;
-
-        RequestPtr req = std::make_shared<Request>(
-            req_desc.addr, req_desc.size, Request::Flags(),
-            Request::funcRequestorId);
-        PacketPtr pkt = buildPacketFromRequest(req, req_desc);
-
-        MemTxnContext txn;
-        txn.pkt = pkt;
-        txn.portId = req_desc.portId;
-        txn.kind = req_desc.kind;
-        txn.iteration = req_desc.iteration;
-        txn.token = req_desc.token;
-        txn.addr = req_desc.addr;
-        txn.size = req_desc.size;
-
-        auto [it, inserted] = activeMemTxns.emplace(pkt, txn);
-        panic_if(!inserted, "%s: duplicate in-flight packet registration",
-                 name());
-        getMemSidePort(req_desc.portId).sendPacket(pkt);
+        enqueueStoreRequest(req_desc);
     }
-}
-
-bool
-SpecializedExecutionUnit::handleMvoutResponseInternal(ActiveExecution &exec,
-                                                       PacketPtr pkt)
-{
-    auto it = activeMemTxns.find(pkt);
-    panic_if(it == activeMemTxns.end(),
-             "%s: missing mvout transaction for packet addr=%#x",
-             name(), pkt->getAddr());
-
-    const MemTxnContext txn = it->second;
-    exec.completedWriteRespCount++;
-    if (auto write_it = exec.writeResults.find(txn.portId);
-        write_it != exec.writeResults.end()) {
-        exec.readResults[txn.portId] = write_it->second;
-    }
-    onMvoutResponse(exec, txn, pkt);
-
-    activeMemTxns.erase(it);
-    delete pkt;
-
-    if (exec.phase == Phase::WaitingMvout) {
-        size_t remaining = 0;
-        for (const auto &[active_pkt, active_txn] : activeMemTxns) {
-            if (active_txn.kind == MemTxnContext::Kind::Mvout &&
-                active_txn.iteration == exec.iteration) {
-                remaining++;
-            }
-        }
-        if (remaining == 0) {
-            exec.phase = Phase::Epilogue;
-            advanceActivePhase(exec);
-        }
-    }
-    return true;
 }
 
 void
-SpecializedExecutionUnit::runEpiloguePhase(ActiveExecution &exec)
+SpecializedExecutionUnit::retireCompletedIterations(ActiveExecution &exec)
 {
-    exec.epilogueCount++;
-    exec.completedIterations++;
-    epilogue(exec);
+    while (exec.nextIterationToRetire < exec.repetition) {
+        auto it = iterationStates.find(exec.nextIterationToRetire);
+        if (it == iterationStates.end() || !it->second.epilogueDone) {
+            break;
+        }
 
-    ActiveExecution exit_view = exec;
-    exit_view.completedIterations = exec.iteration + 1;
-    if (shouldExit(exit_view)) {
+        exec.completedIterations++;
+        exec.nextIterationToRetire++;
+    }
+
+    if (exec.completedIterations >= exec.repetition &&
+        activeMemTxns.empty() && execQueue.empty() &&
+        !activeExecOp.has_value()) {
         finalizeActiveCommand(exec);
+    }
+}
+
+void
+SpecializedExecutionUnit::runEpiloguePhase(ActiveExecution &exec,
+                                           uint64_t iteration)
+{
+    exec.phase = Phase::Epilogue;
+    exec.iteration = iteration;
+    IterationState &state = iterationStates.at(iteration);
+    if (state.epilogueDone) {
         return;
     }
 
-    exec.iteration++;
-    exec.phase = Phase::Prologue;
-    advanceActivePhase(exec);
+    exec.epilogueCount++;
+    epilogue(exec);
+    state.epilogueDone = true;
+
+    retireCompletedIterations(exec);
 }
 
 void
 SpecializedExecutionUnit::finalizeActiveCommand(ActiveExecution &exec)
 {
+    if (exec.completionIssued) {
+        return;
+    }
+
+    ActiveExecution exit_view = exec;
+    exit_view.completedIterations = exec.repetition;
+    panic_if(!shouldExit(exit_view),
+             "%s: command reached finalizeActiveCommand before shouldExit",
+             name());
+
     exec.phase = Phase::Completing;
+    exec.completionIssued = true;
     completeActiveCommand();
     exec.phase = Phase::Idle;
+}
+
+void
+SpecializedExecutionUnit::updateConcurrentMicroOps()
+{
+    const uint64_t active_ops =
+        activeMemTxns.size() + (activeExecOp.has_value() ? 1U : 0U);
+    maxConcurrentMicroOps = std::max(maxConcurrentMicroOps, active_ops);
 }
 
 void
@@ -856,11 +963,12 @@ SpecializedExecutionUnit::sendMemRequest(PacketPtr pkt, PortID port_id)
     panic_if(!inserted, "%s: duplicate in-flight packet registration", name());
 
     DPRINTF(SpecializedExecutionUnit,
-            "sendMemRequest: port=%d kind=%d addr=%#x size=%u inflight=%zu\n",
+            "sendMemRequest: port=%d kind=%d addr=%#x size=%u inflight=%llu\n",
             port_id, static_cast<int>(txn.kind), txn.addr, txn.size,
-            activeMemTxns.size());
+            static_cast<unsigned long long>(activeMemTxns.size()));
 
     getMemSidePort(port_id).sendPacket(pkt);
+    updateConcurrentMicroOps();
 }
 
 bool
@@ -984,9 +1092,9 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
     const MemTxnContext txn = it->second;
     DPRINTF(SpecializedExecutionUnit,
             "Received memory response for addr=%#x port=%d kind=%d "
-            "remaining_before=%zu\n",
+            "remaining_before=%llu\n",
             pkt->getAddr(), txn.portId, static_cast<int>(txn.kind),
-            activeMemTxns.size());
+            static_cast<unsigned long long>(activeMemTxns.size()));
 
     switch (txn.kind) {
       case MemTxnContext::Kind::Mvin:
@@ -994,6 +1102,9 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
       case MemTxnContext::Kind::Mvout:
         return handleMvoutResponseInternal(activeExecution, pkt);
       case MemTxnContext::Kind::SyncWrite:
+        onMicroOpComplete(activeExecution, MicroOpContext{
+            MicroOpContext::Kind::SyncWrite, txn.portId, txn.iteration,
+            txn.token, txn.addr, txn.size, 0}, pkt);
         activeMemTxns.erase(it);
         delete pkt;
         if (activeMemTxns.empty() && !issueCmdBusy && !cmdQueue.empty()) {
@@ -1057,6 +1168,12 @@ uint64_t
 SpecializedExecutionUnit::epilogueCount() const
 {
     return activeExecution.epilogueCount;
+}
+
+uint64_t
+SpecializedExecutionUnit::maxActiveMicroOps() const
+{
+    return maxConcurrentMicroOps;
 }
 
 } // namespace gem5

@@ -37,6 +37,7 @@ class SpecializedExecutionUnit(ClockedObject):
         PyBindMethod("prologueCount"),
         PyBindMethod("executeCount"),
         PyBindMethod("epilogueCount"),
+        PyBindMethod("maxActiveMicroOps"),
         PyBindMethod("isIssueBusy"),
         PyBindMethod("setDebugProcessLatency"),
     ]
