@@ -9,14 +9,9 @@
 #include <string.h>
 
 #include "cmd/common.hh"
+#include "cmd/dma.hh"
 #include "npu_sync.hh"
 #include "vpu.hh"
-
-enum DmaXferMode
-{
-    XFER_DRAM_TO_SPM = 0x0U,
-    XFER_SPM_TO_DRAM = 0x1U,
-};
 
 enum SystemMultiportLayout
 {
@@ -191,45 +186,23 @@ print_vector(const char *prefix, const uint32_t *values)
 }
 
 static void
-push_words_at(uint64_t port_base, const uint32_t words[16])
-{
-    npu_mmio_write32(port_base, words, 16);
-    npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_PUSH);
-}
-
-static void
-push_dma_at(uint64_t port_base, uint32_t xfer_mode, uint32_t sync_idx,
+push_dma_at(uint64_t port_base, uint32_t sync_idx,
             uint32_t src_base, uint32_t dst_base)
 {
-    uint32_t words[16];
-    NpuCmd cmd;
+    const DmaLayout layout = {
+        1U,
+        1U,
+        SYSTEM_MULTIPORT_VECTOR_BYTES,
+        SYSTEM_MULTIPORT_VECTOR_BYTES,
+        SYSTEM_MULTIPORT_VECTOR_BYTES,
+        1U,
+        0U,
+        DMA_CUT_DIM_W,
+    };
 
-    for (unsigned i = 0; i < 16U; ++i) {
-        words[i] = 0U;
-    }
-
-    cmd.clear();
-    cmd.setDeviceType(NPU_DEVICE_TYPE_DMA);
-    cmd.setDeviceId(SYSTEM_MULTIPORT_DMA_DEVICE_ID);
-    cmd.setOpCode((0U << 5) | ((xfer_mode & 0x7U) << 2));
-    cmd.setSyncIndicator(sync_idx);
-    cmd.clearCommonReservedBits();
-
-    words[0] = cmd.getWord(0U);
-    words[14] = src_base;
-    words[13] = dst_base;
-    words[12] = 1U;
-    words[11] = 1U;
-    words[10] = SYSTEM_MULTIPORT_VECTOR_BYTES;
-    words[9] = SYSTEM_MULTIPORT_VECTOR_BYTES;
-    words[8] = SYSTEM_MULTIPORT_VECTOR_BYTES;
-    words[7] = 1U;
-    words[6] = SYSTEM_MULTIPORT_SLOT_STRIDE_BYTES;
-    words[5] = SYSTEM_MULTIPORT_SLOT_STRIDE_BYTES;
-    words[4] = 1U;
-    words[3] = 0U;
-
-    push_words_at(port_base, words);
+    dma_cmd_launch_move_layout_at(
+        port_base, SYSTEM_MULTIPORT_DMA_DEVICE_ID, src_base, dst_base,
+        &layout, &layout, sync_idx, 1U);
 }
 
 static void
@@ -271,7 +244,7 @@ cpu0_main(uint64_t port_base)
     seed_dram_source(src);
     compute_expected(src, linear_expected, softmax_expected);
 
-    push_dma_at(port_base, XFER_DRAM_TO_SPM, SYSTEM_MULTIPORT_DMA_SYNC,
+    push_dma_at(port_base, SYSTEM_MULTIPORT_DMA_SYNC,
                 SYSTEM_MULTIPORT_DRAM_SRC_BASE, SYSTEM_MULTIPORT_SPM_BASE);
     npu_launch_sync_wait_at(SYSTEM_MULTIPORT_DMA_DEVICE_ID,
                             SYSTEM_MULTIPORT_DMA_SYNC, 0U, 0U, 0U, port_base);
@@ -343,7 +316,7 @@ cpu1_main(uint64_t port_base)
                             sizeof(uint32_t), sizeof(uint32_t), VPU_DATA_F32);
     npu_launch_sync_wait_at(SYSTEM_MULTIPORT_VPU1_ID,
                             SYSTEM_MULTIPORT_VPU1_SYNC, 0U, 0U, 0U, port_base);
-    push_dma_at(port_base, XFER_SPM_TO_DRAM, SYSTEM_MULTIPORT_COPYBACK_SYNC,
+    push_dma_at(port_base, SYSTEM_MULTIPORT_COPYBACK_SYNC,
                 SYSTEM_MULTIPORT_SPM_BASE +
                     (SYSTEM_MULTIPORT_SOFTMAX_SLOT *
                      SYSTEM_MULTIPORT_SLOT_STRIDE_BYTES),

@@ -8,14 +8,9 @@
 #include <string.h>
 
 #include "cmd/common.hh"
+#include "cmd/dma.hh"
 #include "npu_sync.hh"
 #include "vpu.hh"
-
-enum DmaXferMode
-{
-    XFER_DRAM_TO_SPM = 0x0U,
-    XFER_SPM_TO_DRAM = 0x1U,
-};
 
 enum SystemPipelineLayout
 {
@@ -174,45 +169,23 @@ print_vector(const char *prefix, const uint32_t *values)
 }
 
 static void
-push_words(const uint32_t words[16])
-{
-    npu_mmio_write32(NPU_CMD_PORT_BASE, words, 16);
-    npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(NPU_CMD_PORT_BASE), NPU_CMD_CTRL_PUSH);
-}
-
-static void
-push_dma(uint32_t xfer_mode, uint32_t sync_idx, uint32_t src_base,
+push_dma(uint32_t sync_idx, uint32_t src_base,
          uint32_t dst_base)
 {
-    uint32_t words[16];
-    NpuCmd cmd;
+    const DmaLayout layout = {
+        1U,
+        1U,
+        SYSTEM_PIPELINE_VECTOR_BYTES,
+        SYSTEM_PIPELINE_VECTOR_BYTES,
+        SYSTEM_PIPELINE_VECTOR_BYTES,
+        1U,
+        0U,
+        DMA_CUT_DIM_W,
+    };
 
-    for (unsigned i = 0; i < 16U; ++i) {
-        words[i] = 0U;
-    }
-
-    cmd.clear();
-    cmd.setDeviceType(NPU_DEVICE_TYPE_DMA);
-    cmd.setDeviceId(SYSTEM_PIPELINE_DMA_DEVICE_ID);
-    cmd.setOpCode((0U << 5) | ((xfer_mode & 0x7U) << 2));
-    cmd.setSyncIndicator(sync_idx);
-    cmd.clearCommonReservedBits();
-
-    words[0] = cmd.getWord(0U);
-    words[14] = src_base;
-    words[13] = dst_base;
-    words[12] = 1U;
-    words[11] = 1U;
-    words[10] = SYSTEM_PIPELINE_VECTOR_BYTES;
-    words[9] = SYSTEM_PIPELINE_VECTOR_BYTES;
-    words[8] = SYSTEM_PIPELINE_VECTOR_BYTES;
-    words[7] = 1U;
-    words[6] = SYSTEM_PIPELINE_SLOT_STRIDE_BYTES;
-    words[5] = SYSTEM_PIPELINE_SLOT_STRIDE_BYTES;
-    words[4] = 1U;
-    words[3] = 0U;
-
-    push_words(words);
+    dma_cmd_launch_move_layout(
+        SYSTEM_PIPELINE_DMA_DEVICE_ID, src_base, dst_base,
+        &layout, &layout, sync_idx, 1U);
 }
 
 static void
@@ -257,7 +230,7 @@ main(int argc, char **argv)
     seed_dram_source(src);
     compute_expected(src, linear_expected, softmax_expected);
 
-    push_dma(XFER_DRAM_TO_SPM, SYSTEM_PIPELINE_DMA_SYNC,
+    push_dma(SYSTEM_PIPELINE_DMA_SYNC,
              SYSTEM_PIPELINE_DRAM_SRC_BASE, SYSTEM_PIPELINE_SPM_BASE);
     npu_launch_sync_wait(SYSTEM_PIPELINE_DMA_DEVICE_ID,
                          SYSTEM_PIPELINE_DMA_SYNC, 0U, 0U, 0U);
@@ -300,7 +273,7 @@ main(int argc, char **argv)
     }
 
     if (copy_back) {
-        push_dma(XFER_SPM_TO_DRAM, SYSTEM_PIPELINE_COPYBACK_SYNC,
+        push_dma(SYSTEM_PIPELINE_COPYBACK_SYNC,
                  SYSTEM_PIPELINE_SPM_BASE +
                      (SYSTEM_PIPELINE_SOFTMAX_SLOT *
                       SYSTEM_PIPELINE_SLOT_STRIDE_BYTES),

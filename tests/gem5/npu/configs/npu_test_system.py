@@ -414,7 +414,7 @@ class NPUTestSystemBuilder:
             self.add_dma(
                 macro_cmd_bytes=macro_cmd_bytes,
                 cmd_queue_depth=cmd_queue_depth,
-                buffer_size=dma_buffer_size,
+                bank_size=dma_buffer_size,
                 base_addr=dma_base,
                 sync_enqueue_on_data_write=dma_sync_enqueue_on_data_write,
                 attr_name="dma",
