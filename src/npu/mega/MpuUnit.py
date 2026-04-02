@@ -26,6 +26,25 @@ class MpuUnit(SpecializedExecutionUnit):
     array_drain_latency = Param.Latency(
         "1ns", "Array drain latency component for matrix compute"
     )
+    load_bandwidth_bytes_per_cycle = Param.Unsigned(
+        16, "Modeled MPU-local load bandwidth in bytes per cycle"
+    )
+    store_bandwidth_bytes_per_cycle = Param.Unsigned(
+        16, "Modeled MPU-local store bandwidth in bytes per cycle"
+    )
+    c_read_base_latency = Param.Latency(
+        "1ns", "Fixed latency for local C read in MATMUL_ACC"
+    )
+    c_write_base_latency = Param.Latency(
+        "1ns", "Fixed latency for local C write in MATMUL_ACC"
+    )
+    local_bank_count = Param.Unsigned(2, "Number of modeled local banks")
+    local_bank_granularity_bytes = Param.Unsigned(
+        4, "Granularity of local-bank arbitration in bytes"
+    )
+    local_bank_service_cycles = Param.Unsigned(
+        1, "Cycles required to serve one local-bank granule"
+    )
 
     cxx_exports = SpecializedExecutionUnit.cxx_exports + [
         PyBindMethod("loadCmdCount"),
@@ -43,4 +62,13 @@ class MpuUnit(SpecializedExecutionUnit):
         PyBindMethod("slotC0Dirty"),
         PyBindMethod("slotC1Dirty"),
         PyBindMethod("tensorLoopExpandedTiles"),
+        PyBindMethod("tensorLoopExpandedAccTiles"),
+        PyBindMethod("totalInternalLoads"),
+        PyBindMethod("totalInternalComputes"),
+        PyBindMethod("totalInternalStores"),
+        PyBindMethod("totalTiles"),
+        PyBindMethod("totalAccTiles"),
+        PyBindMethod("stallCyclesWaitingForSPM"),
+        PyBindMethod("stallCyclesWaitingForSlot"),
+        PyBindMethod("computedTotalLatency"),
     ]

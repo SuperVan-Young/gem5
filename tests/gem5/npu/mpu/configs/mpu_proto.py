@@ -38,7 +38,13 @@ builder.add_spm(base_addr=spm_base, size=spm_size)
 builder.add_cpu(cpu_id=0)
 builder.set_workload(os.path.abspath(args.binary), [args.scenario], cpu_id=0)
 builder.add_megacmdqueue()
-builder.add_mpu()
+builder.add_mpu(
+    load_bandwidth_bytes_per_cycle=8,
+    store_bandwidth_bytes_per_cycle=8,
+    local_bank_count=2,
+    local_bank_granularity_bytes=4,
+    local_bank_service_cycles=1,
+)
 if needs_dma:
     builder.add_dma()
 builder.instantiate_root()
@@ -74,6 +80,15 @@ print(
     f"busy={int(builder.system.mpu.isIssueBusy())} "
     f"active={builder.system.mpu.maxActiveMicroOps()} "
     f"tiles={builder.system.mpu.tensorLoopExpandedTiles()} "
+    f"acc_tiles={builder.system.mpu.tensorLoopExpandedAccTiles()} "
+    f"internal_loads={builder.system.mpu.totalInternalLoads()} "
+    f"internal_computes={builder.system.mpu.totalInternalComputes()} "
+    f"internal_stores={builder.system.mpu.totalInternalStores()} "
+    f"total_tiles={builder.system.mpu.totalTiles()} "
+    f"total_acc_tiles={builder.system.mpu.totalAccTiles()} "
+    f"spm_stall={builder.system.mpu.stallCyclesWaitingForSPM()} "
+    f"slot_stall={builder.system.mpu.stallCyclesWaitingForSlot()} "
+    f"latency={builder.system.mpu.computedTotalLatency()} "
     f"a0={int(builder.system.mpu.slotA0Valid())} "
     f"a1={int(builder.system.mpu.slotA1Valid())} "
     f"b0={int(builder.system.mpu.slotB0Valid())} "

@@ -275,6 +275,13 @@ class NPUTestSystemBuilder:
         array_fill_latency="1ns",
         array_steady_per_k="1ns",
         array_drain_latency="1ns",
+        load_bandwidth_bytes_per_cycle=16,
+        store_bandwidth_bytes_per_cycle=16,
+        c_read_base_latency="1ns",
+        c_write_base_latency="1ns",
+        local_bank_count=2,
+        local_bank_granularity_bytes=4,
+        local_bank_service_cycles=1,
         attr_name="mpu",
     ):
         self._require_system()
@@ -296,6 +303,13 @@ class NPUTestSystemBuilder:
             array_fill_latency=array_fill_latency,
             array_steady_per_k=array_steady_per_k,
             array_drain_latency=array_drain_latency,
+            load_bandwidth_bytes_per_cycle=load_bandwidth_bytes_per_cycle,
+            store_bandwidth_bytes_per_cycle=store_bandwidth_bytes_per_cycle,
+            c_read_base_latency=c_read_base_latency,
+            c_write_base_latency=c_write_base_latency,
+            local_bank_count=local_bank_count,
+            local_bank_granularity_bytes=local_bank_granularity_bytes,
+            local_bank_service_cycles=local_bank_service_cycles,
         )
         mpu.cpu_side = self.system.membus.mem_side_ports
         for _ in range(num_mem_side_ports):

@@ -44,6 +44,7 @@ enum MpuLocalAddr
 enum MpuLayoutMode
 {
     MPU_LAYOUT_MODE_NORMAL = 0x0U,
+    MPU_LAYOUT_MODE_SKEWED = 0x1U,
 };
 
 static inline uint32_t
@@ -55,14 +56,19 @@ mpuMakeOpCode(uint32_t data_type, uint32_t mode)
 static inline uint32_t
 mpuBuildStepCfg(uint32_t outer_step_tiles, uint32_t inner_step_tiles,
                 uint32_t pingpong_a_enable, uint32_t pingpong_b_enable,
-                uint32_t pingpong_c_enable, uint32_t auto_load_c_for_acc)
+                uint32_t pingpong_c_enable, uint32_t auto_load_c_for_acc,
+                uint32_t layout_a_skewed, uint32_t layout_b_skewed,
+                uint32_t layout_c_skewed)
 {
     return (outer_step_tiles & 0xffU) |
            ((inner_step_tiles & 0xffU) << 8) |
            ((pingpong_a_enable & 0x1U) << 16) |
            ((pingpong_b_enable & 0x1U) << 17) |
            ((pingpong_c_enable & 0x1U) << 18) |
-           ((auto_load_c_for_acc & 0x1U) << 19);
+           ((auto_load_c_for_acc & 0x1U) << 19) |
+           ((layout_a_skewed & 0x1U) << 20) |
+           ((layout_b_skewed & 0x1U) << 21) |
+           ((layout_c_skewed & 0x1U) << 22);
 }
 
 static inline void
