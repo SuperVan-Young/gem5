@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 from testlib import *
+
 from gem5.fixture import (
     Gem5Fixture,
     MakeFixture,
@@ -263,8 +264,7 @@ def run_expected_mpu_panic(params, scenario, stderr_regex):
 
     completed = subprocess.run(
         command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
         check=False,
     )
@@ -284,7 +284,6 @@ def run_expected_mpu_panic(params, scenario, stderr_regex):
         )
 
 
-
 def add_mpu_panic_test(name, scenario, stderr_regex):
     for host in constants.supported_hosts:
         for opt in constants.supported_variants:
@@ -292,7 +291,9 @@ def add_mpu_panic_test(name, scenario, stderr_regex):
                 suite_name = f"{name}-{isa}-{host}-{opt}"
                 tempdir = TempdirFixture()
 
-                def runner(params, scenario=scenario, stderr_regex=stderr_regex):
+                def runner(
+                    params, scenario=scenario, stderr_regex=stderr_regex
+                ):
                     run_expected_mpu_panic(params, scenario, stderr_regex)
 
                 TestSuite(
