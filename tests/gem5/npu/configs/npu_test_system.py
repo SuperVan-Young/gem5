@@ -25,6 +25,11 @@ try:
 except ImportError:
     DmaUnit = None
 
+try:
+    from m5.objects import MpuUnit
+except ImportError:
+    MpuUnit = None
+
 DEFAULT_MEGA_CMD_WIDTH_BITS = 512
 DEFAULT_MACRO_CMD_BYTES = DEFAULT_MEGA_CMD_WIDTH_BITS // 8
 DEFAULT_CMD_QUEUE_DEPTH = 8
@@ -38,6 +43,8 @@ class NPUAddressMap:
     sync_base: int = 0x71000000
     seu_base: int = 0x72000000
     cmdq_range_base: int = 0x73000000
+    mpu_base: int = 0x73000000
+    mpu_range_base: int = 0x74000000
     dma_base: int = 0x74000000
     dma_range_base: int = 0x75000000
     spm_base: int = 0x60000000
@@ -253,6 +260,50 @@ class NPUTestSystemBuilder:
         self.components[attr_name] = dma
         return dma
 
+    def add_mpu(
+        self,
+        macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
+        num_mem_side_ports=1,
+        base_addr=None,
+        sync_enqueue_on_data_write=True,
+        array_rows=4,
+        array_cols=4,
+        array_k_depth=4,
+        load_base_latency="1ns",
+        store_base_latency="1ns",
+        array_fill_latency="1ns",
+        array_steady_per_k="1ns",
+        array_drain_latency="1ns",
+        attr_name="mpu",
+    ):
+        self._require_system()
+        if MpuUnit is None:
+            raise RuntimeError("MpuUnit is not available in the current build")
+        if base_addr is None:
+            base_addr = self.addr_map.mpu_base
+        mpu = MpuUnit(
+            base_addr=base_addr,
+            macro_cmd_bytes=macro_cmd_bytes,
+            cmd_queue_depth=cmd_queue_depth,
+            num_mem_side_ports=num_mem_side_ports,
+            sync_enqueue_on_data_write=sync_enqueue_on_data_write,
+            array_rows=array_rows,
+            array_cols=array_cols,
+            array_k_depth=array_k_depth,
+            load_base_latency=load_base_latency,
+            store_base_latency=store_base_latency,
+            array_fill_latency=array_fill_latency,
+            array_steady_per_k=array_steady_per_k,
+            array_drain_latency=array_drain_latency,
+        )
+        mpu.cpu_side = self.system.membus.mem_side_ports
+        for _ in range(num_mem_side_ports):
+            mpu.mem_side = self.system.membus.cpu_side_ports
+        setattr(self.system, attr_name, mpu)
+        self.components[attr_name] = mpu
+        return mpu
+
     def instantiate_root(self, full_system=False):
         self._require_system()
         self.root = Root(full_system=full_system, system=self.system)
@@ -294,6 +345,16 @@ class NPUTestSystemBuilder:
         if size is None:
             size = 2 * macro_cmd_bytes
         base_addr = self.addr_map.seu_base if base_addr is None else base_addr
+        process.map(base_addr, base_addr, size, False)
+        return process
+
+    def map_mpu(self, process=None, cpu_id=0, size=None, base_addr=None):
+        process = self._resolve_process(process, cpu_id)
+        mpu = self.components["mpu"]
+        macro_cmd_bytes = int(mpu.macro_cmd_bytes)
+        if size is None:
+            size = 2 * macro_cmd_bytes
+        base_addr = self.addr_map.mpu_base if base_addr is None else base_addr
         process.map(base_addr, base_addr, size, False)
         return process
 
