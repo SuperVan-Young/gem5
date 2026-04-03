@@ -32,6 +32,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -81,9 +82,9 @@ class MpuUnit : public SpecializedExecutionUnit
     enum class PendingLoadKind : uint8_t
     {
         SlotLoad,
-        TensorA,
-        TensorB,
-        TensorCOld,
+        TensorLoadA,
+        TensorLoadB,
+        TensorLoadCOld,
     };
 
     enum SlotIndex : int
@@ -116,9 +117,13 @@ class MpuUnit : public SpecializedExecutionUnit
         uint32_t validN = 0;
         uint32_t validK = 0;
         uint32_t layoutMode = 0;
+        uint32_t dstLayoutMode = 0;
         uint32_t tensorLayoutA = 0;
         uint32_t tensorLayoutB = 0;
         uint32_t tensorLayoutC = 0;
+        uint32_t offsetA = 0;
+        uint32_t offsetB = 0;
+        uint32_t offsetC = 0;
         ComputeSubop subop = ComputeSubop::Matmul;
         uint32_t computeModeFlags = 0;
         Axis outerAxis = Axis::M;
@@ -143,7 +148,10 @@ class MpuUnit : public SpecializedExecutionUnit
         uint32_t shapeM = 0;
         uint32_t shapeN = 0;
         uint32_t shapeK = 0;
-        uint32_t layoutMode = static_cast<uint32_t>(LayoutMode::Normal);
+        uint32_t residentOffsetBytes = 0;
+        uint32_t residentLayoutMode =
+            static_cast<uint32_t>(LayoutMode::Normal);
+        uint64_t epochId = 0;
         std::vector<uint8_t> bytes;
     };
 
@@ -193,6 +201,8 @@ class MpuUnit : public SpecializedExecutionUnit
         bool doLoadB = false;
         bool doLoadCOld = false;
         bool doStoreC = false;
+        bool kOuterSpill = false;
+        bool finalOutputStore = false;
         int tensorSlotA = -1;
         int tensorSlotB = -1;
         int tensorSlotC = -1;
@@ -208,14 +218,8 @@ class MpuUnit : public SpecializedExecutionUnit
         bool firstK = false;
         bool lastK = false;
         bool kExpanded = false;
+        bool kOuter = false;
         uint64_t outputTileKey = 0;
-        std::vector<uint8_t> tensorA;
-        std::vector<uint8_t> tensorB;
-        std::vector<uint8_t> tensorCOld;
-        std::vector<uint8_t> tensorCResult;
-        Tick modeledSpmStall = 0;
-        Tick modeledSlotStall = 0;
-        Tick modeledLatency = 0;
     };
 
     struct PendingLoadTxn
@@ -228,10 +232,18 @@ class MpuUnit : public SpecializedExecutionUnit
     static constexpr uint8_t MpuDeviceType = 0x3;
     static constexpr Addr SpmBase = 0x60000000ULL;
     static constexpr Addr SpmEnd = 0x6fffffffULL;
-    static constexpr uint32_t TensorStepCfgLayoutABit = 20;
-    static constexpr uint32_t TensorStepCfgLayoutBBit = 21;
-    static constexpr uint32_t TensorStepCfgLayoutCBit = 22;
-    static constexpr uint32_t TensorStepCfgReservedMask = 0xff800000U;
+    static constexpr uint32_t LoadStoreLayoutMask = 0x3U;
+    static constexpr uint32_t LoadStoreOffsetShift = 8;
+    static constexpr uint32_t LoadStoreOffsetMask = 0xffU;
+    static constexpr uint32_t LoadStoreCtrlReservedMask = 0xffff0000U | ~0xffffU;
+    static constexpr uint32_t LoopCtrl0SubopMask = 0x3U;
+    static constexpr uint32_t LoopCtrl0LayoutAShift = 4;
+    static constexpr uint32_t LoopCtrl0LayoutBShift = 8;
+    static constexpr uint32_t LoopCtrl0LayoutCShift = 12;
+    static constexpr uint32_t LoopCtrl0AxisOuterShift = 16;
+    static constexpr uint32_t LoopCtrl0AxisInnerShift = 20;
+    static constexpr uint32_t LoopCtrl0ReservedMask = 0xffccccc0U;
+    static constexpr uint32_t StepCfgReservedMask = 0xfff00000U;
     static constexpr size_t Int8Bytes = 1;
     static constexpr size_t Int32Bytes = 4;
 
@@ -256,7 +268,13 @@ class MpuUnit : public SpecializedExecutionUnit
     std::array<SlotState, 6> slots;
     std::vector<IterationPlan> iterationPlans;
     std::unordered_map<uint64_t, PendingLoadTxn> pendingLoadTxns;
-    std::unordered_map<uint64_t, std::vector<uint8_t>> tensorLoopAccumulators;
+    std::vector<Tick> localBankReadyTicks;
+    std::vector<Tick> memPortReadyTicks;
+    Tick currentObservedMemWait;
+    Tick currentObservedSlotWait;
+    Tick currentObservedExecLatency;
+    Tick activeCmdStartTick;
+    uint64_t slotEpochCounter;
 
     uint64_t loadCount;
     uint64_t computeCount;
@@ -271,9 +289,11 @@ class MpuUnit : public SpecializedExecutionUnit
     uint64_t totalInternalStoresValue;
     uint64_t totalTilesValue;
     uint64_t totalAccTilesValue;
+    uint64_t partialSumSpillCountValue;
+    uint64_t partialSumReloadCountValue;
     Tick stallCyclesWaitingForSPMValue;
     Tick stallCyclesWaitingForSlotValue;
-    Tick computedTotalLatencyValue;
+    Tick observedTotalLatencyValue;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
@@ -291,13 +311,15 @@ class MpuUnit : public SpecializedExecutionUnit
 
     int slotIndexForAddr(uint32_t local_addr) const;
     int alternateSlotIndex(int slot_index) const;
-    size_t localOffsetBytes(uint32_t local_addr) const;
     SlotState &slotByIndex(int slot_index);
     const SlotState &slotByIndex(int slot_index) const;
     void validateSlotAddress(uint32_t local_addr, SlotKind expected_kind,
                              const char *label) const;
     void validateSlotShape(const SlotState &slot, const ParsedCmd &cmd,
                            const char *label) const;
+    void validateSlotWindow(const SlotState &slot, uint32_t offset_bytes,
+                            uint32_t layout_mode, const ParsedCmd &cmd,
+                            const char *label) const;
     size_t slotCapacityBytes(int slot_index) const;
     size_t tileBytesForSlotKind(SlotKind kind, uint32_t valid_m,
                                 uint32_t valid_n, uint32_t valid_k) const;
@@ -308,7 +330,10 @@ class MpuUnit : public SpecializedExecutionUnit
     Tick bandwidthLatency(size_t bytes, uint32_t bytes_per_cycle) const;
     Tick matmulLatency(uint32_t valid_k) const;
     Tick matmulAccLatency(uint32_t valid_k) const;
-    void setSlotShape(SlotState &slot, const ParsedCmd &cmd);
+    void updateSlotResidentWindow(SlotState &slot, uint32_t offset_bytes,
+                                  uint32_t layout_mode, uint32_t valid_m,
+                                  uint32_t valid_n, uint32_t valid_k,
+                                  bool dirty);
     void clearSlotBusy(int slot_index);
     void markBusyForFineCommand(const ParsedCmd &cmd);
     void clearBusyForFineCommand(const ParsedCmd &cmd);
@@ -330,24 +355,34 @@ class MpuUnit : public SpecializedExecutionUnit
     std::vector<uint8_t> readLinearFromSlot(const LocalView &view) const;
     void writeLinearToSlot(const LocalView &view,
                            const std::vector<uint8_t> &linear_bytes);
+    std::vector<uint8_t> readLinearFromExternal(SlotKind kind,
+                                                uint32_t layout_mode,
+                                                uint32_t valid_m,
+                                                uint32_t valid_n,
+                                                uint32_t valid_k,
+                                                const uint8_t *bytes,
+                                                size_t size) const;
+    std::vector<uint8_t> writeLinearToExternal(
+        SlotKind kind, uint32_t layout_mode, uint32_t valid_m,
+        uint32_t valid_n, uint32_t valid_k,
+        const std::vector<uint8_t> &linear_bytes) const;
     size_t translateLocalOffset(const LocalView &view, size_t row,
                                 size_t col) const;
-    Tick localAccessCycles(const LocalView &view, Tick *stall_out) const;
-    Tick loadLatencyForView(const LocalView &view, Tick *slot_stall) const;
-    Tick storeLatencyForView(const LocalView &view, Tick *slot_stall) const;
-    Tick matmulLatencyForViews(const LocalView &view_a,
-                               const LocalView &view_b,
-                               const LocalView &view_c,
-                               uint32_t valid_k,
-                               bool accumulate,
-                               Tick *slot_stall) const;
+    Tick issueLocalAccess(const LocalView &view, Tick start_tick);
+    Tick observedLoadExecLatency(const LocalView &view);
+    Tick observedStoreExecLatency(const LocalView &view);
+    Tick observedMatmulExecLatency(const LocalView &view_a,
+                                   const LocalView &view_b,
+                                   const LocalView &view_c,
+                                   uint32_t valid_k,
+                                   bool accumulate);
     uint64_t outputTileKey(uint32_t m_index, uint32_t n_index) const;
-    void updateSlotForTensorLoad(int slot_index, size_t offset_bytes,
-                                 uint32_t layout_mode,
-                                 const std::vector<uint8_t> &linear_bytes,
-                                 uint32_t valid_m, uint32_t valid_n,
-                                 uint32_t valid_k, bool dirty);
-    void updateTensorLoopStats(const IterationPlan &plan);
+    size_t externalTileBytes(SlotKind kind, uint32_t layout_mode,
+                             uint32_t valid_m, uint32_t valid_n,
+                             uint32_t valid_k) const;
+    void resetObservedState();
+    void recordMemWait(PortID port_id, size_t bytes, uint32_t bytes_per_cycle);
+    PortID selectTensorLoopPort(PendingLoadKind kind) const;
 
     void buildIterationPlans(ActiveExecution &exec);
     void buildTensorLoopPlans();
@@ -363,6 +398,7 @@ class MpuUnit : public SpecializedExecutionUnit
   protected:
     void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
     void onCommandBegin(ActiveExecution &exec) override;
+    void epilogue(ActiveExecution &exec) override;
     void buildMvinRequests(ActiveExecution &exec,
                            std::vector<MemRequestDesc> &reqs) override;
     void onMvinResponse(ActiveExecution &exec, const MemTxnContext &txn,
@@ -399,7 +435,9 @@ class MpuUnit : public SpecializedExecutionUnit
     uint64_t totalAccTiles() const;
     uint64_t stallCyclesWaitingForSPM() const;
     uint64_t stallCyclesWaitingForSlot() const;
-    uint64_t computedTotalLatency() const;
+    uint64_t observedTotalLatency() const;
+    uint64_t partialSumSpillCount() const;
+    uint64_t partialSumReloadCount() const;
 };
 
 } // namespace gem5

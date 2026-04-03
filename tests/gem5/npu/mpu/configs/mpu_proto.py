@@ -24,7 +24,11 @@ spm_size = 64 * 1024
 dram_size = 256 * 1024
 expected_exit_cause = "exiting with last active thread context"
 expected_exit_code = 0
-needs_dma = args.scenario == "dma_chain"
+needs_dma = args.scenario == "dma_to_mpu_to_dma_regression"
+
+num_mem_side_ports = (
+    3 if args.scenario == "multi_mem_port_tensor_loop_throughput" else 1
+)
 
 builder = NPUTestSystemBuilder(
     mem_ranges=[
@@ -39,6 +43,7 @@ builder.add_cpu(cpu_id=0)
 builder.set_workload(os.path.abspath(args.binary), [args.scenario], cpu_id=0)
 builder.add_megacmdqueue()
 builder.add_mpu(
+    num_mem_side_ports=num_mem_side_ports,
     load_bandwidth_bytes_per_cycle=8,
     store_bandwidth_bytes_per_cycle=8,
     local_bank_count=2,
@@ -86,9 +91,11 @@ print(
     f"internal_stores={builder.system.mpu.totalInternalStores()} "
     f"total_tiles={builder.system.mpu.totalTiles()} "
     f"total_acc_tiles={builder.system.mpu.totalAccTiles()} "
+    f"partial_spills={builder.system.mpu.partialSumSpillCount()} "
+    f"partial_reloads={builder.system.mpu.partialSumReloadCount()} "
     f"spm_stall={builder.system.mpu.stallCyclesWaitingForSPM()} "
     f"slot_stall={builder.system.mpu.stallCyclesWaitingForSlot()} "
-    f"latency={builder.system.mpu.computedTotalLatency()} "
+    f"latency={builder.system.mpu.observedTotalLatency()} "
     f"a0={int(builder.system.mpu.slotA0Valid())} "
     f"a1={int(builder.system.mpu.slotA1Valid())} "
     f"b0={int(builder.system.mpu.slotB0Valid())} "

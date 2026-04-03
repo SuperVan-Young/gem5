@@ -40,13 +40,6 @@
 namespace gem5
 {
 
-namespace
-{
-
-constexpr uint32_t SlotBaseMask = ~0xfU;
-
-} // anonymous namespace
-
 MpuUnit::MpuUnit(const MpuUnitParams &params)
     : SpecializedExecutionUnit(params),
       arrayRows(params.array_rows),
@@ -65,6 +58,13 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       localBankGranularityBytes(params.local_bank_granularity_bytes),
       localBankServiceCycles(params.local_bank_service_cycles),
       parsedCmdValid(false),
+      localBankReadyTicks(localBankCount, 0),
+      memPortReadyTicks(params.num_mem_side_ports, 0),
+      currentObservedMemWait(0),
+      currentObservedSlotWait(0),
+      currentObservedExecLatency(0),
+      activeCmdStartTick(0),
+      slotEpochCounter(1),
       loadCount(0),
       computeCount(0),
       storeCount(0),
@@ -78,9 +78,11 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       totalInternalStoresValue(0),
       totalTilesValue(0),
       totalAccTilesValue(0),
+      partialSumSpillCountValue(0),
+      partialSumReloadCountValue(0),
       stallCyclesWaitingForSPMValue(0),
       stallCyclesWaitingForSlotValue(0),
-      computedTotalLatencyValue(0)
+      observedTotalLatencyValue(0)
 {
     fatal_if(macroCmdBytes != 64, "%s: MpuUnit requires 64-byte commands",
              name());
@@ -156,7 +158,9 @@ MpuUnit::parseCommand(const std::vector<uint8_t> &cmd) const
         parsed.validM = parsed.words[3];
         parsed.validN = parsed.words[4];
         parsed.validK = parsed.words[5];
-        parsed.layoutMode = parsed.words[6];
+        parsed.layoutMode = parsed.words[6] & LoadStoreLayoutMask;
+        parsed.offsetA =
+            (parsed.words[6] >> LoadStoreOffsetShift) & LoadStoreOffsetMask;
         break;
       case Mode::Compute:
         parsed.localAddrA = parsed.words[1];
@@ -166,7 +170,11 @@ MpuUnit::parseCommand(const std::vector<uint8_t> &cmd) const
         parsed.validN = parsed.words[5];
         parsed.validK = parsed.words[6];
         parsed.subop = static_cast<ComputeSubop>(parsed.words[7]);
-        parsed.computeModeFlags = parsed.words[8];
+        parsed.dstLayoutMode = parsed.words[8];
+        parsed.computeModeFlags = parsed.words[9];
+        parsed.offsetA = parsed.words[10];
+        parsed.offsetB = parsed.words[11];
+        parsed.offsetC = parsed.words[12];
         break;
       case Mode::Store:
         parsed.localAddrC = parsed.words[1];
@@ -174,7 +182,9 @@ MpuUnit::parseCommand(const std::vector<uint8_t> &cmd) const
         parsed.validM = parsed.words[3];
         parsed.validN = parsed.words[4];
         parsed.validK = parsed.words[5];
-        parsed.layoutMode = parsed.words[6];
+        parsed.layoutMode = parsed.words[6] & LoadStoreLayoutMask;
+        parsed.offsetC =
+            (parsed.words[6] >> LoadStoreOffsetShift) & LoadStoreOffsetMask;
         break;
       case Mode::TensorLoop:
         parsed.localAddrA = parsed.words[1];
@@ -186,29 +196,29 @@ MpuUnit::parseCommand(const std::vector<uint8_t> &cmd) const
         parsed.validM = parsed.words[7];
         parsed.validN = parsed.words[8];
         parsed.validK = parsed.words[9];
-        parsed.subop = static_cast<ComputeSubop>(parsed.words[10]);
-        parsed.outerAxis = static_cast<Axis>(parsed.words[11]);
-        parsed.outerCount = parsed.words[12];
-        parsed.innerAxis = static_cast<Axis>(parsed.words[13]);
-        parsed.innerCount = parsed.words[14];
-        parsed.outerStepTiles = parsed.words[15] & 0xff;
-        parsed.innerStepTiles = (parsed.words[15] >> 8) & 0xff;
-        parsed.pingpongA = ((parsed.words[15] >> 16) & 0x1) != 0;
-        parsed.pingpongB = ((parsed.words[15] >> 17) & 0x1) != 0;
-        parsed.pingpongC = ((parsed.words[15] >> 18) & 0x1) != 0;
-        parsed.autoLoadCForAcc = ((parsed.words[15] >> 19) & 0x1) != 0;
+        parsed.subop = static_cast<ComputeSubop>(parsed.words[10] &
+                                                 LoopCtrl0SubopMask);
         parsed.tensorLayoutA =
-            ((parsed.words[15] >> TensorStepCfgLayoutABit) & 0x1) != 0 ?
-            static_cast<uint32_t>(LayoutMode::Skewed) :
-            static_cast<uint32_t>(LayoutMode::Normal);
+            (parsed.words[10] >> LoopCtrl0LayoutAShift) & 0x3U;
         parsed.tensorLayoutB =
-            ((parsed.words[15] >> TensorStepCfgLayoutBBit) & 0x1) != 0 ?
-            static_cast<uint32_t>(LayoutMode::Skewed) :
-            static_cast<uint32_t>(LayoutMode::Normal);
+            (parsed.words[10] >> LoopCtrl0LayoutBShift) & 0x3U;
         parsed.tensorLayoutC =
-            ((parsed.words[15] >> TensorStepCfgLayoutCBit) & 0x1) != 0 ?
-            static_cast<uint32_t>(LayoutMode::Skewed) :
-            static_cast<uint32_t>(LayoutMode::Normal);
+            (parsed.words[10] >> LoopCtrl0LayoutCShift) & 0x3U;
+        parsed.outerAxis = static_cast<Axis>(
+            (parsed.words[10] >> LoopCtrl0AxisOuterShift) & 0x3U);
+        parsed.innerAxis = static_cast<Axis>(
+            (parsed.words[10] >> LoopCtrl0AxisInnerShift) & 0x3U);
+        parsed.outerCount = parsed.words[11];
+        parsed.innerCount = parsed.words[12];
+        parsed.offsetA = parsed.words[13] & 0xffU;
+        parsed.offsetB = (parsed.words[13] >> 8) & 0xffU;
+        parsed.offsetC = (parsed.words[13] >> 16) & 0xffU;
+        parsed.outerStepTiles = parsed.words[14] & 0xffU;
+        parsed.innerStepTiles = (parsed.words[14] >> 8) & 0xffU;
+        parsed.pingpongA = ((parsed.words[14] >> 16) & 0x1U) != 0;
+        parsed.pingpongB = ((parsed.words[14] >> 17) & 0x1U) != 0;
+        parsed.pingpongC = ((parsed.words[14] >> 18) & 0x1U) != 0;
+        parsed.autoLoadCForAcc = ((parsed.words[14] >> 19) & 0x1U) != 0;
         break;
       default:
         break;
@@ -224,7 +234,11 @@ MpuUnit::resetCommandState()
     parsedCmdValid = false;
     iterationPlans.clear();
     pendingLoadTxns.clear();
-    tensorLoopAccumulators.clear();
+    currentObservedMemWait = 0;
+    currentObservedSlotWait = 0;
+    currentObservedExecLatency = 0;
+    std::fill(localBankReadyTicks.begin(), localBankReadyTicks.end(), 0);
+    std::fill(memPortReadyTicks.begin(), memPortReadyTicks.end(), 0);
 }
 
 void
@@ -269,7 +283,7 @@ MpuUnit::validateSpmAddress(Addr addr, size_t size, const char *label) const
 int
 MpuUnit::slotIndexForAddr(uint32_t local_addr) const
 {
-    const uint32_t base_addr = local_addr & SlotBaseMask;
+    const uint32_t base_addr = local_addr;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (slots[i].localAddr == base_addr) {
             return static_cast<int>(i);
@@ -298,12 +312,6 @@ MpuUnit::alternateSlotIndex(int slot_index) const
     }
 
     panic("MpuUnit: no alternate slot for index=%d", slot_index);
-}
-
-size_t
-MpuUnit::localOffsetBytes(uint32_t local_addr) const
-{
-    return local_addr & 0xfU;
 }
 
 MpuUnit::SlotState &
@@ -345,6 +353,20 @@ MpuUnit::validateSlotShape(const SlotState &slot, const ParsedCmd &cmd,
              "MpuUnit: %s slot shape mismatch slot=(%u,%u,%u) cmd=(%u,%u,%u)",
              label, slot.shapeM, slot.shapeN, slot.shapeK, cmd.validM,
              cmd.validN, cmd.validK);
+}
+
+void
+MpuUnit::validateSlotWindow(const SlotState &slot, uint32_t offset_bytes,
+                            uint32_t layout_mode, const ParsedCmd &cmd,
+                            const char *label) const
+{
+    panic_if(slot.residentOffsetBytes != offset_bytes,
+             "MpuUnit: %s slot offset mismatch slot=%u cmd=%u",
+             label, slot.residentOffsetBytes, offset_bytes);
+    panic_if(slot.residentLayoutMode != layout_mode,
+             "MpuUnit: %s slot layout mismatch slot=%u cmd=%u",
+             label, slot.residentLayoutMode, layout_mode);
+    validateSlotShape(slot, cmd, label);
 }
 
 size_t
@@ -427,11 +449,20 @@ MpuUnit::matmulAccLatency(uint32_t valid_k) const
 }
 
 void
-MpuUnit::setSlotShape(SlotState &slot, const ParsedCmd &cmd)
+MpuUnit::updateSlotResidentWindow(SlotState &slot, uint32_t offset_bytes,
+                                  uint32_t layout_mode, uint32_t valid_m,
+                                  uint32_t valid_n, uint32_t valid_k,
+                                  bool dirty)
 {
-    slot.shapeM = cmd.validM;
-    slot.shapeN = cmd.validN;
-    slot.shapeK = cmd.validK;
+    slot.valid = true;
+    slot.dirty = dirty;
+    slot.busy = false;
+    slot.shapeM = valid_m;
+    slot.shapeN = valid_n;
+    slot.shapeK = valid_k;
+    slot.residentOffsetBytes = offset_bytes;
+    slot.residentLayoutMode = layout_mode;
+    slot.epochId = slotEpochCounter++;
 }
 
 void
@@ -650,10 +681,123 @@ MpuUnit::writeLinearToSlot(const LocalView &view,
     }
 }
 
-Tick
-MpuUnit::localAccessCycles(const LocalView &view, Tick *stall_out) const
+std::vector<uint8_t>
+MpuUnit::readLinearFromExternal(SlotKind kind, uint32_t layout_mode,
+                                uint32_t valid_m, uint32_t valid_n,
+                                uint32_t valid_k, const uint8_t *bytes,
+                                size_t size) const
 {
-    std::vector<uint64_t> bank_counts(localBankCount, 0);
+    LocalView view;
+    view.kind = kind;
+    view.layoutMode = layout_mode;
+    view.validM = valid_m;
+    view.validN = valid_n;
+    view.validK = valid_k;
+    switch (kind) {
+      case SlotKind::A:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_m;
+        view.cols = valid_k;
+        break;
+      case SlotKind::B:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_k;
+        view.cols = valid_n;
+        break;
+      case SlotKind::C:
+        view.elemBytes = Int32Bytes;
+        view.rows = valid_m;
+        view.cols = valid_n;
+        break;
+    }
+    view.linearBytes = view.rows * view.cols * view.elemBytes;
+    view.rowStrideBytes = view.cols * view.elemBytes;
+    if (layout_mode == static_cast<uint32_t>(LayoutMode::Skewed) &&
+        view.rows > 1) {
+        view.rowStrideBytes += view.elemBytes;
+    }
+    view.physicalBytes = view.rows == 0 ? 0 :
+        ((view.rows - 1) * view.rowStrideBytes) +
+        (view.cols * view.elemBytes);
+    panic_if(size != view.physicalBytes,
+             "MpuUnit: external read size=%zu expected=%zu", size,
+             view.physicalBytes);
+
+    std::vector<uint8_t> linear(view.linearBytes, 0);
+    size_t linear_offset = 0;
+    for (size_t row = 0; row < view.rows; ++row) {
+        for (size_t col = 0; col < view.cols; ++col) {
+            const size_t phys = row * view.rowStrideBytes +
+                (col * view.elemBytes);
+            std::memcpy(linear.data() + linear_offset, bytes + phys,
+                        view.elemBytes);
+            linear_offset += view.elemBytes;
+        }
+    }
+    return linear;
+}
+
+std::vector<uint8_t>
+MpuUnit::writeLinearToExternal(SlotKind kind, uint32_t layout_mode,
+                               uint32_t valid_m, uint32_t valid_n,
+                               uint32_t valid_k,
+                               const std::vector<uint8_t> &linear_bytes) const
+{
+    LocalView view;
+    view.kind = kind;
+    view.layoutMode = layout_mode;
+    view.validM = valid_m;
+    view.validN = valid_n;
+    view.validK = valid_k;
+    switch (kind) {
+      case SlotKind::A:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_m;
+        view.cols = valid_k;
+        break;
+      case SlotKind::B:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_k;
+        view.cols = valid_n;
+        break;
+      case SlotKind::C:
+        view.elemBytes = Int32Bytes;
+        view.rows = valid_m;
+        view.cols = valid_n;
+        break;
+    }
+    view.linearBytes = view.rows * view.cols * view.elemBytes;
+    view.rowStrideBytes = view.cols * view.elemBytes;
+    if (layout_mode == static_cast<uint32_t>(LayoutMode::Skewed) &&
+        view.rows > 1) {
+        view.rowStrideBytes += view.elemBytes;
+    }
+    view.physicalBytes = view.rows == 0 ? 0 :
+        ((view.rows - 1) * view.rowStrideBytes) +
+        (view.cols * view.elemBytes);
+    panic_if(linear_bytes.size() != view.linearBytes,
+             "MpuUnit: external write size=%zu expected=%zu",
+             linear_bytes.size(), view.linearBytes);
+
+    std::vector<uint8_t> physical(view.physicalBytes, 0);
+    size_t linear_offset = 0;
+    for (size_t row = 0; row < view.rows; ++row) {
+        for (size_t col = 0; col < view.cols; ++col) {
+            const size_t phys = row * view.rowStrideBytes +
+                (col * view.elemBytes);
+            std::memcpy(physical.data() + phys,
+                        linear_bytes.data() + linear_offset,
+                        view.elemBytes);
+            linear_offset += view.elemBytes;
+        }
+    }
+    return physical;
+}
+
+Tick
+MpuUnit::issueLocalAccess(const LocalView &view, Tick start_tick)
+{
+    Tick max_ready = start_tick;
     std::unordered_set<size_t> seen_granules;
 
     for (size_t row = 0; row < view.rows; ++row) {
@@ -665,75 +809,55 @@ MpuUnit::localAccessCycles(const LocalView &view, Tick *stall_out) const
                     continue;
                 }
                 const size_t bank = granule % localBankCount;
-                bank_counts[bank]++;
+                max_ready = std::max(max_ready, localBankReadyTicks[bank]);
+                localBankReadyTicks[bank] = max_ready +
+                    ticksForCycles(localBankServiceCycles);
             }
         }
     }
 
-    uint64_t max_granules = 0;
-    for (const uint64_t count : bank_counts) {
-        max_granules = std::max(max_granules, count);
-    }
-
-    const Tick total = ticksForCycles(max_granules * localBankServiceCycles);
-    const Tick stall = max_granules > 0 ?
-        ticksForCycles((max_granules - 1) * localBankServiceCycles) : 0;
-    if (stall_out != nullptr) {
-        *stall_out = stall;
-    }
-    return total;
+    const Tick stall = max_ready > start_tick ? max_ready - start_tick : 0;
+    stallCyclesWaitingForSlotValue += stall;
+    currentObservedSlotWait += stall;
+    return max_ready;
 }
 
 Tick
-MpuUnit::loadLatencyForView(const LocalView &view, Tick *slot_stall) const
+MpuUnit::observedLoadExecLatency(const LocalView &view)
 {
-    Tick local_stall = 0;
-    const Tick local = localAccessCycles(view, &local_stall);
-    if (slot_stall != nullptr) {
-        *slot_stall = local_stall;
-    }
-    return loadBaseLatency +
-           bandwidthLatency(view.linearBytes, loadBandwidthBytesPerCycle) +
-           local;
+    Tick cursor = curTick() + loadBaseLatency;
+    cursor = issueLocalAccess(view, cursor);
+    return cursor - curTick();
 }
 
 Tick
-MpuUnit::storeLatencyForView(const LocalView &view, Tick *slot_stall) const
+MpuUnit::observedStoreExecLatency(const LocalView &view)
 {
-    Tick local_stall = 0;
-    const Tick local = localAccessCycles(view, &local_stall);
-    if (slot_stall != nullptr) {
-        *slot_stall = local_stall;
-    }
-    return storeBaseLatency +
-           bandwidthLatency(view.linearBytes, storeBandwidthBytesPerCycle) +
-           local;
+    Tick cursor = curTick() + storeBaseLatency;
+    cursor = issueLocalAccess(view, cursor);
+    return cursor - curTick();
 }
 
 Tick
-MpuUnit::matmulLatencyForViews(const LocalView &view_a,
-                               const LocalView &view_b,
-                               const LocalView &view_c,
-                               uint32_t valid_k,
-                               bool accumulate,
-                               Tick *slot_stall) const
+MpuUnit::observedMatmulExecLatency(const LocalView &view_a,
+                                   const LocalView &view_b,
+                                   const LocalView &view_c,
+                                   uint32_t valid_k,
+                                   bool accumulate)
 {
-    Tick stall_a = 0;
-    Tick stall_b = 0;
-    Tick stall_c_read = 0;
-    Tick stall_c_write = 0;
-    const Tick local_a = localAccessCycles(view_a, &stall_a);
-    const Tick local_b = localAccessCycles(view_b, &stall_b);
-    const Tick local_c_read =
-        accumulate ? localAccessCycles(view_c, &stall_c_read) : 0;
-    const Tick local_c_write = localAccessCycles(view_c, &stall_c_write);
-    const Tick total = local_a + local_b + local_c_write +
-        (accumulate ? (cReadBaseLatency + local_c_read + cWriteBaseLatency) : 0) +
-        matmulLatency(valid_k);
-    if (slot_stall != nullptr) {
-        *slot_stall = stall_a + stall_b + stall_c_read + stall_c_write;
+    Tick cursor = curTick();
+    cursor = issueLocalAccess(view_a, cursor);
+    cursor = issueLocalAccess(view_b, cursor);
+    if (accumulate) {
+        cursor += cReadBaseLatency;
+        cursor = issueLocalAccess(view_c, cursor);
     }
-    return total;
+    cursor += matmulLatency(valid_k);
+    if (accumulate) {
+        cursor += cWriteBaseLatency;
+    }
+    cursor = issueLocalAccess(view_c, cursor);
+    return cursor - curTick();
 }
 
 uint64_t
@@ -742,34 +866,91 @@ MpuUnit::outputTileKey(uint32_t m_index, uint32_t n_index) const
     return (static_cast<uint64_t>(m_index) << 32) | n_index;
 }
 
-void
-MpuUnit::updateSlotForTensorLoad(int slot_index, size_t offset_bytes,
-                                 uint32_t layout_mode,
-                                 const std::vector<uint8_t> &linear_bytes,
-                                 uint32_t valid_m, uint32_t valid_n,
-                                 uint32_t valid_k, bool dirty)
+size_t
+MpuUnit::externalTileBytes(SlotKind kind, uint32_t layout_mode,
+                           uint32_t valid_m, uint32_t valid_n,
+                           uint32_t valid_k) const
 {
-    const LocalView view = makeLocalView(slot_index, offset_bytes, layout_mode,
-                                         valid_m, valid_n, valid_k);
-    SlotState &slot = slotByIndex(slot_index);
-    writeLinearToSlot(view, linear_bytes);
-    slot.valid = true;
-    slot.busy = false;
-    slot.dirty = dirty;
-    slot.shapeM = valid_m;
-    slot.shapeN = valid_n;
-    slot.shapeK = valid_k;
-    slot.layoutMode = layout_mode;
+    LocalView view;
+    view.kind = kind;
+    view.layoutMode = layout_mode;
+    switch (kind) {
+      case SlotKind::A:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_m;
+        view.cols = valid_k;
+        break;
+      case SlotKind::B:
+        view.elemBytes = Int8Bytes;
+        view.rows = valid_k;
+        view.cols = valid_n;
+        break;
+      case SlotKind::C:
+        view.elemBytes = Int32Bytes;
+        view.rows = valid_m;
+        view.cols = valid_n;
+        break;
+    }
+    view.rowStrideBytes = view.cols * view.elemBytes;
+    if (layout_mode == static_cast<uint32_t>(LayoutMode::Skewed) &&
+        view.rows > 1) {
+        view.rowStrideBytes += view.elemBytes;
+    }
+    return view.rows == 0 ? 0 :
+        ((view.rows - 1) * view.rowStrideBytes) +
+        (view.cols * view.elemBytes);
+}
+
+void
+MpuUnit::recordMemWait(PortID port_id, size_t bytes, uint32_t bytes_per_cycle)
+{
+    if (port_id < 0 || static_cast<size_t>(port_id) >= memPortReadyTicks.size()) {
+        return;
+    }
+    const Tick ready = std::max(curTick(), memPortReadyTicks[port_id]);
+    const Tick wait = ready > curTick() ? ready - curTick() : 0;
+    stallCyclesWaitingForSPMValue += wait;
+    currentObservedMemWait += wait;
+    memPortReadyTicks[port_id] =
+        ready + bandwidthLatency(bytes, bytes_per_cycle);
+}
+
+PortID
+MpuUnit::selectTensorLoopPort(PendingLoadKind kind) const
+{
+    const size_t port_count = memSidePorts.size();
+    if (port_count == 0) {
+        return 0;
+    }
+    const size_t preferred =
+        kind == PendingLoadKind::TensorLoadA ? 0 :
+        kind == PendingLoadKind::TensorLoadB ? 1 : 2;
+    return static_cast<PortID>(preferred % port_count);
+}
+
+void
+MpuUnit::resetObservedState()
+{
+    currentObservedMemWait = 0;
+    currentObservedSlotWait = 0;
+    currentObservedExecLatency = 0;
+    std::fill(localBankReadyTicks.begin(), localBankReadyTicks.end(), 0);
+    std::fill(memPortReadyTicks.begin(), memPortReadyTicks.end(), 0);
 }
 
 void
 MpuUnit::validateLoadCommand(const ParsedCmd &cmd) const
 {
     validateValidShape(cmd);
+    panic_if((cmd.localAddrA & 0xfU) != 0,
+             "MpuUnit: load destination local address %#x must use slot base "
+             "without low-bit offset", cmd.localAddrA);
     const int slot_index = slotIndexForAddr(cmd.localAddrA);
     panic_if(slot_index < 0,
              "MpuUnit: invalid load destination local address %#x",
              cmd.localAddrA);
+    panic_if((cmd.words[6] & LoadStoreCtrlReservedMask) != 0,
+             "MpuUnit: load_store_ctrl reserved bits must be zero");
     for (size_t i = 7; i < cmd.words.size(); ++i) {
         panic_if(cmd.words[i] != 0,
                  "MpuUnit: load reserved Word %zu must be zero, got %#x",
@@ -777,10 +958,12 @@ MpuUnit::validateLoadCommand(const ParsedCmd &cmd) const
     }
 
     const SlotState &slot = slotByIndex(slot_index);
-    const LocalView view = loadViewForSlot(
-        slot_index, cmd.layoutMode, localOffsetBytes(cmd.localAddrA),
-        cmd.validM, cmd.validN, cmd.validK);
-    validateSpmAddress(cmd.spmAddrA, view.linearBytes, "load source");
+    loadViewForSlot(slot_index, cmd.layoutMode, cmd.offsetA,
+                    cmd.validM, cmd.validN, cmd.validK);
+    validateSpmAddress(cmd.spmAddrA,
+                       externalTileBytes(slot.kind, cmd.layoutMode,
+                                         cmd.validM, cmd.validN, cmd.validK),
+                       "load source");
     panic_if(slot.busy, "MpuUnit: load destination slot %#x is busy",
              cmd.localAddrA);
 }
@@ -792,10 +975,16 @@ MpuUnit::validateComputeCommand(const ParsedCmd &cmd) const
     validateSlotAddress(cmd.localAddrA, SlotKind::A, "compute src0");
     validateSlotAddress(cmd.localAddrB, SlotKind::B, "compute src1");
     validateSlotAddress(cmd.localAddrC, SlotKind::C, "compute dst");
+    panic_if((cmd.localAddrA & 0xfU) != 0 || (cmd.localAddrB & 0xfU) != 0 ||
+             (cmd.localAddrC & 0xfU) != 0,
+             "MpuUnit: compute local addresses must use slot base values");
     panic_if(cmd.computeModeFlags != 0,
              "MpuUnit: compute_mode_flags must be zero in v1, got %#x",
              cmd.computeModeFlags);
-    for (size_t i = 9; i < cmd.words.size(); ++i) {
+    panic_if(cmd.dstLayoutMode > static_cast<uint32_t>(LayoutMode::Skewed),
+             "MpuUnit: unsupported compute dst_layout_mode=%u",
+             cmd.dstLayoutMode);
+    for (size_t i = 13; i < cmd.words.size(); ++i) {
         panic_if(cmd.words[i] != 0,
                  "MpuUnit: compute reserved Word %zu must be zero, got %#x",
                  i, cmd.words[i]);
@@ -811,19 +1000,19 @@ MpuUnit::validateComputeCommand(const ParsedCmd &cmd) const
     panic_if(!slot_b.valid, "MpuUnit: compute B slot is invalid");
     panic_if(slot_a.busy || slot_b.busy || slot_c.busy,
              "MpuUnit: compute slot is busy");
-    validateSlotShape(slot_a, cmd, "A");
-    validateSlotShape(slot_b, cmd, "B");
-    const uint32_t c_layout = slot_c.valid ? slot_c.layoutMode :
-        static_cast<uint32_t>(LayoutMode::Normal);
-    makeLocalView(slotIndexForAddr(cmd.localAddrA), localOffsetBytes(cmd.localAddrA),
-                  slot_a.layoutMode, cmd.validM, cmd.validN, cmd.validK);
-    makeLocalView(slotIndexForAddr(cmd.localAddrB), localOffsetBytes(cmd.localAddrB),
-                  slot_b.layoutMode, cmd.validM, cmd.validN, cmd.validK);
-    makeLocalView(slotIndexForAddr(cmd.localAddrC), localOffsetBytes(cmd.localAddrC),
-                  c_layout, cmd.validM, cmd.validN, cmd.validK);
+    validateSlotWindow(slot_a, cmd.offsetA, slot_a.residentLayoutMode, cmd, "A");
+    validateSlotWindow(slot_b, cmd.offsetB, slot_b.residentLayoutMode, cmd, "B");
+    makeLocalView(slotIndexForAddr(cmd.localAddrA), cmd.offsetA,
+                  slot_a.residentLayoutMode, cmd.validM, cmd.validN,
+                  cmd.validK);
+    makeLocalView(slotIndexForAddr(cmd.localAddrB), cmd.offsetB,
+                  slot_b.residentLayoutMode, cmd.validM, cmd.validN,
+                  cmd.validK);
+    makeLocalView(slotIndexForAddr(cmd.localAddrC), cmd.offsetC,
+                  cmd.dstLayoutMode, cmd.validM, cmd.validN, cmd.validK);
     if (cmd.subop == ComputeSubop::MatmulAcc) {
         panic_if(!slot_c.valid, "MpuUnit: MATMUL_ACC requires valid C slot");
-        validateSlotShape(slot_c, cmd, "C");
+        validateSlotWindow(slot_c, cmd.offsetC, cmd.dstLayoutMode, cmd, "C");
     }
 }
 
@@ -832,6 +1021,11 @@ MpuUnit::validateStoreCommand(const ParsedCmd &cmd) const
 {
     validateValidShape(cmd);
     validateSlotAddress(cmd.localAddrC, SlotKind::C, "store source");
+    panic_if((cmd.localAddrC & 0xfU) != 0,
+             "MpuUnit: store source local address %#x must use slot base "
+             "without low-bit offset", cmd.localAddrC);
+    panic_if((cmd.words[6] & LoadStoreCtrlReservedMask) != 0,
+             "MpuUnit: load_store_ctrl reserved bits must be zero");
     for (size_t i = 7; i < cmd.words.size(); ++i) {
         panic_if(cmd.words[i] != 0,
                  "MpuUnit: store reserved Word %zu must be zero, got %#x",
@@ -841,15 +1035,16 @@ MpuUnit::validateStoreCommand(const ParsedCmd &cmd) const
     const SlotState &slot = slotByIndex(slotIndexForAddr(cmd.localAddrC));
     panic_if(!slot.valid, "MpuUnit: store source C slot is invalid");
     panic_if(slot.busy, "MpuUnit: store source C slot is busy");
-    validateSlotShape(slot, cmd, "store source");
-    panic_if(slot.layoutMode != cmd.layoutMode,
-             "MpuUnit: store layout_mode=%u does not match slot layout=%u",
-             cmd.layoutMode, slot.layoutMode);
-    const LocalView view = makeLocalView(slotIndexForAddr(cmd.localAddrC),
-                                         localOffsetBytes(cmd.localAddrC),
-                                         cmd.layoutMode, cmd.validM,
-                                         cmd.validN, cmd.validK);
-    validateSpmAddress(cmd.spmAddrC, view.linearBytes, "store destination");
+    validateSlotWindow(slot, cmd.offsetC, slot.residentLayoutMode, cmd,
+                       "store source");
+    makeLocalView(slotIndexForAddr(cmd.localAddrC),
+                  cmd.offsetC,
+                  slot.residentLayoutMode, cmd.validM,
+                  cmd.validN, cmd.validK);
+    validateSpmAddress(cmd.spmAddrC,
+                       externalTileBytes(SlotKind::C, cmd.layoutMode,
+                                         cmd.validM, cmd.validN, cmd.validK),
+                       "store destination");
 }
 
 void
@@ -859,6 +1054,9 @@ MpuUnit::validateTensorLoopCommand(const ParsedCmd &cmd) const
     validateSlotAddress(cmd.localAddrA, SlotKind::A, "tensor_loop base A");
     validateSlotAddress(cmd.localAddrB, SlotKind::B, "tensor_loop base B");
     validateSlotAddress(cmd.localAddrC, SlotKind::C, "tensor_loop base C");
+    panic_if((cmd.localAddrA & 0xfU) != 0 || (cmd.localAddrB & 0xfU) != 0 ||
+             (cmd.localAddrC & 0xfU) != 0,
+             "MpuUnit: tensor_loop base local addresses must use slot base values");
     panic_if(!spmContains(cmd.spmAddrA, 1) || !spmContains(cmd.spmAddrB, 1) ||
              !spmContains(cmd.spmAddrC, 1),
              "MpuUnit: tensor_loop base SPM address is invalid");
@@ -876,28 +1074,34 @@ MpuUnit::validateTensorLoopCommand(const ParsedCmd &cmd) const
              "MpuUnit: tensor_loop subop must be MATMUL or MATMUL_ACC");
     panic_if(cmd.subop == ComputeSubop::MatmulAcc && !cmd.autoLoadCForAcc,
              "MpuUnit: tensor_loop MATMUL_ACC requires auto_load_c_for_acc=1");
-    panic_if((cmd.words[15] & TensorStepCfgReservedMask) != 0,
-             "MpuUnit: tensor_loop reserved step_cfg bits must be zero");
+    panic_if((cmd.words[10] & LoopCtrl0ReservedMask) != 0,
+             "MpuUnit: tensor_loop loop_ctrl0 reserved bits must be zero");
+    panic_if((cmd.words[13] & 0xff000000U) != 0,
+             "MpuUnit: tensor_loop offset_pack reserved bits must be zero");
+    panic_if((cmd.words[14] & StepCfgReservedMask) != 0,
+             "MpuUnit: tensor_loop step_cfg reserved bits must be zero");
+    panic_if(cmd.words[15] != 0,
+             "MpuUnit: tensor_loop reserved Word 15 must be zero");
 
-    makeLocalView(slotIndexForAddr(cmd.localAddrA), localOffsetBytes(cmd.localAddrA),
+    makeLocalView(slotIndexForAddr(cmd.localAddrA), cmd.offsetA,
                   cmd.tensorLayoutA, cmd.validM, cmd.validN, cmd.validK);
-    makeLocalView(slotIndexForAddr(cmd.localAddrB), localOffsetBytes(cmd.localAddrB),
+    makeLocalView(slotIndexForAddr(cmd.localAddrB), cmd.offsetB,
                   cmd.tensorLayoutB, cmd.validM, cmd.validN, cmd.validK);
-    makeLocalView(slotIndexForAddr(cmd.localAddrC), localOffsetBytes(cmd.localAddrC),
+    makeLocalView(slotIndexForAddr(cmd.localAddrC), cmd.offsetC,
                   cmd.tensorLayoutC, cmd.validM, cmd.validN, cmd.validK);
     if (cmd.pingpongA) {
         makeLocalView(alternateSlotIndex(slotIndexForAddr(cmd.localAddrA)),
-                      localOffsetBytes(cmd.localAddrA), cmd.tensorLayoutA,
+                      cmd.offsetA, cmd.tensorLayoutA,
                       cmd.validM, cmd.validN, cmd.validK);
     }
     if (cmd.pingpongB) {
         makeLocalView(alternateSlotIndex(slotIndexForAddr(cmd.localAddrB)),
-                      localOffsetBytes(cmd.localAddrB), cmd.tensorLayoutB,
+                      cmd.offsetB, cmd.tensorLayoutB,
                       cmd.validM, cmd.validN, cmd.validK);
     }
     if (cmd.pingpongC) {
         makeLocalView(alternateSlotIndex(slotIndexForAddr(cmd.localAddrC)),
-                      localOffsetBytes(cmd.localAddrC), cmd.tensorLayoutC,
+                      cmd.offsetC, cmd.tensorLayoutC,
                       cmd.validM, cmd.validN, cmd.validK);
     }
 }
@@ -937,7 +1141,8 @@ MpuUnit::axisDeltaA(Axis axis, uint32_t valid_m, uint32_t valid_n,
     switch (axis) {
       case Axis::M:
       case Axis::K:
-        return aTileBytes(valid_m, valid_k);
+        return externalTileBytes(SlotKind::A, parsedCmd.tensorLayoutA,
+                                 valid_m, valid_n, valid_k);
       case Axis::N:
         return 0;
     }
@@ -953,7 +1158,8 @@ MpuUnit::axisDeltaB(Axis axis, uint32_t valid_m, uint32_t valid_n,
     switch (axis) {
       case Axis::N:
       case Axis::K:
-        return bTileBytes(valid_k, valid_n);
+        return externalTileBytes(SlotKind::B, parsedCmd.tensorLayoutB,
+                                 valid_m, valid_n, valid_k);
       case Axis::M:
         return 0;
     }
@@ -969,7 +1175,8 @@ MpuUnit::axisDeltaC(Axis axis, uint32_t valid_m, uint32_t valid_n,
     switch (axis) {
       case Axis::M:
       case Axis::N:
-        return cTileBytes(valid_m, valid_n);
+        return externalTileBytes(SlotKind::C, parsedCmd.tensorLayoutC,
+                                 valid_m, valid_n, valid_k);
       case Axis::K:
         return 0;
     }
@@ -980,30 +1187,48 @@ MpuUnit::axisDeltaC(Axis axis, uint32_t valid_m, uint32_t valid_n,
 void
 MpuUnit::buildTensorLoopPlans()
 {
-    const size_t a_bytes = aTileBytes(parsedCmd.validM, parsedCmd.validK);
-    const size_t b_bytes = bTileBytes(parsedCmd.validK, parsedCmd.validN);
-    const size_t c_bytes = cTileBytes(parsedCmd.validM, parsedCmd.validN);
     const bool includes_k =
         parsedCmd.outerAxis == Axis::K || parsedCmd.innerAxis == Axis::K;
+    const bool k_outer = includes_k && parsedCmd.outerAxis == Axis::K;
     const uint32_t k_total = !includes_k ? 1U :
-        (parsedCmd.outerAxis == Axis::K ? parsedCmd.outerCount :
-                                         parsedCmd.innerCount);
+        (k_outer ? parsedCmd.outerCount : parsedCmd.innerCount);
+    const uint32_t n_extent =
+        parsedCmd.outerAxis == Axis::N ?
+            ((parsedCmd.outerCount - 1U) * parsedCmd.outerStepTiles) + 1U :
+        parsedCmd.innerAxis == Axis::N ?
+            ((parsedCmd.innerCount - 1U) * parsedCmd.innerStepTiles) + 1U :
+            1U;
+    const uint32_t k_extent =
+        parsedCmd.outerAxis == Axis::K ?
+            ((parsedCmd.outerCount - 1U) * parsedCmd.outerStepTiles) + 1U :
+        parsedCmd.innerAxis == Axis::K ?
+            ((parsedCmd.innerCount - 1U) * parsedCmd.innerStepTiles) + 1U :
+            1U;
+    const Addr a_tile_bytes = externalTileBytes(SlotKind::A,
+                                                parsedCmd.tensorLayoutA,
+                                                parsedCmd.validM,
+                                                parsedCmd.validN,
+                                                parsedCmd.validK);
+    const Addr b_tile_bytes = externalTileBytes(SlotKind::B,
+                                                parsedCmd.tensorLayoutB,
+                                                parsedCmd.validM,
+                                                parsedCmd.validN,
+                                                parsedCmd.validK);
+    const Addr c_tile_bytes = externalTileBytes(SlotKind::C,
+                                                parsedCmd.tensorLayoutC,
+                                                parsedCmd.validM,
+                                                parsedCmd.validN,
+                                                parsedCmd.validK);
     std::unordered_map<uint64_t, int> output_to_c_slot;
     uint64_t output_tile_ordinal = 0;
 
-    Addr outer_a = parsedCmd.spmAddrA;
-    Addr outer_b = parsedCmd.spmAddrB;
-    Addr outer_c = parsedCmd.spmAddrC;
-
     for (uint32_t outer = 0; outer < parsedCmd.outerCount; ++outer) {
-        Addr inner_a = outer_a;
-        Addr inner_b = outer_b;
-        Addr inner_c = outer_c;
-
         for (uint32_t inner = 0; inner < parsedCmd.innerCount; ++inner) {
             uint32_t m_index = 0;
             uint32_t n_index = 0;
             uint32_t k_index = 0;
+            const uint32_t outer_value = outer * parsedCmd.outerStepTiles;
+            const uint32_t inner_value = inner * parsedCmd.innerStepTiles;
 
             const auto apply_axis = [&](Axis axis, uint32_t value) {
                 switch (axis) {
@@ -1018,12 +1243,28 @@ MpuUnit::buildTensorLoopPlans()
                     break;
                 }
             };
-            apply_axis(parsedCmd.outerAxis, outer);
-            apply_axis(parsedCmd.innerAxis, inner);
+            apply_axis(parsedCmd.outerAxis, outer_value);
+            apply_axis(parsedCmd.innerAxis, inner_value);
 
-            validateSpmAddress(inner_a, a_bytes, "tensor_loop A tile");
-            validateSpmAddress(inner_b, b_bytes, "tensor_loop B tile");
-            validateSpmAddress(inner_c, c_bytes, "tensor_loop C tile");
+            const Addr inner_a = parsedCmd.spmAddrA +
+                (((static_cast<Addr>(m_index) * k_extent) + k_index) *
+                 a_tile_bytes);
+            const Addr inner_b = parsedCmd.spmAddrB +
+                (((static_cast<Addr>(k_index) * n_extent) + n_index) *
+                 b_tile_bytes);
+            const Addr inner_c = parsedCmd.spmAddrC +
+                (((static_cast<Addr>(m_index) * n_extent) + n_index) *
+                 c_tile_bytes);
+
+            validateSpmAddress(inner_a,
+                               a_tile_bytes,
+                               "tensor_loop A tile");
+            validateSpmAddress(inner_b,
+                               b_tile_bytes,
+                               "tensor_loop B tile");
+            validateSpmAddress(inner_c,
+                               c_tile_bytes,
+                               "tensor_loop C tile");
 
             const uint64_t out_key = outputTileKey(m_index, n_index);
             auto c_it = output_to_c_slot.find(out_key);
@@ -1037,7 +1278,9 @@ MpuUnit::buildTensorLoopPlans()
             }
 
             const bool first_k = !includes_k || (k_index == 0U);
-            const bool last_k = !includes_k || (k_index + 1U == k_total);
+            const uint32_t k_position = !includes_k ? 0U :
+                (k_outer ? outer : inner);
+            const bool last_k = !includes_k || (k_position + 1U == k_total);
             const uint64_t tile_ordinal = iterationPlans.size();
             int slot_a = slotIndexForAddr(parsedCmd.localAddrA);
             int slot_b = slotIndexForAddr(parsedCmd.localAddrB);
@@ -1056,9 +1299,9 @@ MpuUnit::buildTensorLoopPlans()
             plan.tensorSlotA = slot_a;
             plan.tensorSlotB = slot_b;
             plan.tensorSlotC = c_it->second;
-            plan.tensorOffsetA = localOffsetBytes(parsedCmd.localAddrA);
-            plan.tensorOffsetB = localOffsetBytes(parsedCmd.localAddrB);
-            plan.tensorOffsetC = localOffsetBytes(parsedCmd.localAddrC);
+            plan.tensorOffsetA = parsedCmd.offsetA;
+            plan.tensorOffsetB = parsedCmd.offsetB;
+            plan.tensorOffsetC = parsedCmd.offsetC;
             plan.tensorLayoutA = parsedCmd.tensorLayoutA;
             plan.tensorLayoutB = parsedCmd.tensorLayoutB;
             plan.tensorLayoutC = parsedCmd.tensorLayoutC;
@@ -1068,90 +1311,37 @@ MpuUnit::buildTensorLoopPlans()
             plan.firstK = first_k;
             plan.lastK = last_k;
             plan.kExpanded = includes_k;
+            plan.kOuter = k_outer;
             plan.outputTileKey = out_key;
             plan.doLoadA = true;
             plan.doLoadB = true;
-            plan.doLoadCOld = parsedCmd.subop == ComputeSubop::MatmulAcc &&
-                parsedCmd.autoLoadCForAcc && (!includes_k || first_k);
-            plan.doStoreC = !includes_k || last_k;
-            plan.subop = includes_k ? (first_k ? ComputeSubop::Matmul :
-                                                 ComputeSubop::MatmulAcc)
-                                    : parsedCmd.subop;
-            plan.tensorA.assign(a_bytes, 0);
-            plan.tensorB.assign(b_bytes, 0);
-            plan.tensorCOld.assign(c_bytes, 0);
-            plan.tensorCResult.assign(c_bytes, 0);
-
-            const LocalView view_a = makeLocalView(
-                plan.tensorSlotA, plan.tensorOffsetA, plan.tensorLayoutA,
-                plan.validM, plan.validN, plan.validK);
-            const LocalView view_b = makeLocalView(
-                plan.tensorSlotB, plan.tensorOffsetB, plan.tensorLayoutB,
-                plan.validM, plan.validN, plan.validK);
-            const LocalView view_c = makeLocalView(
-                plan.tensorSlotC, plan.tensorOffsetC, plan.tensorLayoutC,
-                plan.validM, plan.validN, plan.validK);
-
-            Tick slot_stall = 0;
-            Tick latency = 0;
-            Tick spm_wait = 0;
-            Tick queued_read_service = 0;
-            if (plan.doLoadA) {
-                Tick view_stall = 0;
-                latency += loadLatencyForView(view_a, &view_stall);
-                queued_read_service +=
-                    bandwidthLatency(a_bytes, loadBandwidthBytesPerCycle);
+            if (!includes_k) {
+                plan.subop = parsedCmd.subop;
+                plan.doLoadCOld = parsedCmd.subop == ComputeSubop::MatmulAcc &&
+                    parsedCmd.autoLoadCForAcc;
+                plan.doStoreC = true;
+                plan.finalOutputStore = true;
+            } else if (k_outer) {
+                plan.subop = first_k ? ComputeSubop::Matmul
+                                     : ComputeSubop::MatmulAcc;
+                plan.doLoadCOld =
+                    (!first_k) ||
+                    (parsedCmd.subop == ComputeSubop::MatmulAcc &&
+                     parsedCmd.autoLoadCForAcc && first_k);
+                plan.doStoreC = true;
+                plan.kOuterSpill = !last_k;
+                plan.finalOutputStore = last_k;
+            } else {
+                plan.subop = first_k ? ComputeSubop::Matmul
+                                     : ComputeSubop::MatmulAcc;
+                plan.doLoadCOld =
+                    parsedCmd.subop == ComputeSubop::MatmulAcc &&
+                    parsedCmd.autoLoadCForAcc && first_k;
+                plan.doStoreC = last_k;
+                plan.finalOutputStore = last_k;
             }
-            if (plan.doLoadB) {
-                Tick view_stall = 0;
-                latency += loadLatencyForView(view_b, &view_stall);
-                spm_wait += queued_read_service;
-                queued_read_service +=
-                    bandwidthLatency(b_bytes, loadBandwidthBytesPerCycle);
-            }
-            if (plan.doLoadCOld) {
-                Tick view_stall = 0;
-                latency += loadLatencyForView(view_c, &view_stall);
-                spm_wait += queued_read_service;
-                queued_read_service +=
-                    bandwidthLatency(c_bytes, loadBandwidthBytesPerCycle);
-            }
-            latency += matmulLatencyForViews(view_a, view_b, view_c,
-                                             plan.validK,
-                                             plan.subop == ComputeSubop::MatmulAcc,
-                                             &slot_stall);
-            if (plan.doStoreC) {
-                Tick store_stall = 0;
-                latency += storeLatencyForView(view_c, &store_stall);
-                slot_stall += store_stall;
-            }
-            latency += ticksForCycles(1);
-
-            plan.modeledSpmStall = spm_wait;
-            plan.modeledSlotStall = slot_stall;
-            plan.modeledLatency = latency;
             iterationPlans.push_back(std::move(plan));
-
-            inner_a += parsedCmd.innerStepTiles *
-                       axisDeltaA(parsedCmd.innerAxis, parsedCmd.validM,
-                                  parsedCmd.validN, parsedCmd.validK);
-            inner_b += parsedCmd.innerStepTiles *
-                       axisDeltaB(parsedCmd.innerAxis, parsedCmd.validM,
-                                  parsedCmd.validN, parsedCmd.validK);
-            inner_c += parsedCmd.innerStepTiles *
-                       axisDeltaC(parsedCmd.innerAxis, parsedCmd.validM,
-                                  parsedCmd.validN, parsedCmd.validK);
         }
-
-        outer_a += parsedCmd.outerStepTiles *
-                   axisDeltaA(parsedCmd.outerAxis, parsedCmd.validM,
-                              parsedCmd.validN, parsedCmd.validK);
-        outer_b += parsedCmd.outerStepTiles *
-                   axisDeltaB(parsedCmd.outerAxis, parsedCmd.validM,
-                              parsedCmd.validN, parsedCmd.validK);
-        outer_c += parsedCmd.outerStepTiles *
-                   axisDeltaC(parsedCmd.outerAxis, parsedCmd.validM,
-                              parsedCmd.validN, parsedCmd.validK);
     }
 }
 
@@ -1167,22 +1357,11 @@ MpuUnit::buildIterationPlans(ActiveExecution &exec)
         plan.validN = parsedCmd.validN;
         plan.validK = parsedCmd.validK;
         plan.loadSlotIndex = slotIndexForAddr(parsedCmd.localAddrA);
-        plan.loadOffset = localOffsetBytes(parsedCmd.localAddrA);
+        plan.loadOffset = parsedCmd.offsetA;
         plan.loadLayoutMode = parsedCmd.layoutMode;
         plan.loadSpmAddr = parsedCmd.spmAddrA;
-        {
-            Tick slot_stall = 0;
-            const LocalView view = loadViewForSlot(plan.loadSlotIndex,
-                                                   plan.loadLayoutMode,
-                                                   plan.loadOffset,
-                                                   plan.validM,
-                                                   plan.validN,
-                                                   plan.validK);
-            plan.modeledLatency = loadLatencyForView(view, &slot_stall);
-            plan.modeledSlotStall = slot_stall;
-        }
         iterationPlans.push_back(std::move(plan));
-        exec.readMask = 1U;
+        exec.readMask = 0U;
         exec.writeMask = 0U;
         exec.repetition = 1;
         break;
@@ -1195,37 +1374,10 @@ MpuUnit::buildIterationPlans(ActiveExecution &exec)
         plan.computeSlotA = slotIndexForAddr(parsedCmd.localAddrA);
         plan.computeSlotB = slotIndexForAddr(parsedCmd.localAddrB);
         plan.computeSlotC = slotIndexForAddr(parsedCmd.localAddrC);
-        plan.computeOffsetA = localOffsetBytes(parsedCmd.localAddrA);
-        plan.computeOffsetB = localOffsetBytes(parsedCmd.localAddrB);
-        plan.computeOffsetC = localOffsetBytes(parsedCmd.localAddrC);
+        plan.computeOffsetA = parsedCmd.offsetA;
+        plan.computeOffsetB = parsedCmd.offsetB;
+        plan.computeOffsetC = parsedCmd.offsetC;
         plan.subop = parsedCmd.subop;
-        {
-            const SlotState &slot_a = slotByIndex(plan.computeSlotA);
-            const SlotState &slot_b = slotByIndex(plan.computeSlotB);
-            const SlotState &slot_c = slotByIndex(plan.computeSlotC);
-            const uint32_t c_layout = slot_c.valid ? slot_c.layoutMode :
-                static_cast<uint32_t>(LayoutMode::Normal);
-            const LocalView view_a = makeLocalView(plan.computeSlotA,
-                                                   plan.computeOffsetA,
-                                                   slot_a.layoutMode,
-                                                   plan.validM, plan.validN,
-                                                   plan.validK);
-            const LocalView view_b = makeLocalView(plan.computeSlotB,
-                                                   plan.computeOffsetB,
-                                                   slot_b.layoutMode,
-                                                   plan.validM, plan.validN,
-                                                   plan.validK);
-            const LocalView view_c = makeLocalView(plan.computeSlotC,
-                                                   plan.computeOffsetC,
-                                                   c_layout,
-                                                   plan.validM, plan.validN,
-                                                   plan.validK);
-            Tick slot_stall = 0;
-            plan.modeledLatency = matmulLatencyForViews(
-                view_a, view_b, view_c, plan.validK,
-                plan.subop == ComputeSubop::MatmulAcc, &slot_stall);
-            plan.modeledSlotStall = slot_stall;
-        }
         iterationPlans.push_back(std::move(plan));
         exec.readMask = 0U;
         exec.writeMask = 0U;
@@ -1238,47 +1390,22 @@ MpuUnit::buildIterationPlans(ActiveExecution &exec)
         plan.validN = parsedCmd.validN;
         plan.validK = parsedCmd.validK;
         plan.storeSlotIndex = slotIndexForAddr(parsedCmd.localAddrC);
-        plan.storeOffset = localOffsetBytes(parsedCmd.localAddrC);
+        plan.storeOffset = parsedCmd.offsetC;
         plan.storeLayoutMode = parsedCmd.layoutMode;
         plan.storeSpmAddr = parsedCmd.spmAddrC;
-        {
-            Tick slot_stall = 0;
-            const LocalView view = makeLocalView(plan.storeSlotIndex,
-                                                 plan.storeOffset,
-                                                 plan.storeLayoutMode,
-                                                 plan.validM, plan.validN,
-                                                 plan.validK);
-            plan.modeledLatency = storeLatencyForView(view, &slot_stall);
-            plan.modeledSlotStall = slot_stall;
-        }
         iterationPlans.push_back(std::move(plan));
         exec.readMask = 0U;
-        exec.writeMask = 1U;
+        exec.writeMask = 0U;
         exec.repetition = 1;
         break;
       }
       case Mode::TensorLoop:
         buildTensorLoopPlans();
-        exec.readMask = 1U;
-        exec.writeMask = 1U;
+        exec.readMask = 0U;
+        exec.writeMask = 0U;
         exec.repetition = iterationPlans.size();
         break;
     }
-}
-
-void
-MpuUnit::updateTensorLoopStats(const IterationPlan &plan)
-{
-    totalInternalLoadsValue +=
-        (plan.doLoadA ? 1U : 0U) + (plan.doLoadB ? 1U : 0U) +
-        (plan.doLoadCOld ? 1U : 0U);
-    totalInternalComputesValue += 1U;
-    totalInternalStoresValue += plan.doStoreC ? 1U : 0U;
-    totalTilesValue += 1U;
-    totalAccTilesValue += plan.subop == ComputeSubop::MatmulAcc ? 1U : 0U;
-    stallCyclesWaitingForSPMValue += plan.modeledSpmStall;
-    stallCyclesWaitingForSlotValue += plan.modeledSlotStall;
-    computedTotalLatencyValue += plan.modeledLatency;
 }
 
 MpuUnit::IterationPlan &
@@ -1349,6 +1476,7 @@ void
 MpuUnit::onCommandBegin(ActiveExecution &exec)
 {
     resetCommandState();
+    activeCmdStartTick = curTick();
     parsedCmd = parseCommand(exec.cmd);
     parsedCmdValid = true;
     validateParsedCommand(parsedCmd);
@@ -1360,9 +1488,6 @@ MpuUnit::onCommandBegin(ActiveExecution &exec)
         loadCount++;
         markBusyForFineCommand(parsedCmd);
         totalInternalLoadsValue++;
-        stallCyclesWaitingForSPMValue += iterationPlans[0].modeledSpmStall;
-        stallCyclesWaitingForSlotValue += iterationPlans[0].modeledSlotStall;
-        computedTotalLatencyValue += iterationPlans[0].modeledLatency;
         break;
       case Mode::Compute:
         computeCount++;
@@ -1372,17 +1497,11 @@ MpuUnit::onCommandBegin(ActiveExecution &exec)
         if (parsedCmd.subop == ComputeSubop::MatmulAcc) {
             totalAccTilesValue++;
         }
-        stallCyclesWaitingForSPMValue += iterationPlans[0].modeledSpmStall;
-        stallCyclesWaitingForSlotValue += iterationPlans[0].modeledSlotStall;
-        computedTotalLatencyValue += iterationPlans[0].modeledLatency;
         break;
       case Mode::Store:
         storeCount++;
         markBusyForFineCommand(parsedCmd);
         totalInternalStoresValue++;
-        stallCyclesWaitingForSPMValue += iterationPlans[0].modeledSpmStall;
-        stallCyclesWaitingForSlotValue += iterationPlans[0].modeledSlotStall;
-        computedTotalLatencyValue += iterationPlans[0].modeledLatency;
         break;
       case Mode::TensorLoop:
         tensorLoopCount++;
@@ -1390,9 +1509,30 @@ MpuUnit::onCommandBegin(ActiveExecution &exec)
         for (const auto &plan : iterationPlans) {
             tensorLoopExpandedAccTilesCount +=
                 plan.subop == ComputeSubop::MatmulAcc ? 1U : 0U;
-            updateTensorLoopStats(plan);
+            totalInternalLoadsValue +=
+                (plan.doLoadA ? 1U : 0U) + (plan.doLoadB ? 1U : 0U) +
+                (plan.doLoadCOld ? 1U : 0U);
+            totalInternalComputesValue++;
+            totalInternalStoresValue += plan.doStoreC ? 1U : 0U;
+            totalTilesValue++;
+            totalAccTilesValue +=
+                plan.subop == ComputeSubop::MatmulAcc ? 1U : 0U;
+            if (plan.kOuterSpill) {
+                partialSumSpillCountValue++;
+            }
+            if (plan.kOuter && !plan.firstK) {
+                partialSumReloadCountValue++;
+            }
         }
         break;
+    }
+}
+
+void
+MpuUnit::epilogue(ActiveExecution &exec)
+{
+    if (exec.iteration + 1 == exec.repetition) {
+        observedTotalLatencyValue += curTick() - activeCmdStartTick;
     }
 }
 
@@ -1408,17 +1548,14 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
     uint64_t token = nextMemTxnToken;
     switch (static_cast<Mode>(parsedCmd.mode)) {
       case Mode::Load: {
-        const LocalView view = makeLocalView(plan->loadSlotIndex,
-                                             plan->loadOffset,
-                                             plan->loadLayoutMode,
-                                             plan->validM,
-                                             plan->validN,
-                                             plan->validK);
         MemRequestDesc req;
         req.portId = 0;
         req.addr = plan->loadSpmAddr;
-        req.size = view.linearBytes;
+        req.size = externalTileBytes(slotByIndex(plan->loadSlotIndex).kind,
+                                     plan->loadLayoutMode, plan->validM,
+                                     plan->validN, plan->validK);
         reqs.push_back(req);
+        recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
         pendingLoadTxns.emplace(token, PendingLoadTxn{
             exec.iteration, PendingLoadKind::SlotLoad, plan->loadSlotIndex});
         break;
@@ -1426,30 +1563,40 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
       case Mode::TensorLoop:
         if (plan->doLoadA) {
             MemRequestDesc req;
-            req.portId = 0;
+            req.portId = selectTensorLoopPort(PendingLoadKind::TensorLoadA);
             req.addr = plan->tensorAAddr;
-            req.size = aTileBytes(plan->validM, plan->validK);
+            req.size = externalTileBytes(SlotKind::A, plan->tensorLayoutA,
+                                         plan->validM, plan->validN,
+                                         plan->validK);
             reqs.push_back(req);
+            recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token++, PendingLoadTxn{
-                exec.iteration, PendingLoadKind::TensorA, plan->tensorSlotA});
+                exec.iteration, PendingLoadKind::TensorLoadA, plan->tensorSlotA});
         }
         if (plan->doLoadB) {
             MemRequestDesc req;
-            req.portId = 0;
+            req.portId = selectTensorLoopPort(PendingLoadKind::TensorLoadB);
             req.addr = plan->tensorBAddr;
-            req.size = bTileBytes(plan->validK, plan->validN);
+            req.size = externalTileBytes(SlotKind::B, plan->tensorLayoutB,
+                                         plan->validM, plan->validN,
+                                         plan->validK);
             reqs.push_back(req);
+            recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token++, PendingLoadTxn{
-                exec.iteration, PendingLoadKind::TensorB, plan->tensorSlotB});
+                exec.iteration, PendingLoadKind::TensorLoadB, plan->tensorSlotB});
         }
         if (plan->doLoadCOld) {
             MemRequestDesc req;
-            req.portId = 0;
+            req.portId = selectTensorLoopPort(PendingLoadKind::TensorLoadCOld);
             req.addr = plan->tensorCAddr;
-            req.size = cTileBytes(plan->validM, plan->validN);
+            req.size = externalTileBytes(SlotKind::C, plan->tensorLayoutC,
+                                         plan->validM, plan->validN,
+                                         plan->validK);
             reqs.push_back(req);
+            recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token, PendingLoadTxn{
-                exec.iteration, PendingLoadKind::TensorCOld, plan->tensorSlotC});
+                exec.iteration, PendingLoadKind::TensorLoadCOld,
+                plan->tensorSlotC});
         }
         break;
       case Mode::Compute:
@@ -1480,44 +1627,55 @@ MpuUnit::onMvinResponse(ActiveExecution &exec, const MemTxnContext &txn,
                                              plan.validM,
                                              plan.validN,
                                              plan.validK);
-        std::vector<uint8_t> linear(data, data + pkt->getSize());
-        panic_if(linear.size() != view.linearBytes,
-                 "MpuUnit: load response size=%zu expected=%zu",
-                 linear.size(), view.linearBytes);
+        std::vector<uint8_t> linear = readLinearFromExternal(
+            slotByIndex(plan.loadSlotIndex).kind, plan.loadLayoutMode,
+            plan.validM, plan.validN, plan.validK, data, pkt->getSize());
         SlotState &slot = slotByIndex(plan.loadSlotIndex);
         writeLinearToSlot(view, linear);
-        slot.valid = true;
-        slot.dirty = false;
-        slot.busy = false;
-        slot.layoutMode = plan.loadLayoutMode;
-        setSlotShape(slot, parsedCmd);
+        updateSlotResidentWindow(slot, plan.loadOffset, plan.loadLayoutMode,
+                                 plan.validM, plan.validN, plan.validK, false);
         break;
       }
-      case PendingLoadKind::TensorA: {
+      case PendingLoadKind::TensorLoadA: {
         IterationPlan &plan = iterationPlan(pending.iteration);
-        plan.tensorA.assign(data, data + pkt->getSize());
-        updateSlotForTensorLoad(plan.tensorSlotA, plan.tensorOffsetA,
-                                plan.tensorLayoutA, plan.tensorA,
-                                plan.validM, plan.validN, plan.validK,
-                                false);
+        const LocalView view = makeLocalView(plan.tensorSlotA, plan.tensorOffsetA,
+                                             plan.tensorLayoutA, plan.validM,
+                                             plan.validN, plan.validK);
+        std::vector<uint8_t> linear = readLinearFromExternal(
+            SlotKind::A, plan.tensorLayoutA, plan.validM, plan.validN,
+            plan.validK, data, pkt->getSize());
+        SlotState &slot = slotByIndex(plan.tensorSlotA);
+        writeLinearToSlot(view, linear);
+        updateSlotResidentWindow(slot, plan.tensorOffsetA, plan.tensorLayoutA,
+                                 plan.validM, plan.validN, plan.validK, false);
         break;
       }
-      case PendingLoadKind::TensorB: {
+      case PendingLoadKind::TensorLoadB: {
         IterationPlan &plan = iterationPlan(pending.iteration);
-        plan.tensorB.assign(data, data + pkt->getSize());
-        updateSlotForTensorLoad(plan.tensorSlotB, plan.tensorOffsetB,
-                                plan.tensorLayoutB, plan.tensorB,
-                                plan.validM, plan.validN, plan.validK,
-                                false);
+        const LocalView view = makeLocalView(plan.tensorSlotB, plan.tensorOffsetB,
+                                             plan.tensorLayoutB, plan.validM,
+                                             plan.validN, plan.validK);
+        std::vector<uint8_t> linear = readLinearFromExternal(
+            SlotKind::B, plan.tensorLayoutB, plan.validM, plan.validN,
+            plan.validK, data, pkt->getSize());
+        SlotState &slot = slotByIndex(plan.tensorSlotB);
+        writeLinearToSlot(view, linear);
+        updateSlotResidentWindow(slot, plan.tensorOffsetB, plan.tensorLayoutB,
+                                 plan.validM, plan.validN, plan.validK, false);
         break;
       }
-      case PendingLoadKind::TensorCOld: {
+      case PendingLoadKind::TensorLoadCOld: {
         IterationPlan &plan = iterationPlan(pending.iteration);
-        plan.tensorCOld.assign(data, data + pkt->getSize());
-        updateSlotForTensorLoad(plan.tensorSlotC, plan.tensorOffsetC,
-                                plan.tensorLayoutC, plan.tensorCOld,
-                                plan.validM, plan.validN, plan.validK,
-                                false);
+        const LocalView view = makeLocalView(plan.tensorSlotC, plan.tensorOffsetC,
+                                             plan.tensorLayoutC, plan.validM,
+                                             plan.validN, plan.validK);
+        std::vector<uint8_t> linear = readLinearFromExternal(
+            SlotKind::C, plan.tensorLayoutC, plan.validM, plan.validN,
+            plan.validK, data, pkt->getSize());
+        SlotState &slot = slotByIndex(plan.tensorSlotC);
+        writeLinearToSlot(view, linear);
+        updateSlotResidentWindow(slot, plan.tensorOffsetC, plan.tensorLayoutC,
+                                 plan.validM, plan.validN, plan.validK, false);
         break;
       }
     }
@@ -1537,26 +1695,28 @@ MpuUnit::execute(ActiveExecution &exec)
 
     switch (static_cast<Mode>(parsedCmd.mode)) {
       case Mode::Load:
-        return loadBaseLatency;
+        return observedLoadExecLatency(makeLocalView(plan.loadSlotIndex,
+                                                     plan.loadOffset,
+                                                     plan.loadLayoutMode,
+                                                     plan.validM, plan.validN,
+                                                     plan.validK));
       case Mode::Compute: {
         SlotState &slot_c = slotByIndex(plan.computeSlotC);
         const SlotState &slot_a = slotByIndex(plan.computeSlotA);
         const SlotState &slot_b = slotByIndex(plan.computeSlotB);
-        const uint32_t c_layout = slot_c.valid ? slot_c.layoutMode :
-            static_cast<uint32_t>(LayoutMode::Normal);
         const LocalView view_a = makeLocalView(plan.computeSlotA,
                                                plan.computeOffsetA,
-                                               slot_a.layoutMode,
+                                               slot_a.residentLayoutMode,
                                                plan.validM, plan.validN,
                                                plan.validK);
         const LocalView view_b = makeLocalView(plan.computeSlotB,
                                                plan.computeOffsetB,
-                                               slot_b.layoutMode,
+                                               slot_b.residentLayoutMode,
                                                plan.validM, plan.validN,
                                                plan.validK);
         const LocalView view_c = makeLocalView(plan.computeSlotC,
                                                plan.computeOffsetC,
-                                               c_layout,
+                                               parsedCmd.dstLayoutMode,
                                                plan.validM, plan.validN,
                                                plan.validK);
         const std::vector<uint8_t> a_bytes = readLinearFromSlot(view_a);
@@ -1567,69 +1727,34 @@ MpuUnit::execute(ActiveExecution &exec)
         runMatmul(a_bytes, b_bytes, c_bytes, plan.validM, plan.validN,
                   plan.validK, plan.subop == ComputeSubop::MatmulAcc);
         writeLinearToSlot(view_c, c_bytes);
-        slot_c.valid = true;
-        slot_c.dirty = true;
-        slot_c.busy = false;
-        slot_c.shapeM = plan.validM;
-        slot_c.shapeN = plan.validN;
-        slot_c.shapeK = plan.validK;
-        if (!slot_c.valid) {
-            slot_c.layoutMode = c_layout;
-        }
+        updateSlotResidentWindow(slot_c, plan.computeOffsetC,
+                                 parsedCmd.dstLayoutMode, plan.validM,
+                                 plan.validN, plan.validK, true);
         clearSlotBusy(plan.computeSlotA);
         clearSlotBusy(plan.computeSlotB);
-
-        Tick slot_stall = 0;
-        const Tick latency = matmulLatencyForViews(
+        const Tick latency = observedMatmulExecLatency(
             view_a, view_b, view_c, plan.validK,
-            plan.subop == ComputeSubop::MatmulAcc, &slot_stall);
+            plan.subop == ComputeSubop::MatmulAcc);
         if (plan.subop == ComputeSubop::Matmul) {
             matmulCountValue++;
-            if (slot_c.layoutMode != c_layout) {
-                slot_c.layoutMode = c_layout;
-            }
             return latency;
         }
 
         matmulAccCountValue++;
-        if (slot_c.layoutMode != c_layout) {
-            slot_c.layoutMode = c_layout;
-        }
         return latency;
       }
       case Mode::Store:
-        return storeBaseLatency;
+        return observedStoreExecLatency(makeLocalView(plan.storeSlotIndex,
+                                                      plan.storeOffset,
+                                                      slotByIndex(plan.storeSlotIndex).residentLayoutMode,
+                                                      plan.validM, plan.validN,
+                                                      plan.validK));
       case Mode::TensorLoop: {
         const LocalView view_c = makeLocalView(plan.tensorSlotC,
                                                plan.tensorOffsetC,
                                                plan.tensorLayoutC,
                                                plan.validM, plan.validN,
                                                plan.validK);
-        std::vector<uint8_t> result;
-        if (plan.subop == ComputeSubop::MatmulAcc) {
-            auto acc_it = tensorLoopAccumulators.find(plan.outputTileKey);
-            panic_if(acc_it == tensorLoopAccumulators.end(),
-                     "MpuUnit: tensor_loop MATMUL_ACC missing accumulator for "
-                     "tile=%llu",
-                     static_cast<unsigned long long>(plan.outputTileKey));
-            result = acc_it->second;
-            runMatmul(plan.tensorA, plan.tensorB, result, plan.validM,
-                      plan.validN, plan.validK, true);
-            matmulAccCountValue++;
-        } else {
-            result.assign(cTileBytes(plan.validM, plan.validN), 0);
-            runMatmul(plan.tensorA, plan.tensorB, result, plan.validM,
-                      plan.validN, plan.validK, false);
-            matmulCountValue++;
-        }
-
-        tensorLoopAccumulators[plan.outputTileKey] = result;
-        plan.tensorCResult = result;
-        updateSlotForTensorLoad(plan.tensorSlotC, plan.tensorOffsetC,
-                                plan.tensorLayoutC, result,
-                                plan.validM, plan.validN, plan.validK,
-                                true);
-
         const LocalView view_a = makeLocalView(plan.tensorSlotA,
                                                plan.tensorOffsetA,
                                                plan.tensorLayoutA,
@@ -1640,10 +1765,25 @@ MpuUnit::execute(ActiveExecution &exec)
                                                plan.tensorLayoutB,
                                                plan.validM, plan.validN,
                                                plan.validK);
-        Tick slot_stall = 0;
-        return matmulLatencyForViews(view_a, view_b, view_c, plan.validK,
-                                     plan.subop == ComputeSubop::MatmulAcc,
-                                     &slot_stall);
+        const std::vector<uint8_t> a_bytes = readLinearFromSlot(view_a);
+        const std::vector<uint8_t> b_bytes = readLinearFromSlot(view_b);
+        std::vector<uint8_t> c_bytes =
+            plan.subop == ComputeSubop::MatmulAcc ?
+            readLinearFromSlot(view_c) : std::vector<uint8_t>();
+        runMatmul(a_bytes, b_bytes, c_bytes, plan.validM, plan.validN,
+                  plan.validK, plan.subop == ComputeSubop::MatmulAcc);
+        writeLinearToSlot(view_c, c_bytes);
+        SlotState &slot_c = slotByIndex(plan.tensorSlotC);
+        updateSlotResidentWindow(slot_c, plan.tensorOffsetC,
+                                 plan.tensorLayoutC, plan.validM, plan.validN,
+                                 plan.validK, true);
+        if (plan.subop == ComputeSubop::MatmulAcc) {
+            matmulAccCountValue++;
+        } else {
+            matmulCountValue++;
+        }
+        return observedMatmulExecLatency(view_a, view_b, view_c, plan.validK,
+                                         plan.subop == ComputeSubop::MatmulAcc);
       }
     }
 
@@ -1661,28 +1801,43 @@ MpuUnit::buildMvoutRequests(ActiveExecution &exec,
 
     switch (static_cast<Mode>(parsedCmd.mode)) {
       case Mode::Store: {
+        const SlotState &slot = slotByIndex(plan->storeSlotIndex);
         const LocalView view = makeLocalView(plan->storeSlotIndex,
                                              plan->storeOffset,
-                                             plan->storeLayoutMode,
+                                             slot.residentLayoutMode,
                                              plan->validM,
                                              plan->validN,
                                              plan->validK);
         MemRequestDesc req;
         req.portId = 0;
         req.addr = plan->storeSpmAddr;
-        req.size = view.linearBytes;
-        req.data = readLinearFromSlot(view);
+        req.data = writeLinearToExternal(SlotKind::C, plan->storeLayoutMode,
+                                         plan->validM, plan->validN,
+                                         plan->validK,
+                                         readLinearFromSlot(view));
+        req.size = req.data.size();
         reqs.push_back(req);
+        recordMemWait(req.portId, req.size, storeBandwidthBytesPerCycle);
         return;
       }
       case Mode::TensorLoop:
         if (plan->doStoreC) {
+            const LocalView view = makeLocalView(plan->tensorSlotC,
+                                                 plan->tensorOffsetC,
+                                                 plan->tensorLayoutC,
+                                                 plan->validM,
+                                                 plan->validN,
+                                                 plan->validK);
             MemRequestDesc req;
-            req.portId = 0;
+            req.portId = selectTensorLoopPort(PendingLoadKind::TensorLoadCOld);
             req.addr = plan->tensorCAddr;
-            req.size = plan->tensorCResult.size();
-            req.data = plan->tensorCResult;
+            req.data = writeLinearToExternal(SlotKind::C, plan->tensorLayoutC,
+                                             plan->validM, plan->validN,
+                                             plan->validK,
+                                             readLinearFromSlot(view));
+            req.size = req.data.size();
             reqs.push_back(req);
+            recordMemWait(req.portId, req.size, storeBandwidthBytesPerCycle);
         }
         return;
       case Mode::Load:
@@ -1859,9 +2014,21 @@ MpuUnit::stallCyclesWaitingForSlot() const
 }
 
 uint64_t
-MpuUnit::computedTotalLatency() const
+MpuUnit::observedTotalLatency() const
 {
-    return computedTotalLatencyValue;
+    return observedTotalLatencyValue;
+}
+
+uint64_t
+MpuUnit::partialSumSpillCount() const
+{
+    return partialSumSpillCountValue;
+}
+
+uint64_t
+MpuUnit::partialSumReloadCount() const
+{
+    return partialSumReloadCountValue;
 }
 
 } // namespace gem5

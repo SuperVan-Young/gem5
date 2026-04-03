@@ -70,5 +70,7 @@ class MpuUnit(SpecializedExecutionUnit):
         PyBindMethod("totalAccTiles"),
         PyBindMethod("stallCyclesWaitingForSPM"),
         PyBindMethod("stallCyclesWaitingForSlot"),
-        PyBindMethod("computedTotalLatency"),
+        PyBindMethod("observedTotalLatency"),
+        PyBindMethod("partialSumSpillCount"),
+        PyBindMethod("partialSumReloadCount"),
     ]
