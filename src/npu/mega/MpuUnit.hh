@@ -227,6 +227,19 @@ class MpuUnit : public SpecializedExecutionUnit
         uint64_t iteration = 0;
         PendingLoadKind kind = PendingLoadKind::SlotLoad;
         int slotIndex = -1;
+        Tick readyTick = 0;
+    };
+
+    struct PendingComputeCommit
+    {
+        int slotIndex = -1;
+        size_t offsetBytes = 0;
+        uint32_t layoutMode = static_cast<uint32_t>(LayoutMode::Normal);
+        uint32_t validM = 0;
+        uint32_t validN = 0;
+        uint32_t validK = 0;
+        bool dirty = false;
+        std::vector<uint8_t> linearBytes;
     };
 
     static constexpr uint8_t MpuDeviceType = 0x3;
@@ -268,6 +281,9 @@ class MpuUnit : public SpecializedExecutionUnit
     std::array<SlotState, 6> slots;
     std::vector<IterationPlan> iterationPlans;
     std::unordered_map<uint64_t, PendingLoadTxn> pendingLoadTxns;
+    std::unordered_map<uint64_t, Tick> pendingStoreReadyTicks;
+    std::unordered_map<uint64_t, Tick> pendingExecReadyTicks;
+    std::unordered_map<uint64_t, PendingComputeCommit> pendingComputeCommits;
     std::vector<Tick> localBankReadyTicks;
     std::vector<Tick> memPortReadyTicks;
     Tick currentObservedMemWait;
@@ -275,6 +291,7 @@ class MpuUnit : public SpecializedExecutionUnit
     Tick currentObservedExecLatency;
     Tick activeCmdStartTick;
     uint64_t slotEpochCounter;
+    uint32_t reservedSlotMask;
 
     uint64_t loadCount;
     uint64_t computeCount;
@@ -294,6 +311,12 @@ class MpuUnit : public SpecializedExecutionUnit
     Tick stallCyclesWaitingForSPMValue;
     Tick stallCyclesWaitingForSlotValue;
     Tick observedTotalLatencyValue;
+    Tick observedLoadServiceCyclesValue;
+    Tick observedStoreServiceCyclesValue;
+    Tick observedExecServiceCyclesValue;
+    uint64_t tensorLoopSlotUseMaskAValue;
+    uint64_t tensorLoopSlotUseMaskBValue;
+    uint64_t tensorLoopSlotUseMaskCValue;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
@@ -334,6 +357,9 @@ class MpuUnit : public SpecializedExecutionUnit
                                   uint32_t layout_mode, uint32_t valid_m,
                                   uint32_t valid_n, uint32_t valid_k,
                                   bool dirty);
+    void reserveSlot(int slot_index, const char *label);
+    void releaseReservedSlots();
+    void reserveSlotsForCommand(const ParsedCmd &cmd);
     void clearSlotBusy(int slot_index);
     void markBusyForFineCommand(const ParsedCmd &cmd);
     void clearBusyForFineCommand(const ParsedCmd &cmd);
@@ -383,6 +409,10 @@ class MpuUnit : public SpecializedExecutionUnit
     void resetObservedState();
     void recordMemWait(PortID port_id, size_t bytes, uint32_t bytes_per_cycle);
     PortID selectTensorLoopPort(PendingLoadKind kind) const;
+    void commitPendingCompute(uint64_t iteration);
+    Tick derivedArrayFillLatency(const MpuUnitParams &params) const;
+    Tick derivedArraySteadyPerK(const MpuUnitParams &params) const;
+    Tick derivedArrayDrainLatency(const MpuUnitParams &params) const;
 
     void buildIterationPlans(ActiveExecution &exec);
     void buildTensorLoopPlans();
@@ -404,6 +434,9 @@ class MpuUnit : public SpecializedExecutionUnit
     void onMvinResponse(ActiveExecution &exec, const MemTxnContext &txn,
                         PacketPtr pkt) override;
     Tick execute(ActiveExecution &exec) override;
+    void onMicroOpComplete(ActiveExecution &exec,
+                           const MicroOpContext &ctx,
+                           PacketPtr pkt) override;
     void buildMvoutRequests(ActiveExecution &exec,
                             std::vector<MemRequestDesc> &reqs) override;
     void onMvoutResponse(ActiveExecution &exec, const MemTxnContext &txn,
@@ -436,8 +469,15 @@ class MpuUnit : public SpecializedExecutionUnit
     uint64_t stallCyclesWaitingForSPM() const;
     uint64_t stallCyclesWaitingForSlot() const;
     uint64_t observedTotalLatency() const;
+    uint64_t observedLoadServiceCycles() const;
+    uint64_t observedStoreServiceCycles() const;
+    uint64_t observedExecServiceCycles() const;
     uint64_t partialSumSpillCount() const;
     uint64_t partialSumReloadCount() const;
+    uint64_t slotBusyMask() const;
+    uint64_t tensorLoopSlotUseMaskA() const;
+    uint64_t tensorLoopSlotUseMaskB() const;
+    uint64_t tensorLoopSlotUseMaskC() const;
 };
 
 } // namespace gem5

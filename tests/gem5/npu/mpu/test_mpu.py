@@ -69,7 +69,7 @@ add_mpu_test(
     "load_a",
     (
         r"MPU_SUMMARY scenario=load_a cmds=1 loads=1 computes=0 stores=0 "
-        r"loops=0 matmul=0 matmul_acc=0 .* a0=1 .* c0=0 .*",
+        r"loops=0 matmul=0 matmul_acc=0 .* busy_mask=0 .* a0=1 .* c0=0 .*",
         r"MPU_SCENARIO_PASS=load_a",
     ),
 )
@@ -78,7 +78,7 @@ add_mpu_test(
     "load_c",
     (
         r"MPU_SUMMARY scenario=load_c cmds=1 loads=1 computes=0 stores=0 "
-        r"loops=0 matmul=0 matmul_acc=0 .* c0=1 .* c0dirty=0 .*",
+        r"loops=0 matmul=0 matmul_acc=0 .* busy_mask=0 .* c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=load_c",
     ),
 )
@@ -87,7 +87,9 @@ add_mpu_test(
     "matmul_basic",
     (
         r"MPU_SUMMARY scenario=matmul_basic cmds=4 loads=2 computes=1 "
-        r"stores=1 loops=0 matmul=1 matmul_acc=0 .* c0=1 .* c0dirty=0 .*",
+        r"stores=1 loops=0 matmul=1 matmul_acc=0 .* "
+        r"modeled_slot_stall=3000 .* observed_exec=11000 busy_mask=0 .* "
+        r"c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=matmul_basic",
     ),
 )
@@ -96,7 +98,9 @@ add_mpu_test(
     "matmul_acc_basic",
     (
         r"MPU_SUMMARY scenario=matmul_acc_basic cmds=5 loads=3 computes=1 "
-        r"stores=1 loops=0 matmul=0 matmul_acc=1 .* c0=1 .* c0dirty=0 .*",
+        r"stores=1 loops=0 matmul=0 matmul_acc=1 .* "
+        r"modeled_slot_stall=5000 .* observed_exec=14000 busy_mask=0 .* "
+        r"c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=matmul_acc_basic",
     ),
 )
@@ -105,7 +109,8 @@ add_mpu_test(
     "sync_completion",
     (
         r"MPU_SUMMARY scenario=sync_completion cmds=2 loads=1 computes=0 "
-        r"stores=1 loops=0 matmul=0 matmul_acc=0 .* c0=1 .* c0dirty=0 .*",
+        r"stores=1 loops=0 matmul=0 matmul_acc=0 .* busy_mask=0 .* "
+        r"c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=sync_completion",
     ),
 )
@@ -117,7 +122,10 @@ add_mpu_test(
         r"loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
         r"tiles=2 acc_tiles=1 internal_loads=4 internal_computes=2 "
         r"internal_stores=1 total_tiles=2 total_acc_tiles=1 "
-        r"partial_spills=0 partial_reloads=0 .*",
+        r"partial_spills=0 partial_reloads=0 modeled_spm_stall=2000 "
+        r"modeled_slot_stall=5000 latency=115000 observed_load=120000 "
+        r"observed_store=21000 observed_exec=25000 busy_mask=0 "
+        r"tl_a_mask=1 tl_b_mask=4 tl_c_mask=16 .*",
         r"MPU_SCENARIO_PASS=tensor_loop_k_inner_local_accumulate",
     ),
 )
@@ -129,7 +137,10 @@ add_mpu_test(
         r"loads=0 computes=0 stores=0 loops=1 matmul=2 matmul_acc=2 .* "
         r"tiles=4 acc_tiles=2 internal_loads=10 internal_computes=4 "
         r"internal_stores=4 total_tiles=4 total_acc_tiles=2 "
-        r"partial_spills=2 partial_reloads=2 .*",
+        r"partial_spills=2 partial_reloads=2 modeled_spm_stall=8000 "
+        r"modeled_slot_stall=10000 latency=284000 observed_load=486000 "
+        r"observed_store=257000 observed_exec=50000 busy_mask=0 "
+        r"tl_a_mask=1 tl_b_mask=4 tl_c_mask=16 .*",
         r"MPU_SCENARIO_PASS=tensor_loop_k_outer_spill_reload",
     ),
 )
@@ -141,7 +152,10 @@ add_mpu_test(
         r"loads=0 computes=0 stores=0 loops=1 matmul=2 matmul_acc=2 .* "
         r"tiles=4 acc_tiles=2 internal_loads=10 internal_computes=4 "
         r"internal_stores=4 total_tiles=4 total_acc_tiles=2 "
-        r"partial_spills=2 partial_reloads=2 .* c0=1 c1=1 .*",
+        r"partial_spills=2 partial_reloads=2 modeled_spm_stall=8000 "
+        r"modeled_slot_stall=10000 latency=284000 observed_load=486000 "
+        r"observed_store=257000 observed_exec=50000 busy_mask=0 "
+        r"tl_a_mask=1 tl_b_mask=4 tl_c_mask=48 .* c0=1 c1=1 .*",
         r"MPU_SCENARIO_PASS=tensor_loop_k_outer_pingpong_c",
     ),
 )
@@ -152,7 +166,10 @@ add_mpu_test(
         r"MPU_SUMMARY scenario=tensor_loop_matmul_acc_first_k_legacy_overwrite "
         r"cmds=1 loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
         r"tiles=2 acc_tiles=1 internal_loads=5 internal_computes=2 "
-        r"internal_stores=1 total_tiles=2 total_acc_tiles=1 .*",
+        r"internal_stores=1 total_tiles=2 total_acc_tiles=1 .* "
+        r"modeled_spm_stall=4000 modeled_slot_stall=5000 latency=135000 "
+        r"observed_load=180000 observed_store=21000 observed_exec=25000 "
+        r"busy_mask=0 tl_a_mask=1 tl_b_mask=4 tl_c_mask=16 .*",
         r"MPU_SCENARIO_PASS=tensor_loop_matmul_acc_first_k_legacy_overwrite",
     ),
 )
@@ -162,7 +179,7 @@ add_mpu_test(
     (
         r"MPU_SUMMARY scenario=explicit_offset_load_store cmds=2 loads=1 "
         r"computes=0 stores=1 loops=0 matmul=0 matmul_acc=0 .* "
-        r"c0=1 .* c0dirty=0 .*",
+        r"busy_mask=0 .* c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=explicit_offset_load_store",
     ),
 )
@@ -172,7 +189,8 @@ add_mpu_test(
     (
         r"MPU_SUMMARY scenario=explicit_offset_compute cmds=4 loads=2 "
         r"computes=1 stores=1 loops=0 matmul=1 matmul_acc=0 .* "
-        r"slot_stall=[1-9][0-9]* .* c0=1 .* c0dirty=0 .*",
+        r"modeled_slot_stall=3000 .* observed_store=21000 observed_exec=11000 "
+        r"busy_mask=0 .* c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=explicit_offset_compute",
     ),
 )
@@ -183,7 +201,10 @@ add_mpu_test(
         r"MPU_SUMMARY scenario=tensor_loop_layout_fields_outside_step_cfg "
         r"cmds=1 loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=0 .* "
         r"tiles=1 acc_tiles=0 internal_loads=2 internal_computes=1 "
-        r"internal_stores=1 total_tiles=1 total_acc_tiles=0 .*",
+        r"internal_stores=1 total_tiles=1 total_acc_tiles=0 .* "
+        r"modeled_spm_stall=1000 modeled_slot_stall=2000 latency=73000 "
+        r"observed_load=60000 observed_store=22000 observed_exec=11000 "
+        r"busy_mask=0 tl_a_mask=1 tl_b_mask=4 tl_c_mask=16 .*",
         r"MPU_SCENARIO_PASS=tensor_loop_layout_fields_outside_step_cfg",
     ),
 )
@@ -193,7 +214,7 @@ add_mpu_test(
     (
         r"MPU_SUMMARY scenario=store_layout_conversion_normal_to_skew cmds=2 "
         r"loads=1 computes=0 stores=1 loops=0 matmul=0 matmul_acc=0 .* "
-        r"c0=1 .* c0dirty=0 .*",
+        r"busy_mask=0 .* c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=store_layout_conversion_normal_to_skew",
     ),
 )
@@ -203,39 +224,84 @@ add_mpu_test(
     (
         r"MPU_SUMMARY scenario=store_layout_conversion_skew_to_normal cmds=2 "
         r"loads=1 computes=0 stores=1 loops=0 matmul=0 matmul_acc=0 .* "
-        r"c0=1 .* c0dirty=0 .*",
+        r"busy_mask=0 .* c0=1 .* c0dirty=0 .*",
         r"MPU_SCENARIO_PASS=store_layout_conversion_skew_to_normal",
     ),
 )
 add_mpu_test(
-    "mpu_observed_spm_stall_from_retry",
-    "observed_spm_stall_from_retry",
+    "mpu_modeled_spm_stall_and_observed_services",
+    "modeled_spm_stall_and_observed_services",
     (
-        r"MPU_SUMMARY scenario=observed_spm_stall_from_retry cmds=1 loads=0 "
+        r"MPU_SUMMARY scenario=modeled_spm_stall_and_observed_services cmds=1 loads=0 "
         r"computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
-        r"spm_stall=[1-9][0-9]* .* latency=[1-9][0-9]* .*",
-        r"MPU_SCENARIO_PASS=observed_spm_stall_from_retry",
+        r"modeled_spm_stall=4000 modeled_slot_stall=5000 latency=135000 "
+        r"observed_load=180000 observed_store=21000 observed_exec=25000 "
+        r"busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=modeled_spm_stall_and_observed_services",
     ),
 )
 add_mpu_test(
-    "mpu_observed_slot_stall_from_bank_conflict",
-    "observed_slot_stall_from_bank_conflict",
+    "mpu_modeled_slot_stall_and_observed_services",
+    "modeled_slot_stall_and_observed_services",
     (
-        r"MPU_SUMMARY scenario=observed_slot_stall_from_bank_conflict cmds=4 "
+        r"MPU_SUMMARY scenario=modeled_slot_stall_and_observed_services cmds=4 "
         r"loads=2 computes=1 stores=1 loops=0 matmul=1 matmul_acc=0 .* "
-        r"slot_stall=[1-9][0-9]* latency=[1-9][0-9]* .*",
-        r"MPU_SCENARIO_PASS=observed_slot_stall_from_bank_conflict",
+        r"modeled_spm_stall=0 modeled_slot_stall=3000 latency=76000 "
+        r"observed_load=40000 observed_store=21000 observed_exec=11000 "
+        r"busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=modeled_slot_stall_and_observed_services",
     ),
 )
 add_mpu_test(
-    "mpu_multi_mem_port_tensor_loop_throughput",
-    "multi_mem_port_tensor_loop_throughput",
+    "mpu_single_mem_port_tensor_loop_services",
+    "single_mem_port_tensor_loop_services",
     (
-        r"MPU_SUMMARY scenario=multi_mem_port_tensor_loop_throughput cmds=1 "
+        r"MPU_SUMMARY scenario=single_mem_port_tensor_loop_services cmds=1 "
         r"loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
-        r"tiles=2 acc_tiles=1 internal_loads=5 internal_computes=2 "
-        r"internal_stores=1 .* latency=[1-9][0-9]* .*",
-        r"MPU_SCENARIO_PASS=multi_mem_port_tensor_loop_throughput",
+        r"busy=0 active=2 tiles=2 acc_tiles=1 internal_loads=5 "
+        r"internal_computes=2 "
+        r"internal_stores=1 .* modeled_spm_stall=4000 "
+        r"modeled_slot_stall=5000 latency=135000 observed_load=180000 "
+        r"observed_store=21000 observed_exec=25000 busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=single_mem_port_tensor_loop_services",
+    ),
+)
+add_mpu_test(
+    "mpu_multi_mem_port_tensor_loop_services",
+    "multi_mem_port_tensor_loop_services",
+    (
+        r"MPU_SUMMARY scenario=multi_mem_port_tensor_loop_services cmds=1 "
+        r"loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
+        r"busy=0 active=3 tiles=2 acc_tiles=1 internal_loads=5 "
+        r"internal_computes=2 "
+        r"internal_stores=1 .* modeled_spm_stall=0 "
+        r"modeled_slot_stall=5000 latency=78000 observed_load=104000 "
+        r"observed_store=21000 observed_exec=25000 busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=multi_mem_port_tensor_loop_services",
+    ),
+)
+add_mpu_test(
+    "mpu_geometry_default_compute_latency",
+    "geometry_default_compute_latency",
+    (
+        r"MPU_SUMMARY scenario=geometry_default_compute_latency cmds=1 "
+        r"loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
+        r"modeled_spm_stall=2000 modeled_slot_stall=5000 latency=115000 "
+        r"observed_load=120000 observed_store=21000 observed_exec=25000 "
+        r"busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=geometry_default_compute_latency",
+    ),
+)
+add_mpu_test(
+    "mpu_geometry_override_compute_latency",
+    "geometry_override_compute_latency",
+    (
+        r"MPU_SUMMARY scenario=geometry_override_compute_latency cmds=1 "
+        r"loads=0 computes=0 stores=0 loops=1 matmul=1 matmul_acc=1 .* "
+        r"modeled_spm_stall=2000 modeled_slot_stall=5000 latency=141000 "
+        r"observed_load=120000 observed_store=21000 observed_exec=77000 "
+        r"busy_mask=0 .*",
+        r"MPU_SCENARIO_PASS=geometry_override_compute_latency",
     ),
 )
 add_mpu_test(

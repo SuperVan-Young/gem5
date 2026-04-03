@@ -48,6 +48,44 @@ enum MpuLayoutMode
 };
 
 static inline uint32_t
+mpuAlternateLocalAddr(uint32_t local_addr)
+{
+    switch (local_addr) {
+      case MPU_LOCAL_ADDR_A0:
+        return MPU_LOCAL_ADDR_A1;
+      case MPU_LOCAL_ADDR_A1:
+        return MPU_LOCAL_ADDR_A0;
+      case MPU_LOCAL_ADDR_B0:
+        return MPU_LOCAL_ADDR_B1;
+      case MPU_LOCAL_ADDR_B1:
+        return MPU_LOCAL_ADDR_B0;
+      case MPU_LOCAL_ADDR_C0:
+        return MPU_LOCAL_ADDR_C1;
+      case MPU_LOCAL_ADDR_C1:
+        return MPU_LOCAL_ADDR_C0;
+      default:
+        return 0U;
+    }
+}
+
+static inline void
+mpuResolveTensorLoopSlotPair(uint32_t base_local_addr,
+                             uint32_t pingpong_enable,
+                             uint32_t *primary_local_addr,
+                             uint32_t *alternate_local_addr)
+{
+    if (primary_local_addr != nullptr) {
+        *primary_local_addr = base_local_addr;
+    }
+
+    if (alternate_local_addr != nullptr) {
+        *alternate_local_addr =
+            pingpong_enable ? mpuAlternateLocalAddr(base_local_addr)
+                            : base_local_addr;
+    }
+}
+
+static inline uint32_t
 mpuMakeOpCode(uint32_t data_type, uint32_t mode)
 {
     return ((data_type & 0x7U) << 5) | ((mode & 0x7U) << 2);

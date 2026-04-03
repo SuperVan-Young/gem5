@@ -272,9 +272,9 @@ class NPUTestSystemBuilder:
         array_k_depth=4,
         load_base_latency="1ns",
         store_base_latency="1ns",
-        array_fill_latency="1ns",
-        array_steady_per_k="1ns",
-        array_drain_latency="1ns",
+        array_fill_latency=None,
+        array_steady_per_k=None,
+        array_drain_latency=None,
         load_bandwidth_bytes_per_cycle=16,
         store_bandwidth_bytes_per_cycle=16,
         c_read_base_latency="1ns",
@@ -289,27 +289,34 @@ class NPUTestSystemBuilder:
             raise RuntimeError("MpuUnit is not available in the current build")
         if base_addr is None:
             base_addr = self.addr_map.mpu_base
+        kwargs = {
+            "base_addr": base_addr,
+            "macro_cmd_bytes": macro_cmd_bytes,
+            "cmd_queue_depth": cmd_queue_depth,
+            "num_mem_side_ports": num_mem_side_ports,
+            "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
+            "array_rows": array_rows,
+            "array_cols": array_cols,
+            "array_k_depth": array_k_depth,
+            "load_base_latency": load_base_latency,
+            "store_base_latency": store_base_latency,
+            "load_bandwidth_bytes_per_cycle": load_bandwidth_bytes_per_cycle,
+            "store_bandwidth_bytes_per_cycle": store_bandwidth_bytes_per_cycle,
+            "c_read_base_latency": c_read_base_latency,
+            "c_write_base_latency": c_write_base_latency,
+            "local_bank_count": local_bank_count,
+            "local_bank_granularity_bytes": local_bank_granularity_bytes,
+            "local_bank_service_cycles": local_bank_service_cycles,
+        }
+        if array_fill_latency is not None:
+            kwargs["array_fill_latency"] = array_fill_latency
+        if array_steady_per_k is not None:
+            kwargs["array_steady_per_k"] = array_steady_per_k
+        if array_drain_latency is not None:
+            kwargs["array_drain_latency"] = array_drain_latency
+
         mpu = MpuUnit(
-            base_addr=base_addr,
-            macro_cmd_bytes=macro_cmd_bytes,
-            cmd_queue_depth=cmd_queue_depth,
-            num_mem_side_ports=num_mem_side_ports,
-            sync_enqueue_on_data_write=sync_enqueue_on_data_write,
-            array_rows=array_rows,
-            array_cols=array_cols,
-            array_k_depth=array_k_depth,
-            load_base_latency=load_base_latency,
-            store_base_latency=store_base_latency,
-            array_fill_latency=array_fill_latency,
-            array_steady_per_k=array_steady_per_k,
-            array_drain_latency=array_drain_latency,
-            load_bandwidth_bytes_per_cycle=load_bandwidth_bytes_per_cycle,
-            store_bandwidth_bytes_per_cycle=store_bandwidth_bytes_per_cycle,
-            c_read_base_latency=c_read_base_latency,
-            c_write_base_latency=c_write_base_latency,
-            local_bank_count=local_bank_count,
-            local_bank_granularity_bytes=local_bank_granularity_bytes,
-            local_bank_service_cycles=local_bank_service_cycles,
+            **kwargs,
         )
         mpu.cpu_side = self.system.membus.mem_side_ports
         for _ in range(num_mem_side_ports):

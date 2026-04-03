@@ -27,7 +27,7 @@ expected_exit_code = 0
 needs_dma = args.scenario == "dma_to_mpu_to_dma_regression"
 
 num_mem_side_ports = (
-    3 if args.scenario == "multi_mem_port_tensor_loop_throughput" else 1
+    3 if args.scenario == "multi_mem_port_tensor_loop_services" else 1
 )
 
 builder = NPUTestSystemBuilder(
@@ -42,14 +42,23 @@ builder.add_spm(base_addr=spm_base, size=spm_size)
 builder.add_cpu(cpu_id=0)
 builder.set_workload(os.path.abspath(args.binary), [args.scenario], cpu_id=0)
 builder.add_megacmdqueue()
-builder.add_mpu(
-    num_mem_side_ports=num_mem_side_ports,
-    load_bandwidth_bytes_per_cycle=8,
-    store_bandwidth_bytes_per_cycle=8,
-    local_bank_count=2,
-    local_bank_granularity_bytes=4,
-    local_bank_service_cycles=1,
-)
+mpu_kwargs = {
+    "num_mem_side_ports": num_mem_side_ports,
+    "load_bandwidth_bytes_per_cycle": 8,
+    "store_bandwidth_bytes_per_cycle": 8,
+    "local_bank_count": 2,
+    "local_bank_granularity_bytes": 4,
+    "local_bank_service_cycles": 1,
+}
+if args.scenario == "geometry_override_compute_latency":
+    mpu_kwargs.update(
+        {
+            "array_fill_latency": "9ns",
+            "array_steady_per_k": "7ns",
+            "array_drain_latency": "5ns",
+        }
+    )
+builder.add_mpu(**mpu_kwargs)
 if needs_dma:
     builder.add_dma()
 builder.instantiate_root()
@@ -93,9 +102,16 @@ print(
     f"total_acc_tiles={builder.system.mpu.totalAccTiles()} "
     f"partial_spills={builder.system.mpu.partialSumSpillCount()} "
     f"partial_reloads={builder.system.mpu.partialSumReloadCount()} "
-    f"spm_stall={builder.system.mpu.stallCyclesWaitingForSPM()} "
-    f"slot_stall={builder.system.mpu.stallCyclesWaitingForSlot()} "
+    f"modeled_spm_stall={builder.system.mpu.stallCyclesWaitingForSPM()} "
+    f"modeled_slot_stall={builder.system.mpu.stallCyclesWaitingForSlot()} "
     f"latency={builder.system.mpu.observedTotalLatency()} "
+    f"observed_load={builder.system.mpu.observedLoadServiceCycles()} "
+    f"observed_store={builder.system.mpu.observedStoreServiceCycles()} "
+    f"observed_exec={builder.system.mpu.observedExecServiceCycles()} "
+    f"busy_mask={builder.system.mpu.slotBusyMask()} "
+    f"tl_a_mask={builder.system.mpu.tensorLoopSlotUseMaskA()} "
+    f"tl_b_mask={builder.system.mpu.tensorLoopSlotUseMaskB()} "
+    f"tl_c_mask={builder.system.mpu.tensorLoopSlotUseMaskC()} "
     f"a0={int(builder.system.mpu.slotA0Valid())} "
     f"a1={int(builder.system.mpu.slotA1Valid())} "
     f"b0={int(builder.system.mpu.slotB0Valid())} "

@@ -205,6 +205,26 @@ reference_three_stage_acc(const int8_t *a0, const int8_t *b0,
     reference_matmul(a1, b1, tmp, out, kValidM, kValidN, kValidK, 1);
 }
 
+static uint32_t
+next_sync_indicator(void)
+{
+    static uint32_t next_indicator = 1U;
+
+    return next_indicator++;
+}
+
+static void
+wait_for_mpu_completion(uint32_t sync_indicator)
+{
+    npu_launch_sync_wait(MPU_DEVICE_ID, sync_indicator, 0U, 0U, 0U);
+}
+
+static void
+wait_for_dma_completion(uint32_t sync_indicator)
+{
+    npu_launch_sync_wait(DMA_DEVICE_ID, sync_indicator, 0U, 0U, 0U);
+}
+
 static inline void
 launch_mpu_load(uint32_t dst_local_addr, uintptr_t src_spm_addr,
                 uint32_t valid_m, uint32_t valid_n, uint32_t valid_k,
@@ -295,6 +315,86 @@ launch_mpu_tensor_loop(uint32_t base_local_addr_a,
     cmd.launchCmd();
 }
 
+static inline void
+launch_mpu_load_and_wait(uint32_t dst_local_addr, uintptr_t src_spm_addr,
+                         uint32_t valid_m, uint32_t valid_n,
+                         uint32_t valid_k, uint32_t layout_mode,
+                         uint32_t local_offset_bytes)
+{
+    const uint32_t sync_indicator = next_sync_indicator();
+
+    launch_mpu_load(dst_local_addr, src_spm_addr, valid_m, valid_n, valid_k,
+                    layout_mode, local_offset_bytes, sync_indicator, 1U);
+    wait_for_mpu_completion(sync_indicator);
+}
+
+static inline void
+launch_mpu_compute_and_wait(uint32_t src_local_addr_a,
+                            uint32_t src_local_addr_b,
+                            uint32_t dst_local_addr_c, uint32_t valid_m,
+                            uint32_t valid_n, uint32_t valid_k,
+                            uint32_t subop, uint32_t dst_layout_mode,
+                            uint32_t local_offset_a,
+                            uint32_t local_offset_b,
+                            uint32_t local_offset_c)
+{
+    const uint32_t sync_indicator = next_sync_indicator();
+
+    launch_mpu_compute(src_local_addr_a, src_local_addr_b, dst_local_addr_c,
+                       valid_m, valid_n, valid_k, subop, dst_layout_mode,
+                       local_offset_a, local_offset_b, local_offset_c,
+                       sync_indicator, 1U);
+    wait_for_mpu_completion(sync_indicator);
+}
+
+static inline void
+launch_mpu_store_and_wait(uint32_t src_local_addr, uintptr_t dst_spm_addr,
+                          uint32_t valid_m, uint32_t valid_n,
+                          uint32_t valid_k, uint32_t layout_mode,
+                          uint32_t local_offset_bytes)
+{
+    const uint32_t sync_indicator = next_sync_indicator();
+
+    launch_mpu_store(src_local_addr, dst_spm_addr, valid_m, valid_n, valid_k,
+                     layout_mode, local_offset_bytes, sync_indicator, 1U);
+    wait_for_mpu_completion(sync_indicator);
+}
+
+static inline void
+launch_mpu_tensor_loop_and_wait(uint32_t base_local_addr_a,
+                                uint32_t base_local_addr_b,
+                                uint32_t base_local_addr_c,
+                                uintptr_t base_spm_addr_a,
+                                uintptr_t base_spm_addr_b,
+                                uintptr_t base_spm_addr_c,
+                                uint32_t valid_m, uint32_t valid_n,
+                                uint32_t valid_k, uint32_t subop,
+                                uint32_t layout_a, uint32_t layout_b,
+                                uint32_t layout_c, uint32_t outer_axis,
+                                uint32_t outer_count, uint32_t inner_axis,
+                                uint32_t inner_count, uint32_t offset_a,
+                                uint32_t offset_b, uint32_t offset_c,
+                                uint32_t outer_step_tiles,
+                                uint32_t inner_step_tiles,
+                                uint32_t pingpong_a_enable,
+                                uint32_t pingpong_b_enable,
+                                uint32_t pingpong_c_enable,
+                                uint32_t auto_load_c_for_acc)
+{
+    const uint32_t sync_indicator = next_sync_indicator();
+
+    launch_mpu_tensor_loop(base_local_addr_a, base_local_addr_b,
+                           base_local_addr_c, base_spm_addr_a,
+                           base_spm_addr_b, base_spm_addr_c, valid_m, valid_n,
+                           valid_k, subop, layout_a, layout_b, layout_c,
+                           outer_axis, outer_count, inner_axis, inner_count,
+                           offset_a, offset_b, offset_c, outer_step_tiles,
+                           inner_step_tiles, pingpong_a_enable,
+                           pingpong_b_enable, pingpong_c_enable,
+                           auto_load_c_for_acc, sync_indicator, 1U);
+    wait_for_mpu_completion(sync_indicator);
+}
+
 static inline DmaLayout
 make_linear_layout(uint32_t bytes)
 {
@@ -365,9 +465,8 @@ scenario_load_a(void)
 {
     write_external_i8_tile(LOAD_A_SRC, kATile, kValidM, kValidK,
                            MPU_LAYOUT_MODE_NORMAL);
-    launch_mpu_load(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 1U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
     return 0;
 }
 
@@ -376,9 +475,8 @@ scenario_load_c(void)
 {
     write_external_i32_tile(LOAD_C_SRC, kColdTile, kValidM, kValidN,
                             MPU_LAYOUT_MODE_NORMAL);
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 2U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
     return 0;
 }
 
@@ -396,17 +494,16 @@ scenario_matmul_basic(void)
     reference_matmul(kATile, kBTile, NULL, expected, kValidM, kValidN,
                      kValidK, 0);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 3U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 4U, 0U);
-    launch_mpu_compute(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                       MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
-                       MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                       0U, 0U, 0U, 5U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM, kValidN,
-                     kValidK, MPU_LAYOUT_MODE_NORMAL, 0U, 6U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_compute_and_wait(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
+                                MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
+                                MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
+                                0U, 0U, 0U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
 
     return verify_external_i32_tile(STORE_C_DST, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -430,19 +527,18 @@ scenario_matmul_acc_basic(void)
     reference_matmul(kATile, kBTile, kColdTile, expected, kValidM, kValidN,
                      kValidK, 1);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 7U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 8U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 9U, 0U);
-    launch_mpu_compute(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                       MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
-                       MPU_SUBOP_MATMUL_ACC, MPU_LAYOUT_MODE_NORMAL,
-                       0U, 0U, 0U, 10U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM, kValidN,
-                     kValidK, MPU_LAYOUT_MODE_NORMAL, 0U, 11U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_compute_and_wait(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
+                                MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
+                                MPU_SUBOP_MATMUL_ACC, MPU_LAYOUT_MODE_NORMAL,
+                                0U, 0U, 0U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
 
     return verify_external_i32_tile(STORE_C_DST, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -458,12 +554,10 @@ scenario_sync_completion(void)
     write_external_i32_tile(LOAD_C_SRC, kColdTile, kValidM, kValidN,
                             MPU_LAYOUT_MODE_NORMAL);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 12U, 1U);
-    npu_launch_sync_wait(MPU_DEVICE_ID, 12U, 0U, 0U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM, kValidN,
-                     kValidK, MPU_LAYOUT_MODE_NORMAL, 0U, 13U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
 
     return verify_external_i32_tile(STORE_C_DST, kColdTile, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -488,14 +582,12 @@ scenario_tensor_loop_k_inner_local_accumulate(void)
                            kValidK, kValidN, MPU_LAYOUT_MODE_NORMAL);
     reference_two_stage_acc(kLoopA0, kLoopB0, kLoopA1, kLoopB1, expected);
 
-    launch_mpu_tensor_loop(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                           MPU_LOCAL_ADDR_C0, LOOP_K_A_BASE, LOOP_K_B_BASE,
-                           LOOP_K_C_BASE, kValidM, kValidN, kValidK,
-                           MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_AXIS_N, 1U, MPU_AXIS_K, 2U,
-                           0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 14U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_tensor_loop_and_wait(
+        MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0, MPU_LOCAL_ADDR_C0,
+        LOOP_K_A_BASE, LOOP_K_B_BASE, LOOP_K_C_BASE, kValidM, kValidN,
+        kValidK, MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
+        MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL, MPU_AXIS_N, 1U,
+        MPU_AXIS_K, 2U, 0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 0U);
 
     return verify_external_i32_tile(LOOP_K_C_BASE, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -526,14 +618,12 @@ scenario_tensor_loop_k_outer_spill_reload(void)
     reference_two_stage_acc(kOuterA0, kOuterB00, kOuterA1, kOuterB10, expected0);
     reference_two_stage_acc(kOuterA0, kOuterB01, kOuterA1, kOuterB11, expected1);
 
-    launch_mpu_tensor_loop(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                           MPU_LOCAL_ADDR_C0, K_OUTER_A_BASE, K_OUTER_B_BASE,
-                           K_OUTER_C_BASE, kValidM, kValidN, kValidK,
-                           MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_AXIS_K, 2U, MPU_AXIS_N, 2U,
-                           0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 15U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_tensor_loop_and_wait(
+        MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0, MPU_LOCAL_ADDR_C0,
+        K_OUTER_A_BASE, K_OUTER_B_BASE, K_OUTER_C_BASE, kValidM, kValidN,
+        kValidK, MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
+        MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL, MPU_AXIS_K, 2U,
+        MPU_AXIS_N, 2U, 0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 0U);
 
     if (!verify_external_i32_tile(K_OUTER_C_BASE + 0U * kCTileBytes, expected0,
                                   kValidM, kValidN, MPU_LAYOUT_MODE_NORMAL)) {
@@ -569,14 +659,12 @@ scenario_tensor_loop_k_outer_pingpong_c(void)
     reference_two_stage_acc(kOuterA0, kOuterB00, kOuterA1, kOuterB10, expected0);
     reference_two_stage_acc(kOuterA0, kOuterB01, kOuterA1, kOuterB11, expected1);
 
-    launch_mpu_tensor_loop(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                           MPU_LOCAL_ADDR_C0, K_OUTER_A_BASE, K_OUTER_B_BASE,
-                           PP_C_BASE, kValidM, kValidN, kValidK,
-                           MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_AXIS_K, 2U, MPU_AXIS_N, 2U,
-                           0U, 0U, 0U, 1U, 1U, 0U, 0U, 1U, 0U, 16U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_tensor_loop_and_wait(
+        MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0, MPU_LOCAL_ADDR_C0,
+        K_OUTER_A_BASE, K_OUTER_B_BASE, PP_C_BASE, kValidM, kValidN,
+        kValidK, MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
+        MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL, MPU_AXIS_K, 2U,
+        MPU_AXIS_N, 2U, 0U, 0U, 0U, 1U, 1U, 0U, 0U, 1U, 0U);
 
     if (!verify_external_i32_tile(PP_C_BASE + 0U * kCTileBytes, expected0,
                                   kValidM, kValidN, MPU_LAYOUT_MODE_NORMAL)) {
@@ -608,14 +696,12 @@ scenario_tensor_loop_matmul_acc_first_k_legacy_overwrite(void)
                             MPU_LAYOUT_MODE_NORMAL);
     reference_two_stage_acc(kLoopA0, kLoopB0, kLoopA1, kLoopB1, expected);
 
-    launch_mpu_tensor_loop(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                           MPU_LOCAL_ADDR_C0, LOOP_K_A_BASE, LOOP_K_B_BASE,
-                           LOOP_K_C_BASE, kValidM, kValidN, kValidK,
-                           MPU_SUBOP_MATMUL_ACC, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_AXIS_N, 1U, MPU_AXIS_K, 2U,
-                           0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 1U, 17U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_tensor_loop_and_wait(
+        MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0, MPU_LOCAL_ADDR_C0,
+        LOOP_K_A_BASE, LOOP_K_B_BASE, LOOP_K_C_BASE, kValidM, kValidN,
+        kValidK, MPU_SUBOP_MATMUL_ACC, MPU_LAYOUT_MODE_NORMAL,
+        MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL, MPU_AXIS_N, 1U,
+        MPU_AXIS_K, 2U, 0U, 0U, 0U, 1U, 1U, 0U, 0U, 0U, 1U);
 
     return verify_external_i32_tile(LOOP_K_C_BASE, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -631,11 +717,10 @@ scenario_explicit_offset_load_store(void)
     write_external_i32_tile(OFFSET_C_SRC, kColdTile, kValidM, kValidN,
                             MPU_LAYOUT_MODE_NORMAL);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, OFFSET_C_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 4U, 18U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, OFFSET_C_DST, kValidM, kValidN, kValidK,
-                     MPU_LAYOUT_MODE_NORMAL, 4U, 19U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, OFFSET_C_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 4U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, OFFSET_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 4U);
 
     return verify_external_i32_tile(OFFSET_C_DST, kColdTile, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -657,17 +742,16 @@ scenario_explicit_offset_compute(void)
     reference_matmul(kATile, kBTile, NULL, expected, kValidM, kValidN,
                      kValidK, 0);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_A0, OFFSET_A_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 1U, 20U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_B0, OFFSET_B_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 2U, 21U, 0U);
-    launch_mpu_compute(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                       MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
-                       MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                       1U, 2U, 4U, 22U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, OFFSET_C_DST, kValidM, kValidN,
-                     kValidK, MPU_LAYOUT_MODE_NORMAL, 4U, 23U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_A0, OFFSET_A_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 1U);
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_B0, OFFSET_B_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 2U);
+    launch_mpu_compute_and_wait(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
+                                MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
+                                MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
+                                1U, 2U, 4U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, OFFSET_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 4U);
 
     return verify_external_i32_tile(OFFSET_C_DST, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -689,14 +773,12 @@ scenario_tensor_loop_layout_fields_outside_step_cfg(void)
     reference_matmul(kATile, kBTile, NULL, expected, kValidM, kValidN,
                      kValidK, 0);
 
-    launch_mpu_tensor_loop(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                           MPU_LOCAL_ADDR_C0, TENSOR_A_BASE, TENSOR_B_BASE,
-                           SKEW_C_BASE, kValidM, kValidN, kValidK,
-                           MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                           MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_SKEWED,
-                           MPU_AXIS_M, 1U, MPU_AXIS_N, 1U,
-                           0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 24U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_tensor_loop_and_wait(
+        MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0, MPU_LOCAL_ADDR_C0, TENSOR_A_BASE,
+        TENSOR_B_BASE, SKEW_C_BASE, kValidM, kValidN, kValidK,
+        MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL, MPU_LAYOUT_MODE_NORMAL,
+        MPU_LAYOUT_MODE_SKEWED, MPU_AXIS_M, 1U, MPU_AXIS_N, 1U, 0U, 0U,
+        0U, 0U, 0U, 0U, 0U, 0U, 0U);
 
     return verify_external_i32_tile(SKEW_C_BASE, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_SKEWED)
@@ -712,11 +794,10 @@ scenario_store_layout_conversion_normal_to_skew(void)
     write_external_i32_tile(LOAD_C_SRC, kColdTile, kValidM, kValidN,
                             MPU_LAYOUT_MODE_NORMAL);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 25U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, SKEW_C_BASE, kValidM, kValidN, kValidK,
-                     MPU_LAYOUT_MODE_SKEWED, 0U, 26U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, LOAD_C_SRC, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, SKEW_C_BASE, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_SKEWED, 0U);
 
     return verify_external_i32_tile(SKEW_C_BASE, kColdTile, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_SKEWED)
@@ -732,11 +813,10 @@ scenario_store_layout_conversion_skew_to_normal(void)
     write_external_i32_tile(SKEW_C_BASE, kColdTile, kValidM, kValidN,
                             MPU_LAYOUT_MODE_SKEWED);
 
-    launch_mpu_load(MPU_LOCAL_ADDR_C0, SKEW_C_BASE, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_SKEWED, 0U, 27U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM, kValidN, kValidK,
-                     MPU_LAYOUT_MODE_NORMAL, 0U, 28U, 0U);
-    npu_cmd_sync_done();
+    launch_mpu_load_and_wait(MPU_LOCAL_ADDR_C0, SKEW_C_BASE, kValidM, kValidN,
+                             kValidK, MPU_LAYOUT_MODE_SKEWED, 0U);
+    launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM,
+                              kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
 
     return verify_external_i32_tile(STORE_C_DST, kColdTile, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -745,21 +825,39 @@ scenario_store_layout_conversion_skew_to_normal(void)
 }
 
 static int
-scenario_observed_spm_stall_from_retry(void)
+scenario_modeled_spm_stall_and_observed_services(void)
 {
     return scenario_tensor_loop_matmul_acc_first_k_legacy_overwrite();
 }
 
 static int
-scenario_observed_slot_stall_from_bank_conflict(void)
+scenario_modeled_slot_stall_and_observed_services(void)
 {
     return scenario_explicit_offset_compute();
 }
 
 static int
-scenario_multi_mem_port_tensor_loop_throughput(void)
+scenario_single_mem_port_tensor_loop_services(void)
 {
     return scenario_tensor_loop_matmul_acc_first_k_legacy_overwrite();
+}
+
+static int
+scenario_multi_mem_port_tensor_loop_services(void)
+{
+    return scenario_tensor_loop_matmul_acc_first_k_legacy_overwrite();
+}
+
+static int
+scenario_geometry_default_compute_latency(void)
+{
+    return scenario_tensor_loop_k_inner_local_accumulate();
+}
+
+static int
+scenario_geometry_override_compute_latency(void)
+{
+    return scenario_tensor_loop_k_inner_local_accumulate();
 }
 
 static int
@@ -776,23 +874,32 @@ scenario_dma_to_mpu_to_dma_regression(void)
     reference_matmul(kATile, kBTile, NULL, expected, kValidM, kValidN,
                      kValidK, 0);
 
-    launch_dma_move_layout(DRAM_A_SRC, LOAD_A_SRC, (uint32_t)kATileBytes, 41U, 1U);
-    launch_dma_move_layout(DRAM_B_SRC, LOAD_B_SRC, (uint32_t)kBTileBytes, 42U, 1U);
-    npu_launch_sync_wait(DMA_DEVICE_ID, 41U, 0U, 0U, 0U);
-    npu_launch_sync_wait(DMA_DEVICE_ID, 42U, 0U, 0U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 43U, 0U);
-    launch_mpu_load(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM, kValidN, kValidK,
-                    MPU_LAYOUT_MODE_NORMAL, 0U, 44U, 0U);
-    launch_mpu_compute(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
-                       MPU_LOCAL_ADDR_C0, kValidM, kValidN, kValidK,
-                       MPU_SUBOP_MATMUL, MPU_LAYOUT_MODE_NORMAL,
-                       0U, 0U, 0U, 45U, 0U);
-    launch_mpu_store(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM, kValidN,
-                     kValidK, MPU_LAYOUT_MODE_NORMAL, 0U, 46U, 1U);
-    npu_launch_sync_wait(MPU_DEVICE_ID, 46U, 0U, 0U, 0U);
-    launch_dma_move_layout(STORE_C_DST, DRAM_C_DST, (uint32_t)kCTileBytes, 47U, 0U);
-    npu_cmd_sync_done();
+    {
+        const uint32_t sync_a = next_sync_indicator();
+        const uint32_t sync_b = next_sync_indicator();
+        const uint32_t sync_c = next_sync_indicator();
+
+        launch_dma_move_layout(DRAM_A_SRC, LOAD_A_SRC, (uint32_t)kATileBytes,
+                               sync_a, 1U);
+        launch_dma_move_layout(DRAM_B_SRC, LOAD_B_SRC, (uint32_t)kBTileBytes,
+                               sync_b, 1U);
+        wait_for_dma_completion(sync_a);
+        wait_for_dma_completion(sync_b);
+        launch_mpu_load_and_wait(MPU_LOCAL_ADDR_A0, LOAD_A_SRC, kValidM,
+                                 kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+        launch_mpu_load_and_wait(MPU_LOCAL_ADDR_B0, LOAD_B_SRC, kValidM,
+                                 kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL, 0U);
+        launch_mpu_compute_and_wait(MPU_LOCAL_ADDR_A0, MPU_LOCAL_ADDR_B0,
+                                    MPU_LOCAL_ADDR_C0, kValidM, kValidN,
+                                    kValidK, MPU_SUBOP_MATMUL,
+                                    MPU_LAYOUT_MODE_NORMAL, 0U, 0U, 0U);
+        launch_mpu_store_and_wait(MPU_LOCAL_ADDR_C0, STORE_C_DST, kValidM,
+                                  kValidN, kValidK, MPU_LAYOUT_MODE_NORMAL,
+                                  0U);
+        launch_dma_move_layout(STORE_C_DST, DRAM_C_DST, (uint32_t)kCTileBytes,
+                               sync_c, 1U);
+        wait_for_dma_completion(sync_c);
+    }
 
     return verify_external_i32_tile(DRAM_C_DST, expected, kValidM, kValidN,
                                     MPU_LAYOUT_MODE_NORMAL)
@@ -906,14 +1013,23 @@ main(int argc, char **argv)
     if (strcmp(argv[1], "store_layout_conversion_skew_to_normal") == 0) {
         return scenario_store_layout_conversion_skew_to_normal();
     }
-    if (strcmp(argv[1], "observed_spm_stall_from_retry") == 0) {
-        return scenario_observed_spm_stall_from_retry();
+    if (strcmp(argv[1], "modeled_spm_stall_and_observed_services") == 0) {
+        return scenario_modeled_spm_stall_and_observed_services();
     }
-    if (strcmp(argv[1], "observed_slot_stall_from_bank_conflict") == 0) {
-        return scenario_observed_slot_stall_from_bank_conflict();
+    if (strcmp(argv[1], "modeled_slot_stall_and_observed_services") == 0) {
+        return scenario_modeled_slot_stall_and_observed_services();
     }
-    if (strcmp(argv[1], "multi_mem_port_tensor_loop_throughput") == 0) {
-        return scenario_multi_mem_port_tensor_loop_throughput();
+    if (strcmp(argv[1], "single_mem_port_tensor_loop_services") == 0) {
+        return scenario_single_mem_port_tensor_loop_services();
+    }
+    if (strcmp(argv[1], "multi_mem_port_tensor_loop_services") == 0) {
+        return scenario_multi_mem_port_tensor_loop_services();
+    }
+    if (strcmp(argv[1], "geometry_default_compute_latency") == 0) {
+        return scenario_geometry_default_compute_latency();
+    }
+    if (strcmp(argv[1], "geometry_override_compute_latency") == 0) {
+        return scenario_geometry_override_compute_latency();
     }
     if (strcmp(argv[1], "dma_to_mpu_to_dma_regression") == 0) {
         return scenario_dma_to_mpu_to_dma_regression();

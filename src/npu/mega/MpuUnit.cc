@@ -47,9 +47,20 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       arrayKDepth(params.array_k_depth),
       loadBaseLatency(params.load_base_latency),
       storeBaseLatency(params.store_base_latency),
-      arrayFillLatency(params.array_fill_latency),
-      arraySteadyPerK(params.array_steady_per_k),
-      arrayDrainLatency(params.array_drain_latency),
+      arrayFillLatency(
+          params.array_fill_latency != 0 ?
+          params.array_fill_latency :
+          ((params.array_rows > 0 ? params.array_rows - 1 : 0) *
+           params.clk_domain->clockPeriod())),
+      arraySteadyPerK(
+          params.array_steady_per_k != 0 ?
+          params.array_steady_per_k :
+          params.clk_domain->clockPeriod()),
+      arrayDrainLatency(
+          params.array_drain_latency != 0 ?
+          params.array_drain_latency :
+          ((params.array_cols > 0 ? params.array_cols - 1 : 0) *
+           params.clk_domain->clockPeriod())),
       loadBandwidthBytesPerCycle(params.load_bandwidth_bytes_per_cycle),
       storeBandwidthBytesPerCycle(params.store_bandwidth_bytes_per_cycle),
       cReadBaseLatency(params.c_read_base_latency),
@@ -65,6 +76,7 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       currentObservedExecLatency(0),
       activeCmdStartTick(0),
       slotEpochCounter(1),
+      reservedSlotMask(0),
       loadCount(0),
       computeCount(0),
       storeCount(0),
@@ -82,7 +94,13 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       partialSumReloadCountValue(0),
       stallCyclesWaitingForSPMValue(0),
       stallCyclesWaitingForSlotValue(0),
-      observedTotalLatencyValue(0)
+      observedTotalLatencyValue(0),
+      observedLoadServiceCyclesValue(0),
+      observedStoreServiceCyclesValue(0),
+      observedExecServiceCyclesValue(0),
+      tensorLoopSlotUseMaskAValue(0),
+      tensorLoopSlotUseMaskBValue(0),
+      tensorLoopSlotUseMaskCValue(0)
 {
     fatal_if(macroCmdBytes != 64, "%s: MpuUnit requires 64-byte commands",
              name());
@@ -234,9 +252,13 @@ MpuUnit::resetCommandState()
     parsedCmdValid = false;
     iterationPlans.clear();
     pendingLoadTxns.clear();
+    pendingStoreReadyTicks.clear();
+    pendingExecReadyTicks.clear();
+    pendingComputeCommits.clear();
     currentObservedMemWait = 0;
     currentObservedSlotWait = 0;
     currentObservedExecLatency = 0;
+    reservedSlotMask = 0;
     std::fill(localBankReadyTicks.begin(), localBankReadyTicks.end(), 0);
     std::fill(memPortReadyTicks.begin(), memPortReadyTicks.end(), 0);
 }
@@ -456,13 +478,77 @@ MpuUnit::updateSlotResidentWindow(SlotState &slot, uint32_t offset_bytes,
 {
     slot.valid = true;
     slot.dirty = dirty;
-    slot.busy = false;
     slot.shapeM = valid_m;
     slot.shapeN = valid_n;
     slot.shapeK = valid_k;
     slot.residentOffsetBytes = offset_bytes;
     slot.residentLayoutMode = layout_mode;
     slot.epochId = slotEpochCounter++;
+}
+
+void
+MpuUnit::reserveSlot(int slot_index, const char *label)
+{
+    SlotState &slot = slotByIndex(slot_index);
+    panic_if(slot.busy,
+             "MpuUnit: attempted to reserve busy slot %#x for %s",
+             slot.localAddr, label);
+    slot.busy = true;
+    reservedSlotMask |= (1U << slot_index);
+    DPRINTF(MpuUnit, "reserve slot=%#x label=%s mask=%#x\n",
+            slot.localAddr, label, reservedSlotMask);
+}
+
+void
+MpuUnit::releaseReservedSlots()
+{
+    const uint32_t releasing_mask = reservedSlotMask;
+    for (size_t slot_index = 0; slot_index < slots.size(); ++slot_index) {
+        if ((reservedSlotMask & (1U << slot_index)) == 0) {
+            continue;
+        }
+        slots[slot_index].busy = false;
+    }
+    reservedSlotMask = 0;
+    DPRINTF(MpuUnit, "release reserved slots mask=%#x\n", releasing_mask);
+}
+
+void
+MpuUnit::reserveSlotsForCommand(const ParsedCmd &cmd)
+{
+    switch (static_cast<Mode>(cmd.mode)) {
+      case Mode::Load:
+        reserveSlot(slotIndexForAddr(cmd.localAddrA), "load");
+        return;
+      case Mode::Compute:
+        reserveSlot(slotIndexForAddr(cmd.localAddrA), "compute-a");
+        reserveSlot(slotIndexForAddr(cmd.localAddrB), "compute-b");
+        reserveSlot(slotIndexForAddr(cmd.localAddrC), "compute-c");
+        return;
+      case Mode::Store:
+        reserveSlot(slotIndexForAddr(cmd.localAddrC), "store");
+        return;
+      case Mode::TensorLoop: {
+        int slot_a = slotIndexForAddr(cmd.localAddrA);
+        int slot_b = slotIndexForAddr(cmd.localAddrB);
+        int slot_c = slotIndexForAddr(cmd.localAddrC);
+        reserveSlot(slot_a, "tensor-loop-a");
+        reserveSlot(slot_b, "tensor-loop-b");
+        reserveSlot(slot_c, "tensor-loop-c");
+        if (cmd.pingpongA) {
+            reserveSlot(alternateSlotIndex(slot_a), "tensor-loop-a-alt");
+        }
+        if (cmd.pingpongB) {
+            reserveSlot(alternateSlotIndex(slot_b), "tensor-loop-b-alt");
+        }
+        if (cmd.pingpongC) {
+            reserveSlot(alternateSlotIndex(slot_c), "tensor-loop-c-alt");
+        }
+        return;
+      }
+    }
+
+    panic("MpuUnit: unreachable slot reservation");
 }
 
 void
@@ -476,23 +562,7 @@ MpuUnit::clearSlotBusy(int slot_index)
 void
 MpuUnit::markBusyForFineCommand(const ParsedCmd &cmd)
 {
-    switch (static_cast<Mode>(cmd.mode)) {
-      case Mode::Load:
-        slotByIndex(slotIndexForAddr(cmd.localAddrA)).busy = true;
-        return;
-      case Mode::Compute:
-        slotByIndex(slotIndexForAddr(cmd.localAddrA)).busy = true;
-        slotByIndex(slotIndexForAddr(cmd.localAddrB)).busy = true;
-        slotByIndex(slotIndexForAddr(cmd.localAddrC)).busy = true;
-        return;
-      case Mode::Store:
-        slotByIndex(slotIndexForAddr(cmd.localAddrC)).busy = true;
-        return;
-      case Mode::TensorLoop:
-        return;
-    }
-
-    panic("MpuUnit: unreachable busy marker");
+    reserveSlotsForCommand(cmd);
 }
 
 void
@@ -1505,8 +1575,12 @@ MpuUnit::onCommandBegin(ActiveExecution &exec)
         break;
       case Mode::TensorLoop:
         tensorLoopCount++;
+        reserveSlotsForCommand(parsedCmd);
         tensorLoopExpandedTilesCount += iterationPlans.size();
         for (const auto &plan : iterationPlans) {
+            tensorLoopSlotUseMaskAValue |= (1U << plan.tensorSlotA);
+            tensorLoopSlotUseMaskBValue |= (1U << plan.tensorSlotB);
+            tensorLoopSlotUseMaskCValue |= (1U << plan.tensorSlotC);
             tensorLoopExpandedAccTilesCount +=
                 plan.subop == ComputeSubop::MatmulAcc ? 1U : 0U;
             totalInternalLoadsValue +=
@@ -1533,6 +1607,12 @@ MpuUnit::epilogue(ActiveExecution &exec)
 {
     if (exec.iteration + 1 == exec.repetition) {
         observedTotalLatencyValue += curTick() - activeCmdStartTick;
+        panic_if(reservedSlotMask != 0 && slotBusyMask() != reservedSlotMask,
+                 "MpuUnit: reserved slot mask mismatch before release "
+                 "reserved=%#x busy=%#llx",
+                 reservedSlotMask,
+                 static_cast<unsigned long long>(slotBusyMask()));
+        releaseReservedSlots();
     }
 }
 
@@ -1557,7 +1637,8 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
         reqs.push_back(req);
         recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
         pendingLoadTxns.emplace(token, PendingLoadTxn{
-            exec.iteration, PendingLoadKind::SlotLoad, plan->loadSlotIndex});
+            exec.iteration, PendingLoadKind::SlotLoad, plan->loadSlotIndex,
+            curTick()});
         break;
       }
       case Mode::TensorLoop:
@@ -1571,7 +1652,8 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
             reqs.push_back(req);
             recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token++, PendingLoadTxn{
-                exec.iteration, PendingLoadKind::TensorLoadA, plan->tensorSlotA});
+                exec.iteration, PendingLoadKind::TensorLoadA,
+                plan->tensorSlotA, curTick()});
         }
         if (plan->doLoadB) {
             MemRequestDesc req;
@@ -1583,7 +1665,8 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
             reqs.push_back(req);
             recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token++, PendingLoadTxn{
-                exec.iteration, PendingLoadKind::TensorLoadB, plan->tensorSlotB});
+                exec.iteration, PendingLoadKind::TensorLoadB,
+                plan->tensorSlotB, curTick()});
         }
         if (plan->doLoadCOld) {
             MemRequestDesc req;
@@ -1596,7 +1679,7 @@ MpuUnit::buildMvinRequests(ActiveExecution &exec,
             recordMemWait(req.portId, req.size, loadBandwidthBytesPerCycle);
             pendingLoadTxns.emplace(token, PendingLoadTxn{
                 exec.iteration, PendingLoadKind::TensorLoadCOld,
-                plan->tensorSlotC});
+                plan->tensorSlotC, curTick()});
         }
         break;
       case Mode::Compute:
@@ -1615,7 +1698,6 @@ MpuUnit::onMvinResponse(ActiveExecution &exec, const MemTxnContext &txn,
              static_cast<unsigned long long>(txn.token));
 
     const PendingLoadTxn pending = it->second;
-    pendingLoadTxns.erase(it);
     const uint8_t *data = pkt->getConstPtr<uint8_t>();
 
     switch (pending.kind) {
@@ -1701,7 +1783,6 @@ MpuUnit::execute(ActiveExecution &exec)
                                                      plan.validM, plan.validN,
                                                      plan.validK));
       case Mode::Compute: {
-        SlotState &slot_c = slotByIndex(plan.computeSlotC);
         const SlotState &slot_a = slotByIndex(plan.computeSlotA);
         const SlotState &slot_b = slotByIndex(plan.computeSlotB);
         const LocalView view_a = makeLocalView(plan.computeSlotA,
@@ -1726,12 +1807,17 @@ MpuUnit::execute(ActiveExecution &exec)
             readLinearFromSlot(view_c) : std::vector<uint8_t>();
         runMatmul(a_bytes, b_bytes, c_bytes, plan.validM, plan.validN,
                   plan.validK, plan.subop == ComputeSubop::MatmulAcc);
-        writeLinearToSlot(view_c, c_bytes);
-        updateSlotResidentWindow(slot_c, plan.computeOffsetC,
-                                 parsedCmd.dstLayoutMode, plan.validM,
-                                 plan.validN, plan.validK, true);
-        clearSlotBusy(plan.computeSlotA);
-        clearSlotBusy(plan.computeSlotB);
+        pendingComputeCommits[exec.iteration] = PendingComputeCommit{
+            plan.computeSlotC,
+            plan.computeOffsetC,
+            parsedCmd.dstLayoutMode,
+            plan.validM,
+            plan.validN,
+            plan.validK,
+            true,
+            std::move(c_bytes),
+        };
+        pendingExecReadyTicks[exec.iteration] = curTick();
         const Tick latency = observedMatmulExecLatency(
             view_a, view_b, view_c, plan.validK,
             plan.subop == ComputeSubop::MatmulAcc);
@@ -1772,11 +1858,17 @@ MpuUnit::execute(ActiveExecution &exec)
             readLinearFromSlot(view_c) : std::vector<uint8_t>();
         runMatmul(a_bytes, b_bytes, c_bytes, plan.validM, plan.validN,
                   plan.validK, plan.subop == ComputeSubop::MatmulAcc);
-        writeLinearToSlot(view_c, c_bytes);
-        SlotState &slot_c = slotByIndex(plan.tensorSlotC);
-        updateSlotResidentWindow(slot_c, plan.tensorOffsetC,
-                                 plan.tensorLayoutC, plan.validM, plan.validN,
-                                 plan.validK, true);
+        pendingComputeCommits[exec.iteration] = PendingComputeCommit{
+            plan.tensorSlotC,
+            plan.tensorOffsetC,
+            plan.tensorLayoutC,
+            plan.validM,
+            plan.validN,
+            plan.validK,
+            true,
+            std::move(c_bytes),
+        };
+        pendingExecReadyTicks[exec.iteration] = curTick();
         if (plan.subop == ComputeSubop::MatmulAcc) {
             matmulAccCountValue++;
         } else {
@@ -1788,6 +1880,67 @@ MpuUnit::execute(ActiveExecution &exec)
     }
 
     panic("MpuUnit: unreachable execute mode");
+}
+
+void
+MpuUnit::commitPendingCompute(uint64_t iteration)
+{
+    auto it = pendingComputeCommits.find(iteration);
+    if (it == pendingComputeCommits.end()) {
+        return;
+    }
+
+    PendingComputeCommit &commit = it->second;
+    SlotState &slot = slotByIndex(commit.slotIndex);
+    const LocalView view = makeLocalView(commit.slotIndex, commit.offsetBytes,
+                                         commit.layoutMode, commit.validM,
+                                         commit.validN, commit.validK);
+    writeLinearToSlot(view, commit.linearBytes);
+    updateSlotResidentWindow(slot, commit.offsetBytes, commit.layoutMode,
+                             commit.validM, commit.validN, commit.validK,
+                             commit.dirty);
+    pendingComputeCommits.erase(it);
+}
+
+void
+MpuUnit::onMicroOpComplete(ActiveExecution &exec,
+                           const MicroOpContext &ctx,
+                           PacketPtr pkt)
+{
+    (void)exec;
+    (void)pkt;
+
+    switch (ctx.kind) {
+      case MicroOpContext::Kind::Load: {
+        auto it = pendingLoadTxns.find(ctx.token);
+        if (it != pendingLoadTxns.end()) {
+            observedLoadServiceCyclesValue += curTick() - it->second.readyTick;
+            pendingLoadTxns.erase(it);
+        }
+        return;
+      }
+      case MicroOpContext::Kind::Store: {
+        auto it = pendingStoreReadyTicks.find(ctx.token);
+        if (it != pendingStoreReadyTicks.end()) {
+            observedStoreServiceCyclesValue += curTick() - it->second;
+            pendingStoreReadyTicks.erase(it);
+        }
+        return;
+      }
+      case MicroOpContext::Kind::Exec: {
+        auto it = pendingExecReadyTicks.find(ctx.iteration);
+        if (it != pendingExecReadyTicks.end()) {
+            observedExecServiceCyclesValue += curTick() - it->second;
+            pendingExecReadyTicks.erase(it);
+        }
+        commitPendingCompute(ctx.iteration);
+        return;
+      }
+      case MicroOpContext::Kind::SyncWrite:
+        return;
+    }
+
+    panic("MpuUnit: unreachable micro-op completion kind");
 }
 
 void
@@ -1818,6 +1971,7 @@ MpuUnit::buildMvoutRequests(ActiveExecution &exec,
         req.size = req.data.size();
         reqs.push_back(req);
         recordMemWait(req.portId, req.size, storeBandwidthBytesPerCycle);
+        pendingStoreReadyTicks.emplace(nextMemTxnToken, curTick());
         return;
       }
       case Mode::TensorLoop:
@@ -1838,6 +1992,7 @@ MpuUnit::buildMvoutRequests(ActiveExecution &exec,
             req.size = req.data.size();
             reqs.push_back(req);
             recordMemWait(req.portId, req.size, storeBandwidthBytesPerCycle);
+            pendingStoreReadyTicks.emplace(nextMemTxnToken, curTick());
         }
         return;
       case Mode::Load:
@@ -1857,7 +2012,6 @@ MpuUnit::onMvoutResponse(ActiveExecution &exec, const MemTxnContext &txn,
       case Mode::Store: {
         SlotState &slot = slotByIndex(slotIndexForAddr(parsedCmd.localAddrC));
         slot.dirty = false;
-        slot.busy = false;
         return;
       }
       case Mode::TensorLoop: {
@@ -1865,7 +2019,6 @@ MpuUnit::onMvoutResponse(ActiveExecution &exec, const MemTxnContext &txn,
         if (plan.doStoreC) {
             SlotState &slot = slotByIndex(plan.tensorSlotC);
             slot.dirty = false;
-            slot.busy = false;
         }
         return;
       }
@@ -2020,6 +2173,24 @@ MpuUnit::observedTotalLatency() const
 }
 
 uint64_t
+MpuUnit::observedLoadServiceCycles() const
+{
+    return observedLoadServiceCyclesValue;
+}
+
+uint64_t
+MpuUnit::observedStoreServiceCycles() const
+{
+    return observedStoreServiceCyclesValue;
+}
+
+uint64_t
+MpuUnit::observedExecServiceCycles() const
+{
+    return observedExecServiceCyclesValue;
+}
+
+uint64_t
 MpuUnit::partialSumSpillCount() const
 {
     return partialSumSpillCountValue;
@@ -2029,6 +2200,36 @@ uint64_t
 MpuUnit::partialSumReloadCount() const
 {
     return partialSumReloadCountValue;
+}
+
+uint64_t
+MpuUnit::slotBusyMask() const
+{
+    uint64_t mask = 0;
+    for (size_t i = 0; i < slots.size(); ++i) {
+        if (slots[i].busy) {
+            mask |= (1ULL << i);
+        }
+    }
+    return mask;
+}
+
+uint64_t
+MpuUnit::tensorLoopSlotUseMaskA() const
+{
+    return tensorLoopSlotUseMaskAValue;
+}
+
+uint64_t
+MpuUnit::tensorLoopSlotUseMaskB() const
+{
+    return tensorLoopSlotUseMaskBValue;
+}
+
+uint64_t
+MpuUnit::tensorLoopSlotUseMaskC() const
+{
+    return tensorLoopSlotUseMaskCValue;
 }
 
 } // namespace gem5
