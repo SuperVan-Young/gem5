@@ -135,7 +135,6 @@ run_int_case(uint32_t op_code, uint32_t sync_indicator,
              uint32_t repetition, uint32_t dst_port)
 {
     uint32_t actual[ELEM_COUNT];
-    uint32_t current_lhs[ELEM_COUNT];
     const uint32_t write_mask = 1U << dst_port;
 
     clear_slot(SRC0_PORT);
@@ -144,43 +143,33 @@ run_int_case(uint32_t op_code, uint32_t sync_indicator,
     store_u32_vector(SRC0_PORT, lhs, ELEM_COUNT);
     store_u32_vector(SRC1_PORT, rhs, ELEM_COUNT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        current_lhs[idx] = lhs[idx];
-    }
-
-    for (uint32_t iter = 0U; iter < repetition; ++iter) {
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            switch (op_code) {
-              case VPU_OP_VADD:
-                expected[idx] = current_lhs[idx] + rhs[idx];
-                break;
-              case VPU_OP_VSUB:
-                expected[idx] = current_lhs[idx] - rhs[idx];
-                break;
-              case VPU_OP_VMUL:
-                expected[idx] = current_lhs[idx] * rhs[idx];
-                break;
-              case VPU_OP_VDIV: {
-                const int32_t lhs_i32 = (int32_t)current_lhs[idx];
-                const int32_t rhs_i32 = (int32_t)rhs[idx];
-                int32_t value = 0;
-                if (rhs_i32 == 0) {
-                    value = 0;
-                } else if (lhs_i32 == INT32_MIN && rhs_i32 == -1) {
-                    value = INT32_MAX;
-                } else {
-                    value = lhs_i32 / rhs_i32;
-                }
-                memcpy(&expected[idx], &value, sizeof(uint32_t));
-                break;
-              }
-              default:
-                printf("VPU_ELEMWISE_FAIL bad_int_opcode=%u\n", op_code);
-                return -1;
+        switch (op_code) {
+          case VPU_OP_VADD:
+            expected[idx] = lhs[idx] + rhs[idx];
+            break;
+          case VPU_OP_VSUB:
+            expected[idx] = lhs[idx] - rhs[idx];
+            break;
+          case VPU_OP_VMUL:
+            expected[idx] = lhs[idx] * rhs[idx];
+            break;
+          case VPU_OP_VDIV: {
+            const int32_t lhs_i32 = (int32_t)lhs[idx];
+            const int32_t rhs_i32 = (int32_t)rhs[idx];
+            int32_t value = 0;
+            if (rhs_i32 == 0) {
+                value = 0;
+            } else if (lhs_i32 == INT32_MIN && rhs_i32 == -1) {
+                value = INT32_MAX;
+            } else {
+                value = lhs_i32 / rhs_i32;
             }
-
-            if (dst_port == SRC0_PORT) {
-                current_lhs[idx] = expected[idx];
-            }
+            memcpy(&expected[idx], &value, sizeof(uint32_t));
+            break;
+          }
+          default:
+            printf("VPU_ELEMWISE_FAIL bad_int_opcode=%u\n", op_code);
+            return -1;
         }
     }
 
@@ -210,7 +199,6 @@ run_float_case(uint32_t op_code, uint32_t sync_indicator,
                uint32_t dst_port)
 {
     uint32_t actual[ELEM_COUNT];
-    uint32_t current_lhs[ELEM_COUNT];
     const uint32_t write_mask = 1U << dst_port;
 
     clear_slot(SRC0_PORT);
@@ -219,38 +207,29 @@ run_float_case(uint32_t op_code, uint32_t sync_indicator,
     store_u32_vector(SRC0_PORT, lhs_bits, ELEM_COUNT);
     store_u32_vector(SRC1_PORT, rhs_bits, ELEM_COUNT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        current_lhs[idx] = lhs_bits[idx];
-    }
+        const float lhs = bits_to_float(lhs_bits[idx]);
+        const float rhs = bits_to_float(rhs_bits[idx]);
+        float value = 0.0f;
 
-    for (uint32_t iter = 0U; iter < repetition; ++iter) {
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            const float lhs = bits_to_float(current_lhs[idx]);
-            const float rhs = bits_to_float(rhs_bits[idx]);
-            float value = 0.0f;
-
-            switch (op_code) {
-              case VPU_OP_VADD:
-                value = lhs + rhs;
-                break;
-              case VPU_OP_VSUB:
-                value = lhs - rhs;
-                break;
-              case VPU_OP_VMUL:
-                value = lhs * rhs;
-                break;
-              case VPU_OP_VDIV:
-                value = lhs / rhs;
-                break;
-              default:
-                printf("VPU_ELEMWISE_FAIL bad_fp_opcode=%u\n", op_code);
-                return -1;
-            }
-
-            expected_bits[idx] = float_to_bits(value);
-            if (dst_port == SRC0_PORT) {
-                current_lhs[idx] = expected_bits[idx];
-            }
+        switch (op_code) {
+          case VPU_OP_VADD:
+            value = lhs + rhs;
+            break;
+          case VPU_OP_VSUB:
+            value = lhs - rhs;
+            break;
+          case VPU_OP_VMUL:
+            value = lhs * rhs;
+            break;
+          case VPU_OP_VDIV:
+            value = lhs / rhs;
+            break;
+          default:
+            printf("VPU_ELEMWISE_FAIL bad_fp_opcode=%u\n", op_code);
+            return -1;
         }
+
+        expected_bits[idx] = float_to_bits(value);
     }
 
     vpu_cmd_launch_binary(VPU_DEVICE_ID, op_code, sync_indicator, 0x3U,

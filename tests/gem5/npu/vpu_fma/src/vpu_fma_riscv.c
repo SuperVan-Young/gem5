@@ -129,7 +129,6 @@ run_fma_case(uint32_t sync_indicator, const uint32_t *src0,
              uint32_t repetition, uint32_t dst_port)
 {
     uint32_t actual[ELEM_COUNT];
-    uint32_t current_src0[ELEM_COUNT];
     const uint32_t read_mask = (1U << SRC0_PORT) | (1U << SRC1_PORT) |
                                (1U << SRC2_PORT);
     const uint32_t write_mask = 1U << dst_port;
@@ -143,19 +142,10 @@ run_fma_case(uint32_t sync_indicator, const uint32_t *src0,
     store_u32_vector(SRC2_PORT, src2, ELEM_COUNT);
 
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        current_src0[idx] = src0[idx];
-    }
-
-    for (uint32_t iter = 0U; iter < repetition; ++iter) {
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            const float lhs = bits_to_float(current_src0[idx]);
-            const float rhs = bits_to_float(src1[idx]);
-            const float acc = bits_to_float(src2[idx]);
-            expected[idx] = float_to_bits(fmaf(lhs, rhs, acc));
-            if (dst_port == SRC0_PORT) {
-                current_src0[idx] = expected[idx];
-            }
-        }
+        const float lhs = bits_to_float(src0[idx]);
+        const float rhs = bits_to_float(src1[idx]);
+        const float acc = bits_to_float(src2[idx]);
+        expected[idx] = float_to_bits(fmaf(lhs, rhs, acc));
     }
 
     vpu_cmd_launch_ternary(VPU_DEVICE_ID, VPU_OP_VFMA, sync_indicator,
