@@ -41,5 +41,6 @@ typings
 .DS_Store
 .plan
 *.bundle
-src/npu/plan*.md
-tests/gem5/npu/plan*.md
+testing-results/
+src/npu/*plan*.md
+tests/gem5/npu/*plan*.md
