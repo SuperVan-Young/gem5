@@ -17,20 +17,17 @@ class MpuUnit(SpecializedExecutionUnit):
     store_base_latency = Param.Latency(
         "1ns", "Fixed MPU-local latency for fine-grained store handling"
     )
-    array_fill_latency = Param.Latency(
-        "0ns",
-        "Array fill latency component for matrix compute; 0ns enables "
-        "geometry-derived default",
+    array_fill_latency = OptionalParam.Latency(
+        "Array fill latency component for matrix compute; unset uses "
+        "the geometry-derived default"
     )
-    array_steady_per_k = Param.Latency(
-        "0ns",
-        "Per-k steady-state latency component for matrix compute; 0ns "
-        "enables geometry-derived default",
+    array_steady_per_k = OptionalParam.Latency(
+        "Per-k steady-state latency component for matrix compute; unset "
+        "uses the geometry-derived default"
     )
-    array_drain_latency = Param.Latency(
-        "0ns",
-        "Array drain latency component for matrix compute; 0ns enables "
-        "geometry-derived default",
+    array_drain_latency = OptionalParam.Latency(
+        "Array drain latency component for matrix compute; unset uses "
+        "the geometry-derived default"
     )
     load_bandwidth_bytes_per_cycle = Param.Unsigned(
         16, "Modeled MPU-local load bandwidth in bytes per cycle"

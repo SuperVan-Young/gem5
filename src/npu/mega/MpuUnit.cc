@@ -48,17 +48,17 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       loadBaseLatency(params.load_base_latency),
       storeBaseLatency(params.store_base_latency),
       arrayFillLatency(
-          params.array_fill_latency != 0 ?
-          params.array_fill_latency :
+          params.array_fill_latency ?
+          *params.array_fill_latency :
           ((params.array_rows > 0 ? params.array_rows - 1 : 0) *
            params.clk_domain->clockPeriod())),
       arraySteadyPerK(
-          params.array_steady_per_k != 0 ?
-          params.array_steady_per_k :
+          params.array_steady_per_k ?
+          *params.array_steady_per_k :
           params.clk_domain->clockPeriod()),
       arrayDrainLatency(
-          params.array_drain_latency != 0 ?
-          params.array_drain_latency :
+          params.array_drain_latency ?
+          *params.array_drain_latency :
           ((params.array_cols > 0 ? params.array_cols - 1 : 0) *
            params.clk_domain->clockPeriod())),
       loadBandwidthBytesPerCycle(params.load_bandwidth_bytes_per_cycle),
