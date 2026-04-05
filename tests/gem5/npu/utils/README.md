@@ -1,5 +1,7 @@
 # NPU C Helper Layout
 
+> 说明：本目录是 `software_utils/` 的迁移前暂存位置。V2 目标是把这里整体重命名为 `tests/gem5/npu/software_utils/`，并保持现有头文件名与 `#include` 方式不变。
+
 - `npu_mmio.hh`: contiguous `uint32_t` MMIO read/write helpers.
 - `cmd/common.hh`: shared macro-command container, common header fields, field get/set helpers, and launch helpers.
 - `cmd/vpu.hh`: VPU opcode enum plus typed launch helpers for unary, binary,
@@ -28,4 +30,4 @@ Current VPU helper notes:
 - For shared-LUT tests, prefer workload-side result validation plus Python-side
   checks on `LutUnit` and mirrored `VpuUnit` timing counters.
 
-Prefer named field setters/getters for common header bits. Add new files under `utils/cmd/` only when a command view becomes stable and clearly reused.
+Prefer named field setters/getters for common header bits. Add new files under `software_utils/cmd/` only when a command view becomes stable and clearly reused.

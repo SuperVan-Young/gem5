@@ -1,478 +1,199 @@
-# NPU Test Suite Overview
+# NPU 测试 V2 目录与命名规范
 
-This directory contains gem5 integration tests for the NPU-related model under
-`src/npu/mega/`. The tests are not random unit fragments; together they define
-the current executable contract for:
+本文档定义 `tests/gem5/npu` 当前 V2 结构、命名约定，以及从旧目录到新目录的映射原则。它只描述目录组织和职责边界，不包含 testcase 的具体实现细节。
 
-- macro-command MMIO helpers
-- `MegaCmdQueue`
-- sync indicator behavior
-- generic `SpecializedExecutionUnit`
-- multiport SEU behavior against SPM
-- `ScratchpadMemory`
-- `VpuUnit`
-- `LutUnit`
-- `DmaUnit`
-- multi-CPU command submission through independent queue input ports
+## 目标结构
 
-## Test Layout
+当前 checked-in 的 V2 结构下，`tests/gem5/npu` 以三类顶层目录组织：
 
-- `configs/`: shared Python builder used by many tests.
-- `utils/`: reusable C/C++ test helpers for MMIO, command packing, and sync.
-- `mega/`: command-queue-only tests.
-- `seu/`: base SEU tests without SPM data movement.
-- `seu_multiport/`: SEU multiport read/write/repetition tests with SPM.
-- `spm/`: scratchpad memory tests.
-- `vpu/`: legacy multi-instance VPU tests.
-- `vpu_decode_smoke/`: command decode and opcode-shape smoke tests.
-- `vpu_elemwise/`: `VADD/VSUB/VMUL/VDIV` coverage.
-- `vpu_unary/`: `VSCALE/VCVT/VSQRT/VEXP` coverage.
-- `vpu_fma/`: `VFMA` coverage.
-- `vpu_reduce/`: `VREDUCE_SUM/VREDUCE_MAX` coverage.
-- `vpu_loadstore/`: `VLOAD/VSTORE` coverage.
-- `vpu_softmax/`: `VSOFTMAX` correctness plus LUT timing/accounting checks.
-- `dma/`: DMA tensor transfer tests.
-- `system_basic/`: minimal integrated control path with one linear op plus one
-  LUT op.
-- `system_vpu_dual/`: single-CPU test for `2x VPU + shared LUT`.
-- `system_pipeline/`: `DMA + linear VPU + Softmax` integrated path.
-- `system_multiport/`: 2-CPU shared-control test on top of the shared-LUT
-  system pipeline.
-- `sit/`: sync-indicator interaction tests.
-- `tile/`: end-to-end queue + SEU flow test.
-- `4rv/`: 4-core stress test for shared queue infrastructure.
+- `configs/`
+- `utils/`
+- `testcases/`
 
-## Shared Infrastructure
+### `configs/`
 
-### `configs/npu_test_system.py`
+`configs/` 只放公共仿真系统构建相关的 Python 代码。
 
-`NPUTestSystemBuilder` is the common system-construction helper. It hides most
-of the repetitive gem5 wiring:
+职责范围：
 
-- builds a timing-mode `System` with a single `SystemXBar`.
-- can attach `SimpleMemory`, `ScratchpadMemory`, CPUs, workloads, queue, SEU,
-  VPU, and DMA.
-- can build a config-level grouped NPU subsystem with `add_mega_seu()`, which
-  currently owns `lut`, `vpu0`, `vpu1`, and optional `dma`.
-- maps user processes into the NPU MMIO regions.
-- provides helper methods for per-port `MegaCmdQueue` mapping.
+- 构建 gem5 仿真系统的公共 builder
+- 提供多个 testcase 共享的系统拓扑 helper
+- 提供公共的地址映射、组件挂接、结果采样辅助函数
 
-The builder also makes the current address map explicit:
+不应放入的内容：
 
-- command queue base: `0x7000_0000`
-- per-port stride: `1 MiB`
-- sync MMIO base: `0x7100_0000`
-- default SEU/VPU base: `0x7200_0000`
-- DMA base: `0x7400_0000`
-- SPM base: `0x6000_0000`
-- DRAM base used by tests: `0x2000_0000`
-
-Because all devices connect to one `SystemXBar`, the tests also implicitly
-exercise the "data and control share one bus" design used by the current model.
-
-Current recommended system-level ownership shape:
-
-- `system.cmdq`
-- `system.seu.lut`
-- `system.seu.vpu0`
-- `system.seu.vpu1`
-- optional `system.seu.dma`
-
-This is currently a config-level grouping boundary, not yet a dedicated C++
-composite hardware model.
+- testcase 自己的 harness 入口
+- testcase 专有的 workload 代码
+- testcase 的场景说明文档
 
 ### `utils/`
 
-The helper headers here define the software-visible command contract:
+`utils/` 只放给仿真程序使用的公共接口。
 
-- `npu_mmio.hh`: raw 32-bit MMIO read/write helpers.
-- `cmd/common.hh`: `NpuCmd` container, common header bitfields, launch helpers,
-  and device-type enum.
-- `npu_sync.hh`: sync-wait command creation, sync-set MMIO writes, and
-  `sync_done` helper.
+职责范围：
 
-Important note:
+- MMIO 读写 helper
+- 命令打包与发射 helper
+- sync / completion helper
+- workload 侧稳定复用的公共头文件
 
-- `NPU_DEVICE_TYPE_MPU = 0x3` is reserved in helpers, but there is no MPU
-  implementation or MPU test yet.
+不应放入的内容：
 
-## What Each Test Covers
+- Python 仿真系统构建代码
+- testcase 运行注册逻辑
+- testcase 专有数据集
 
-### `mega/`
+### `configs/runner_common.py`
 
-Files:
+`configs/runner_common.py` 提供 testcase harness 入口复用的注册辅助函数。
 
-- `test_megacmdqueue.py`
-- `configs/megacmdqueue_full.py`
-- `src/megacmdqueue_mmio_riscv.c`
+职责范围：
 
-Purpose:
+- 解析 testcase 目录下的 `config.py` 和二进制路径
+- 构造稳定命名的 regex verifier
+- 从 `test.py` 路径推导 testcase 根目录并创建 testcase 本地的 `MakeTarget` / `MakeFixture`
+- 注册单个 testcase 或多 scenario testcase
 
-- validates raw `MegaCmdQueue` MMIO behavior without attaching downstream sync
-  logic.
-- the workload pushes two commands, performs an explicit `pop`, then pushes one
-  more command.
-- the config expects final queue occupancy `== 2`.
+不应放入的内容：
 
-This is mainly a queue staging/control-register sanity test.
+- 仿真系统构建逻辑
+- workload 代码
+- testcase 专有的场景语义
 
-### `seu/`
+### `testcases/`
 
-Files:
+`testcases/` 只放 testcase 本身。
 
-- `test_seu.py`
-- `configs/seu_basic.py`
-- `src/seu_mmio_riscv.c`
+组织原则：
 
-Purpose:
+- 先按模块分类
+- 再按测试项分类
+- 测试项目录尽量扁平化
 
-- validates the base `SpecializedExecutionUnit` in its simplest form.
-- the workload issues 5 VPU-typed commands directly.
-- read mask and write mask are zero, so execution uses no SPM transactions.
-- the config checks counters exposed by the SEU:
-  - completed commands
-  - prologues
-  - executes
-  - epilogues
-  - iterations
-  - read/write response counts
-  - queue empty and not busy at end
+每个测试项目录下的标准文件集为：
 
-This is the clearest test for the generic SEU phase machine.
+- `test.py`
+- `config.py`
+- `Makefile`
+- `workload.c`
+- `README.md`
 
-### `seu_multiport/`
+## 命名约定
 
-Files:
+### 模块目录
 
-- `test_seu_multiport.py`
-- `configs/seu_multiport.py`
-- `src/seu_multiport_riscv.c`
+模块目录使用小写、稳定、可长期复用的模块名，优先按硬件单元或测试域命名。
 
-Purpose:
+推荐模块示例：
 
-- validates multiport SEU behavior against real `ScratchpadMemory`.
-- uses `num_mem_side_ports = 4`.
-- seeds four SPM slots, launches one command with:
-  - `read_mask = 0xB` (ports 0, 1, 3)
-  - `write_mask = 0xE` (ports 1, 2, 3)
-  - `repetition = 3`
-- workload computes the expected slot values in software and polls SPM until
-  the hardware model converges.
-- config also checks the exported SEU counters.
+- `megacmdqueue/`
+- `seu/`
+- `vpu/`
+- `dma/`
+- `spm/`
+- `system/`
 
-This is the best reference for understanding the SEU/VPU default read-signature
-and writeback behavior.
+模块名的要求：
 
-### `spm/`
+- 表达清晰的硬件或功能边界
+- 不使用临时缩写
+- 不使用与单个 testcase 混淆的名字
 
-Files:
+### 测试项目录
 
-- `test_spm.py`
-- `configs/spm_basic.py`
-- `src/spm_test.c`
+测试项目录使用小写 `snake_case`，目录名直接作为该 testcase 的稳定标识。
 
-Purpose:
+示例：
 
-- validates basic read/write behavior of `ScratchpadMemory`.
-- the Python config is intentionally simple and only checks normal process exit.
+- `basic_mmio/`
+- `sync_indicator/`
+- `4rv_sync_stress/`
+- `basic/`
 
-If SPM regressions appear, inspect the workload and saved artifacts under
-`tests/testing-results/`.
+测试项目录名的要求：
 
-### `vpu/`
+- 直接反映测试语义
+- 能独立识别 testcase
+- 尽量保持稳定，不因内部实现变化而频繁改名
 
-Files:
+### 文件命名
 
-- `test_vpu.py`
-- `configs/vpu_basic.py`
-- `src/vpu_test_riscv.c`
-
-Purpose:
-
-- validates two separate `VpuUnit` instances (`vpu0`, `vpu1`) sharing the same
-  SPM.
-- commands target different `device_id` values.
-- each VPU receives two commands with different masks and repetitions.
-- workload computes expected final SPM slot contents and per-VPU stats.
-- config checks both instances independently:
-  - completed commands
-  - prologues
-  - executes
-  - epilogues
-  - read/write responses
-  - iterations
-
-This is the main proof that the current model can represent "two NPU units"
-using separate `VpuUnit` instances.
-
-### `vpu_decode_smoke/`, `vpu_elemwise/`, `vpu_unary/`, `vpu_fma/`,
-### `vpu_reduce/`, `vpu_loadstore/`, `vpu_softmax/`
-
-These directories are the current per-feature VPU regression set.
-
-Purpose:
-
-- `vpu_decode_smoke/`: quick sanity checks for command encoding and decode
-- `vpu_elemwise/`: verifies elementwise arithmetic behavior
-- `vpu_unary/`: verifies unary operations and linear-vs-LUT timing separation
-- `vpu_fma/`: verifies fused multiply-add behavior
-- `vpu_reduce/`: verifies reduction operations
-- `vpu_loadstore/`: verifies resident-buffer `VLOAD/VSTORE` behavior
-- `vpu_softmax/`: verifies `VSOFTMAX` correctness plus direct and mirrored LUT
-  statistics
-
-Together, these tests define the currently supported VPU opcode set more
-accurately than the older `vpu/` directory alone.
-
-### `dma/`
-
-Files:
-
-- `test_dma.py`
-- `configs/dma_proto.py`
-- `src/dma_proto_riscv.c`
-
-Purpose:
-
-- validates `DmaUnit` command decode, address checking, batching, and data
-  movement across DRAM and SPM.
-- supported scenarios:
-  - `basic_dram_to_spm`
-  - `basic_spm_to_dram`
-  - `hwc_to_blocked`
-  - `blocked_to_blocked`
-  - `buffer_size_forces_batching`
-  - `sync_completion`
-  - `invalid_address`
-
-Notable details:
-
-- `buffer_size_forces_batching` shrinks DMA internal buffer size to force
-  multi-batch transfer planning.
-- `sync_completion` checks DMA completion ordering through sync wait plus a
-  second DMA command.
-- `invalid_address` is expected to panic gem5; the test harness treats that as
-  success and matches the panic text on stderr.
-
-This directory is the authoritative spec for the currently implemented DMA
-command format.
-
-### `system_basic/`
-
-Files:
-
-- `test_system_basic.py`
-- `configs/system_basic.py`
-- `src/system_basic_riscv.c`
-
-Purpose:
-
-- validates the minimum queue-driven path after the LUT split.
-- validates the minimal integrated control path:
-  - CPU
-  - `MegaCmdQueue`
-  - sync wait handling
-  - one `VpuUnit`
-  - one attached `LutUnit`
-  - deferred `sync_done` completion
-- workload sequence:
-  - queue one linear VPU op
-  - wait for its sync completion
-  - queue one LUT-backed unary op
-  - call `npu_cmd_sync_done()`
-- config checks:
-  - normal process exit
-  - drained command queue
-  - drained VPU queue
-  - LUT request and command counters
-  - LUT completion later than linear completion
-  - VPU counters for completed commands, phases, iterations, and responses
-
-This is the recommended first bring-up test for the queue-driven nonlinear
-control path.
-
-### `system_vpu_dual/`
-
-Files:
-
-- `test_system_vpu_dual.py`
-- `configs/system_vpu_dual.py`
-- `src/system_vpu_dual_riscv.c`
-
-Purpose:
-
-- validates a single-CPU scenario with:
-  - one `MegaCmdQueue`
-  - two `VpuUnit` instances
-  - one shared `LutUnit`
-  - shared `ScratchpadMemory`
-- workload launches:
-  - one linear op on `vpu0`
-  - one LUT-backed op on `vpu1`
-  - explicit sync release and final `npu_cmd_sync_done()`
-- config checks:
-  - normal process exit
-  - drained command queue
-  - drained VPU queues
-  - shared LUT request and command counters
-  - shared LUT completion tick matches the LUT-using VPU
-  - LUT-backed VPU completes later than the linear VPU
-  - exact per-VPU counters for completed commands, phases, iterations, and
-    responses
-
-This is the recommended bridge between `system_basic/` and the DMA-backed
-pipeline tests.
-
-### `system_pipeline/`
-
-Files:
-
-- `test_system_pipeline.py`
-- `configs/system_pipeline.py`
-- `src/system_pipeline_riscv.c`
-
-Purpose:
-
-- validates a chained near-real pipeline with:
-  - one `MegaCmdQueue`
-  - one `DmaUnit`
-  - one shared `LutUnit`
-  - two `VpuUnit` instances
-  - shared `ScratchpadMemory`
-  - DRAM-backed `SimpleMemory`
-- workload sequence:
-  - seed DRAM with four 32-bit slot values
-  - DMA copies them into SPM
-  - sync wait on DMA completion
-  - VPU0 performs one linear preprocessing op
-  - sync wait on VPU0 completion
-  - VPU1 performs `VSOFTMAX`
-  - sync wait on VPU1 completion
-  - for `copy_back`, a second DMA copies the final softmax vector back to DRAM
-  - final sync wait plus `npu_cmd_sync_done()`
-- workload computes the final linear and softmax contents in software.
-- `spm_only` validates the SPM-visible path.
-- `copy_back` additionally validates the copied-back DRAM words.
-- config checks:
-  - normal process exit
-  - drained queue, DMA, and VPU state
-  - DMA command completion count
-  - shared LUT request and command counters
-  - softmax execute latency later than the linear path
-  - exact per-VPU counters
-
-This is the primary reference for the current
-"DMA -> linear VPU -> softmax VPU" system path.
-
-### `system_multiport/`
-
-Files:
-
-- `test_system_multiport.py`
-- `configs/system_multiport.py`
-- `src/system_multiport_riscv.c`
-
-Purpose:
-
-- validates `MegaCmdQueue(num_input_port=2)` with shared downstream DMA/VPU
-  devices and one shared LUT.
-- CPU roles:
-  - CPU0 seeds DRAM, submits DMA plus a linear VPU op on port 0, and verifies
-    final SPM + DRAM contents after global drain.
-  - CPU1 uses port 1 to submit the LUT-backed softmax stage and copy-back path.
-- the workload uses a small DRAM mailbox for software-side coordination, while
-  hardware ordering is still enforced by queue order and sync waits.
-- config checks:
-  - normal process exit
-  - drained command queue, DMA, and VPU state
-  - exact DMA completion count
-  - shared LUT request and command counters
-  - softmax completion later than linear completion
-  - exact per-VPU counters
-
-This is the current "2 CPU, shared queue, shared LUT" reference test.
-
-### `sit/`
-
-Files:
-
-- `test_sit_sync_indicator.py`
-- `test_sit_launch_sync_launch_sync.py`
-- matching config and source files
-
-Purpose:
-
-- validates sync-indicator-table semantics.
-- `sit_sync_indicator` launches a sync wait, later sets the indicator through
-  MMIO, then fences with `npu_cmd_sync_done()`.
-- `sit_launch_sync_launch_sync` checks repeated "launch -> sync wait" behavior.
-
-These tests exercise the `MegaCmdQueue` special handling for
-`device_type = sync-indicator-table`.
-
-### `tile/`
-
-Files:
-
-- `test_tile_megacmdqueue_seu.py`
-- `configs/tile_megacmdqueue_seu.py`
-- `src/tile_megacmdqueue_seu_riscv.c`
-
-Purpose:
-
-- validates the common deployment shape of `CPU -> MegaCmdQueue -> SEU`.
-- the workload emits 6 commands, then idles.
-- config checks that queue occupancy returns to zero, the SEU queue drains, and
-  the SEU completes at least the expected number of commands.
-
-This is the simplest end-to-end pipeline test.
-
-### `4rv/`
-
-Files:
-
-- `test_4rv_sync_stress.py`
-- `configs/4rv_sync_stress.py`
-- `src/4rv_sync_stress_riscv.c`
-
-Purpose:
-
-- stress-tests shared `MegaCmdQueue` infrastructure with 4 RISC-V CPUs.
-- each CPU uses its own queue input port base:
-  `0x7000_0000 + cpu_id * 1MiB`.
-- each CPU repeatedly enqueues a sync wait and a VPU-like command, then signals
-  its sync indicator.
-- final check requires:
-  - queue empty
-  - SEU queue empty
-  - SEU completed command count equals `num_cpus * rounds`
-
-This is the strongest concurrency test in the current suite.
-
-## Gaps Visible From The Tests
-
-- There is no MPU-specific test because there is no MPU implementation yet.
-- There is still no dedicated C++ composite object that bundles two VPUs, one
-  MPU, one DMA, and one LUT behind a single parent SimObject; current tests use
-  the config-side `add_mega_seu()` grouping.
-- Shared-LUT pressure is covered only at the "single command per VPU" level;
-  there is not yet a dense contention regression.
-- Most tests validate counters, queue state, sync behavior, and address routing;
-  only DMA, SPM, and the newer VPU functional directories validate real payload
-  movement.
-
-## Fast Read Order For Future Agents
-
-To understand the test suite quickly, read in this order:
-
-1. `utils/README.md`
-2. `utils/cmd/common.hh`
-3. `utils/npu_sync.hh`
-4. `configs/npu_test_system.py`
-5. `vpu_unary/src/vpu_unary_riscv.c`
-6. `vpu_softmax/src/vpu_softmax_riscv.c`
-7. `system_pipeline/src/system_pipeline_riscv.c`
-8. `dma/src/dma_proto_riscv.c`
-
-That sequence gives the command format first, then system wiring, then the most
-representative workloads.
+每个 testcase 目录内部文件名固定，不再根据测试项自由变形。
+
+固定文件名：
+
+- `test.py`
+- `config.py`
+- `Makefile`
+- `workload.c`
+- `README.md`
+
+## 目录职责边界
+
+### `test.py`
+
+`test.py` 只负责 testcase 的 harness 入口和注册，不承载仿真系统搭建逻辑。
+
+### `config.py`
+
+`config.py` 只负责 testcase 的仿真系统构建、运行后的结果采样，以及是否通过的判定逻辑。
+
+### `Makefile`
+
+`Makefile` 只负责该 testcase 的 workload 编译和本地清理，不负责目录级全局规则。
+
+编译产物约定：
+
+- testcase 可执行文件统一放在 testcase 目录下的 `bin/`
+- 中间目标文件和依赖文件由 `Makefile` 本地管理
+- 目录级忽略规则由仓库根目录统一维护，新 testcase 不应再额外添加局部 `.gitignore`
+
+### `workload.c`
+
+`workload.c` 只放该 testcase 的仿真程序入口和业务步骤。
+
+### `README.md`
+
+`README.md` 只说明该 testcase 的测试目的、仿真系统、仿真程序、预期行为，正文使用中文。
+
+## 旧目录到新目录的映射原则
+
+旧结构在迁移期间会保留，但新 testcase 以 `testcases/` 为唯一正式入口。映射时遵循以下原则：
+
+1. 一个旧 testcase 应映射到一个新的测试项目录。
+2. 模块名优先按硬件域归类，而不是按历史目录名机械保留。
+3. 同一模块下的多个历史 testcase，如果共享同一类硬件契约，应进入同一模块目录下的不同测试项目录。
+
+### 优先迁移案例映射
+
+| 旧目录 | 新目录 |
+| --- | --- |
+| `mega/` | `testcases/megacmdqueue/basic_mmio/` |
+| `sit/test_sit_sync_indicator.py` | `testcases/megacmdqueue/sync_indicator/` |
+| `sit/test_sit_launch_sync_launch_sync.py` | `testcases/megacmdqueue/launch_sync_launch_sync/` |
+| `4rv/` | `testcases/megacmdqueue/4rv_sync_stress/` |
+| `seu/` | `testcases/seu/basic/` |
+
+### 后续扩展原则
+
+后续其他 testcase 迁移时，默认沿用同样的组织方式：
+
+- 先确定模块目录
+- 再确定 testcase 目录
+- 再在 testcase 目录内使用固定文件集
+
+## 迁移期间的约束
+
+- 不在 testcase 目录内部再引入 `src/` 作为默认结构
+- 不让每个 testcase 自己维护局部忽略规则来解决编译产物问题
+- 不让 `Makefile` 负责跨 testcase 的全局产物清理
+- 不把公共 helper 散落在 testcase 目录中
+- 不把模块级公共逻辑写进 `test.py` 或 `workload.c`
+
+## 当前状态说明
+
+说明：
+
+- 当前仓库实际存在的是 `utils/`，不是 `software_utils/`。
+- `software_utils/` 仍然只是后续可能采用的重命名目标。
+- 本文档描述的 testcase 结构、`test.py` 入口、`configs/runner_common.py` 位置均对应当前代码树。
