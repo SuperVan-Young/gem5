@@ -1,5 +1,0 @@
-# VPU unary build artifacts
-bin/
-src/*.o
-src/*.d
-run_dump/

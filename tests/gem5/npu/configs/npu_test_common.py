@@ -272,6 +272,24 @@ def collect_seu_snapshot(builder, component_name="seu"):
     )
 
 
+def collect_vpu_snapshot(builder, component_name="vpu0"):
+    return collect_builder_component_snapshot(
+        builder,
+        component_name,
+        {
+            "queue_occupancy": "queueOccupancy",
+            "issue_busy": "isIssueBusy",
+            "completed_cmds": "completedCmdCount",
+            "prologues": "prologueCount",
+            "executes": "executeCount",
+            "epilogues": "epilogueCount",
+            "iterations": "completedIterationCount",
+            "read_resps": "completedReadRespCount",
+            "write_resps": "completedWriteRespCount",
+        },
+    )
+
+
 def emit_summary(prefix, snapshot):
     prefix = prefix.upper()
     for key, value in snapshot.items():

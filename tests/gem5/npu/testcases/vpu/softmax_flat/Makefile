@@ -1,0 +1,20 @@
+# Copyright (c) 2026
+# All rights reserved.
+
+OUTDIR := bin
+OUT := $(OUTDIR)/vpu_softmax_flat_riscv
+SRC := workload.c ../../../utils/golden/vpu_softmax.cc
+CXX := riscv64-linux-gnu-g++
+CPPFLAGS := -I../../../utils -I../../../utils/cmd -I../../../utils/golden
+LDFLAGS := -lm
+
+.PHONY: all clean
+
+all: $(OUT)
+
+$(OUT): $(SRC)
+	mkdir -p $(OUTDIR)
+	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $^ $(LDFLAGS)
+
+clean:
+	rm -f $(OUT)
