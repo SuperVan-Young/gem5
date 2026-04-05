@@ -40,3 +40,7 @@ configs/dram/lowp_sweep.cfg
 typings
 .DS_Store
 .plan
+*.bundle
+testing-results/
+src/npu/*plan*.md
+tests/gem5/npu/*plan*.md
