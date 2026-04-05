@@ -1,5 +1,0 @@
-# MegaCmdQueue test build artifacts
-bin/megacmdqueue_mmio_riscv
-src/*.o
-src/*.d
-run_dump/
