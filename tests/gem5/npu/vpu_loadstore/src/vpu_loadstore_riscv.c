@@ -6,13 +6,14 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "npu_assert.hh"
+#include "npu_mem.hh"
 #include "npu_sync.hh"
 #include "vpu.hh"
 
 enum LoadStoreLayout
 {
     VPU_DEVICE_ID = 0U,
-    VPU_SLOT_STRIDE_BYTES = 0x40U,
     PORT0 = 0U,
     PORT1 = 1U,
     ELEM_COUNT = 4U,
@@ -31,55 +32,6 @@ struct VpuStatsExpectation
     uint32_t iterations;
 };
 
-static volatile uint32_t *
-slot_word_ptr(uint32_t port_id)
-{
-    return (volatile uint32_t *)(uintptr_t)(
-        0x60000000UL + ((uint64_t)port_id * VPU_SLOT_STRIDE_BYTES));
-}
-
-static void
-store_u32_vector(uint32_t port_id, const uint32_t *values, uint32_t count)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < count; ++idx) {
-        base[idx] = values[idx];
-    }
-}
-
-static void
-load_u32_vector(uint32_t port_id, uint32_t *values, uint32_t count)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < count; ++idx) {
-        values[idx] = base[idx];
-    }
-}
-
-static int
-wait_vector_match(uint32_t port_id, const uint32_t *expected,
-                  uint32_t count, uint64_t timeout)
-{
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        int matched = 1;
-
-        for (uint32_t idx = 0U; idx < count; ++idx) {
-            if (slot_word_ptr(port_id)[idx] != expected[idx]) {
-                matched = 0;
-                break;
-            }
-        }
-
-        if (matched) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
 int
 main(void)
 {
@@ -92,37 +44,33 @@ main(void)
     uint32_t actual[ELEM_COUNT];
     struct VpuStatsExpectation stats = {2U, 2U, 2U, 2U, 2U, 2U, 2U};
 
-    store_u32_vector(PORT0, src0, ELEM_COUNT);
-    store_u32_vector(PORT1, src1, ELEM_COUNT);
+    npu_spm_store_u32_vector(PORT0, src0, ELEM_COUNT);
+    npu_spm_store_u32_vector(PORT1, src1, ELEM_COUNT);
 
     vpu_cmd_launch_load(VPU_DEVICE_ID, VLOAD_SYNC, 0x3U, ELEM_COUNT,
                         sizeof(uint32_t), VPU_DATA_I32);
     npu_launch_sync_wait(VPU_DEVICE_ID, VLOAD_SYNC, 0U, 0U, 0U);
     npu_cmd_sync_done();
 
-    store_u32_vector(PORT0, poison0, ELEM_COUNT);
-    store_u32_vector(PORT1, poison1, ELEM_COUNT);
+    npu_spm_store_u32_vector(PORT0, poison0, ELEM_COUNT);
+    npu_spm_store_u32_vector(PORT1, poison1, ELEM_COUNT);
 
     vpu_cmd_launch_store(VPU_DEVICE_ID, VSTORE_SYNC, 0x3U, ELEM_COUNT,
                          sizeof(uint32_t), VPU_DATA_I32);
 
-    if (wait_vector_match(PORT0, src0, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(PORT0, actual, ELEM_COUNT);
-        printf("VPU_LOADSTORE_FAIL port0");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%u act[%u]=%u", idx, src0[idx], idx, actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(PORT0),
+                                  src0, ELEM_COUNT, 60000000ULL) != 0) {
+        npu_spm_load_u32_vector(PORT0, actual, ELEM_COUNT);
+        printf("VPU_LOADSTORE_FAIL port0\n");
+        npu_expect_u32_vector("VPU_LOADSTORE_PORT0", src0, actual, ELEM_COUNT);
         return 1;
     }
 
-    if (wait_vector_match(PORT1, src1, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(PORT1, actual, ELEM_COUNT);
-        printf("VPU_LOADSTORE_FAIL port1");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%u act[%u]=%u", idx, src1[idx], idx, actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(PORT1),
+                                  src1, ELEM_COUNT, 60000000ULL) != 0) {
+        npu_spm_load_u32_vector(PORT1, actual, ELEM_COUNT);
+        printf("VPU_LOADSTORE_FAIL port1\n");
+        npu_expect_u32_vector("VPU_LOADSTORE_PORT1", src1, actual, ELEM_COUNT);
         return 1;
     }
 

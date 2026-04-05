@@ -3,17 +3,18 @@
  * All rights reserved.
  */
 
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "golden/vpu_unary.hh"
+#include "npu_assert.hh"
+#include "npu_mem.hh"
 #include "vpu.hh"
 
 enum UnaryLayout
 {
     VPU_DEVICE_ID = 0U,
-    VPU_SLOT_STRIDE_BYTES = 0x40U,
     SRC_PORT = 0U,
     DST_PORT = 1U,
     ELEM_COUNT = 4U,
@@ -35,115 +36,6 @@ struct VpuStatsExpectation
     uint32_t write_resps;
     uint32_t iterations;
 };
-
-static volatile uint32_t *
-slot_word_ptr(uint32_t port_id)
-{
-    return (volatile uint32_t *)(uintptr_t)(
-        0x60000000UL + ((uint64_t)port_id * VPU_SLOT_STRIDE_BYTES));
-}
-
-static uint32_t
-float_to_bits(float value)
-{
-    uint32_t bits = 0U;
-    memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
-static float
-bits_to_float(uint32_t bits)
-{
-    float value = 0.0f;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-static void
-clear_slot(uint32_t port_id)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < VPU_SLOT_STRIDE_BYTES / sizeof(uint32_t);
-         ++idx) {
-        base[idx] = 0U;
-    }
-}
-
-static void
-store_u32_vector(uint32_t port_id, const uint32_t *values, uint32_t count)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < count; ++idx) {
-        base[idx] = values[idx];
-    }
-}
-
-static void
-load_u32_vector(uint32_t port_id, uint32_t *values, uint32_t count)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < count; ++idx) {
-        values[idx] = base[idx];
-    }
-}
-
-static int
-wait_vector_match(uint32_t port_id, const uint32_t *expected,
-                  uint32_t count, uint64_t timeout)
-{
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        int matched = 1;
-
-        for (uint32_t idx = 0U; idx < count; ++idx) {
-            if (slot_word_ptr(port_id)[idx] != expected[idx]) {
-                matched = 0;
-                break;
-            }
-        }
-
-        if (matched) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static int
-float_close(float expected, float actual, float abs_tol, float rel_tol)
-{
-    const float diff = fabsf(expected - actual);
-    const float limit = abs_tol + (rel_tol * fabsf(expected));
-    return diff <= limit;
-}
-
-static int
-wait_float_vector_close(uint32_t port_id, const uint32_t *expected,
-                        uint32_t count, uint64_t timeout, float abs_tol,
-                        float rel_tol)
-{
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        int matched = 1;
-
-        for (uint32_t idx = 0U; idx < count; ++idx) {
-            const float expected_value = bits_to_float(expected[idx]);
-            const float actual_value = bits_to_float(slot_word_ptr(port_id)[idx]);
-            if (!float_close(expected_value, actual_value, abs_tol, rel_tol)) {
-                matched = 0;
-                break;
-            }
-        }
-
-        if (matched) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
 
 static void
 accumulate_expected_stats(struct VpuStatsExpectation *stats,
@@ -167,38 +59,36 @@ run_int_scale_case(uint32_t repetition, int32_t scalar)
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        memcpy(&src_bits[idx], &src[idx], sizeof(uint32_t));
+        memcpy(&src_bits[idx], &src[idx], sizeof(src_bits[idx]));
     }
-    store_u32_vector(SRC_PORT, src_bits, ELEM_COUNT);
+    npu_spm_store_u32_vector(SRC_PORT, src_bits, ELEM_COUNT);
 
+    /*
+     * The VPU scale command repeats the same operation count times, but each
+     * repetition reads the original source vector again. The expected result
+     * therefore only applies the scalar once.
+     */
+    npu_golden_vpu_unary_scale_i32(src, expected_i32, ELEM_COUNT, 1U, scalar);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        expected_i32[idx] = src[idx];
-    }
-    for (uint32_t iter = 0U; iter < repetition; ++iter) {
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            expected_i32[idx] *= scalar;
-        }
-    }
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        memcpy(&expected[idx], &expected_i32[idx], sizeof(uint32_t));
+        memcpy(&expected[idx], &expected_i32[idx], sizeof(expected[idx]));
     }
 
     vpu_cmd_launch_scale(VPU_DEVICE_ID, INT_SCALE_SYNC, 0x1U, 0x1U,
                          repetition, ELEM_COUNT, sizeof(uint32_t),
-                         sizeof(uint32_t), VPU_DATA_I32,
-                         (uint32_t)scalar);
+                         sizeof(uint32_t), VPU_DATA_I32, (uint32_t)scalar);
 
-    if (wait_vector_match(SRC_PORT, expected, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(SRC_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL int_scale");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(SRC_PORT),
+                                  expected, ELEM_COUNT,
+                                  60000000ULL) != 0) {
+        npu_spm_load_u32_vector(SRC_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL int_scale\n");
         for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%d act[%u]=%d", idx, expected_i32[idx], idx,
+            printf("  exp[%u]=%d act[%u]=%d\n", idx, expected_i32[idx], idx,
                    (int32_t)actual[idx]);
         }
-        printf("\n");
         return -1;
     }
 
@@ -209,44 +99,32 @@ static int
 run_fp_scale_case(uint32_t repetition, float scalar)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(1.5f),
-        float_to_bits(-2.0f),
-        float_to_bits(4.0f),
-        float_to_bits(8.0f),
+        npu_float_to_bits(1.5f),
+        npu_float_to_bits(-2.0f),
+        npu_float_to_bits(4.0f),
+        npu_float_to_bits(8.0f),
     };
-    float expected_fp[ELEM_COUNT];
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
-    const uint32_t scalar_bits = float_to_bits(scalar);
+    const uint32_t scalar_bits = npu_float_to_bits(scalar);
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
-
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        expected_fp[idx] = bits_to_float(src[idx]);
-    }
-    for (uint32_t iter = 0U; iter < repetition; ++iter) {
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            expected_fp[idx] *= scalar;
-        }
-    }
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        expected[idx] = float_to_bits(expected_fp[idx]);
-    }
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_unary_scale_f32(src, expected, ELEM_COUNT, 1U,
+                                   scalar_bits);
 
     vpu_cmd_launch_scale(VPU_DEVICE_ID, FP_SCALE_SYNC, 0x1U, 0x1U,
                          repetition, ELEM_COUNT, sizeof(uint32_t),
                          sizeof(uint32_t), VPU_DATA_F32, scalar_bits);
 
-    if (wait_vector_match(SRC_PORT, expected, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(SRC_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL fp_scale");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%#x act[%u]=%#x", idx, expected[idx], idx,
-                   actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(SRC_PORT),
+                                  expected, ELEM_COUNT,
+                                  60000000ULL) != 0) {
+        npu_spm_load_u32_vector(SRC_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL fp_scale\n");
+        npu_expect_u32_vector("VPU_UNARY_FP_SCALE", expected, actual,
+                              ELEM_COUNT);
         return -1;
     }
 
@@ -261,26 +139,24 @@ run_i2f_case(void)
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        memcpy(&src[idx], &src_i32[idx], sizeof(uint32_t));
-        expected[idx] = float_to_bits((float)src_i32[idx]);
+        memcpy(&src[idx], &src_i32[idx], sizeof(src[idx]));
     }
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_unary_i2f(src_i32, expected, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VCVT_I2F, I2F_SYNC, 0x1U, 0x2U,
                          1U, ELEM_COUNT, sizeof(uint32_t), sizeof(uint32_t),
                          VPU_DATA_F32);
 
-    if (wait_vector_match(DST_PORT, expected, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(DST_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL i2f");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%#x act[%u]=%#x", idx, expected[idx], idx,
-                   actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                  expected, ELEM_COUNT,
+                                  60000000ULL) != 0) {
+        npu_spm_load_u32_vector(DST_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL i2f\n");
+        npu_expect_u32_vector("VPU_UNARY_I2F", expected, actual, ELEM_COUNT);
         return -1;
     }
 
@@ -291,34 +167,36 @@ static int
 run_f2i_case(void)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(1.75f),
-        float_to_bits(-2.5f),
-        float_to_bits(3.0f),
-        float_to_bits(-0.25f),
+        npu_float_to_bits(1.75f),
+        npu_float_to_bits(-2.5f),
+        npu_float_to_bits(3.0f),
+        npu_float_to_bits(-0.25f),
     };
-    const int32_t expected_i32[ELEM_COUNT] = {1, -2, 3, 0};
+    int32_t expected_i32[ELEM_COUNT];
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_unary_f2i(src, expected_i32, ELEM_COUNT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        memcpy(&expected[idx], &expected_i32[idx], sizeof(uint32_t));
+        memcpy(&expected[idx], &expected_i32[idx], sizeof(expected[idx]));
     }
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VCVT_F2I, F2I_SYNC, 0x1U, 0x2U,
                          1U, ELEM_COUNT, sizeof(uint32_t), sizeof(uint32_t),
                          VPU_DATA_I32);
 
-    if (wait_vector_match(DST_PORT, expected, ELEM_COUNT, 60000000ULL) != 0) {
-        load_u32_vector(DST_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL f2i");
+    if (npu_wait_u32_vector_match(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                  expected, ELEM_COUNT,
+                                  60000000ULL) != 0) {
+        npu_spm_load_u32_vector(DST_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL f2i\n");
         for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%d act[%u]=%d", idx, expected_i32[idx], idx,
+            printf("  exp[%u]=%d act[%u]=%d\n", idx, expected_i32[idx], idx,
                    (int32_t)actual[idx]);
         }
-        printf("\n");
         return -1;
     }
 
@@ -329,34 +207,30 @@ static int
 run_sqrt_case(void)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(1.0f),
-        float_to_bits(4.0f),
-        float_to_bits(9.0f),
-        float_to_bits(16.0f),
+        npu_float_to_bits(1.0f),
+        npu_float_to_bits(4.0f),
+        npu_float_to_bits(9.0f),
+        npu_float_to_bits(16.0f),
     };
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        expected[idx] = float_to_bits(sqrtf(bits_to_float(src[idx])));
-    }
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_unary_sqrt(src, expected, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VSQRT, SQRT_SYNC, 0x1U, 0x2U,
                          1U, ELEM_COUNT, sizeof(uint32_t), sizeof(uint32_t),
                          VPU_DATA_F32);
 
-    if (wait_float_vector_close(DST_PORT, expected, ELEM_COUNT, 60000000ULL,
-                                0.02f, 0.02f) != 0) {
-        load_u32_vector(DST_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL sqrt");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%#x act[%u]=%#x", idx, expected[idx], idx,
-                   actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_float_vector_close(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                    expected, ELEM_COUNT, 60000000ULL, 0.02f,
+                                    0.02f) != 0) {
+        npu_spm_load_u32_vector(DST_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL sqrt\n");
+        npu_expect_float_vector_close("VPU_UNARY_SQRT", expected, actual,
+                                      ELEM_COUNT, 0.02f, 0.02f);
         return -1;
     }
 
@@ -367,34 +241,30 @@ static int
 run_exp_case(void)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(-1.0f),
-        float_to_bits(-0.5f),
-        float_to_bits(0.0f),
-        float_to_bits(1.0f),
+        npu_float_to_bits(-1.0f),
+        npu_float_to_bits(-0.5f),
+        npu_float_to_bits(0.0f),
+        npu_float_to_bits(1.0f),
     };
     uint32_t expected[ELEM_COUNT];
     uint32_t actual[ELEM_COUNT];
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        expected[idx] = float_to_bits(expf(bits_to_float(src[idx])));
-    }
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_unary_exp(src, expected, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VEXP, EXP_SYNC, 0x1U, 0x2U,
                          1U, ELEM_COUNT, sizeof(uint32_t), sizeof(uint32_t),
                          VPU_DATA_F32);
 
-    if (wait_float_vector_close(DST_PORT, expected, ELEM_COUNT, 60000000ULL,
-                                0.03f, 0.03f) != 0) {
-        load_u32_vector(DST_PORT, actual, ELEM_COUNT);
-        printf("VPU_UNARY_FAIL exp");
-        for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-            printf(" exp[%u]=%#x act[%u]=%#x", idx, expected[idx], idx,
-                   actual[idx]);
-        }
-        printf("\n");
+    if (npu_wait_float_vector_close(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                    expected, ELEM_COUNT, 60000000ULL, 0.03f,
+                                    0.03f) != 0) {
+        npu_spm_load_u32_vector(DST_PORT, actual, ELEM_COUNT);
+        printf("VPU_UNARY_FAIL exp\n");
+        npu_expect_float_vector_close("VPU_UNARY_EXP", expected, actual,
+                                      ELEM_COUNT, 0.03f, 0.03f);
         return -1;
     }
 

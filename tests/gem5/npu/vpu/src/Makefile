@@ -4,7 +4,7 @@
 OUTDIR := ../bin
 OUT := $(OUTDIR)/vpu_test_riscv
 SRC := vpu_test_riscv.c
-CPPFLAGS := -I../../utils -I../../utils/cmd
+CPPFLAGS := -I../../utils -I../../utils/cmd -I../../utils/golden
 
 .PHONY: all clean
 

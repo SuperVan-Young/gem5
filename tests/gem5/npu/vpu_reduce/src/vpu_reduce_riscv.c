@@ -3,17 +3,18 @@
  * All rights reserved.
  */
 
-#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "golden/vpu_reduce.hh"
+#include "npu_assert.hh"
+#include "npu_mem.hh"
 #include "vpu.hh"
 
 enum ReduceLayout
 {
     VPU_DEVICE_ID = 0U,
-    VPU_SLOT_STRIDE_BYTES = 0x40U,
     SRC_PORT = 0U,
     DST_PORT = 1U,
     ELEM_COUNT = 4U,
@@ -33,64 +34,6 @@ struct VpuStatsExpectation
     uint32_t iterations;
 };
 
-static volatile uint32_t *
-slot_word_ptr(uint32_t port_id)
-{
-    return (volatile uint32_t *)(uintptr_t)(
-        0x60000000UL + ((uint64_t)port_id * VPU_SLOT_STRIDE_BYTES));
-}
-
-static uint32_t
-float_to_bits(float value)
-{
-    uint32_t bits = 0U;
-    memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
-static float
-bits_to_float(uint32_t bits)
-{
-    float value = 0.0f;
-    memcpy(&value, &bits, sizeof(value));
-    return value;
-}
-
-static void
-clear_slot(uint32_t port_id)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < VPU_SLOT_STRIDE_BYTES / sizeof(uint32_t);
-         ++idx) {
-        base[idx] = 0U;
-    }
-}
-
-static void
-store_u32_vector(uint32_t port_id, const uint32_t *values, uint32_t count)
-{
-    volatile uint32_t *base = slot_word_ptr(port_id);
-
-    for (uint32_t idx = 0U; idx < count; ++idx) {
-        base[idx] = values[idx];
-    }
-}
-
-static int
-wait_scalar_match(uint32_t port_id, uint32_t expected, uint64_t timeout)
-{
-    volatile uint32_t *slot = slot_word_ptr(port_id);
-
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        if (*slot == expected) {
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
 static void
 accumulate_expected_stats(struct VpuStatsExpectation *stats,
                           uint32_t repetition)
@@ -109,25 +52,26 @@ run_int_reduce_sum_case(void)
 {
     const int32_t src_i32[ELEM_COUNT] = {2, -3, 4, 7};
     uint32_t src[ELEM_COUNT];
-    int32_t sum = 0;
+    int32_t expected_i32 = 0;
     uint32_t expected = 0;
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        memcpy(&src[idx], &src_i32[idx], sizeof(uint32_t));
-        sum += src_i32[idx];
+        memcpy(&src[idx], &src_i32[idx], sizeof(src[idx]));
     }
-    memcpy(&expected, &sum, sizeof(uint32_t));
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_reduce_sum_i32(src_i32, &expected_i32, ELEM_COUNT);
+    memcpy(&expected, &expected_i32, sizeof(expected));
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VREDUCE_SUM, INT_SUM_SYNC,
                          0x1U, 0x2U, 1U, ELEM_COUNT, sizeof(uint32_t),
                          sizeof(uint32_t), VPU_DATA_I32);
 
-    if (wait_scalar_match(DST_PORT, expected, 60000000ULL) != 0) {
-        printf("VPU_REDUCE_FAIL int_sum exp=%d act=%d\n", sum,
-               (int32_t)*slot_word_ptr(DST_PORT));
+    if (npu_wait_u32_scalar_match(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                  expected, 60000000ULL) != 0) {
+        printf("VPU_REDUCE_FAIL int_sum exp=%d act=%d\n", expected_i32,
+               (int32_t)npu_spm_slot_word_ptr_default(DST_PORT)[0]);
         return -1;
     }
 
@@ -138,29 +82,26 @@ static int
 run_fp_reduce_sum_case(void)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(1.5f),
-        float_to_bits(-2.0f),
-        float_to_bits(4.0f),
-        float_to_bits(0.25f),
+        npu_float_to_bits(1.5f),
+        npu_float_to_bits(-2.0f),
+        npu_float_to_bits(4.0f),
+        npu_float_to_bits(0.25f),
     };
-    float sum = 0.0f;
     uint32_t expected = 0;
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        sum += bits_to_float(src[idx]);
-    }
-    expected = float_to_bits(sum);
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_reduce_sum_f32(src, &expected, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VREDUCE_SUM, FP_SUM_SYNC,
                          0x1U, 0x2U, 1U, ELEM_COUNT, sizeof(uint32_t),
                          sizeof(uint32_t), VPU_DATA_F32);
 
-    if (wait_scalar_match(DST_PORT, expected, 60000000ULL) != 0) {
+    if (npu_wait_u32_scalar_match(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                  expected, 60000000ULL) != 0) {
         printf("VPU_REDUCE_FAIL fp_sum exp=%#x act=%#x\n", expected,
-               *slot_word_ptr(DST_PORT));
+               npu_spm_slot_word_ptr_default(DST_PORT)[0]);
         return -1;
     }
 
@@ -171,29 +112,26 @@ static int
 run_fp_reduce_max_case(void)
 {
     const uint32_t src[ELEM_COUNT] = {
-        float_to_bits(-3.0f),
-        float_to_bits(5.5f),
-        float_to_bits(2.25f),
-        float_to_bits(4.0f),
+        npu_float_to_bits(-3.0f),
+        npu_float_to_bits(5.5f),
+        npu_float_to_bits(2.25f),
+        npu_float_to_bits(4.0f),
     };
-    float current_max = -INFINITY;
     uint32_t expected = 0;
 
-    clear_slot(SRC_PORT);
-    clear_slot(DST_PORT);
-    for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
-        current_max = fmaxf(current_max, bits_to_float(src[idx]));
-    }
-    expected = float_to_bits(current_max);
-    store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_spm_clear_slot(SRC_PORT);
+    npu_spm_clear_slot(DST_PORT);
+    npu_spm_store_u32_vector(SRC_PORT, src, ELEM_COUNT);
+    npu_golden_vpu_reduce_max_f32(src, &expected, ELEM_COUNT);
 
     vpu_cmd_launch_unary(VPU_DEVICE_ID, VPU_OP_VREDUCE_MAX, FP_MAX_SYNC,
                          0x1U, 0x2U, 1U, ELEM_COUNT, sizeof(uint32_t),
                          sizeof(uint32_t), VPU_DATA_F32);
 
-    if (wait_scalar_match(DST_PORT, expected, 60000000ULL) != 0) {
+    if (npu_wait_u32_scalar_match(NULL, npu_spm_slot_word_ptr_default(DST_PORT),
+                                  expected, 60000000ULL) != 0) {
         printf("VPU_REDUCE_FAIL fp_max exp=%#x act=%#x\n", expected,
-               *slot_word_ptr(DST_PORT));
+               npu_spm_slot_word_ptr_default(DST_PORT)[0]);
         return -1;
     }
 
