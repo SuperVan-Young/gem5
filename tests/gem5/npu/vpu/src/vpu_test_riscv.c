@@ -6,17 +6,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#include "cmd/common.hh"
-
-enum VpuOpcode
-{
-    VPU_OP_EXEC = 0x0U,
-};
+#include "npu_assert.hh"
+#include "npu_mem.hh"
+#include "vpu.hh"
 
 enum VpuLayout
 {
     VPU_NUM_PORTS = 4U,
-    VPU_SLOT_STRIDE_BYTES = 0x40U,
     VPU0_DEVICE_ID = 0x0U,
     VPU1_DEVICE_ID = 0x1U,
     VPU0_CMD0_SYNC = 0x10U,
@@ -47,13 +43,6 @@ struct VpuStatsExpectation
     uint32_t write_resps;
     uint32_t iterations;
 };
-
-static volatile uint32_t *
-spm_slot_ptr(uint32_t port_id)
-{
-    return (volatile uint32_t *)(uintptr_t)(
-        0x60000000UL + ((uint64_t)port_id * VPU_SLOT_STRIDE_BYTES));
-}
 
 static uint32_t
 popcount32(uint32_t value)
@@ -87,7 +76,7 @@ seed_spm_slots(uint32_t *slots)
     for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
         const uint32_t value = initial_slot_value(port);
         slots[port] = value;
-        *spm_slot_ptr(port) = value;
+        npu_spm_slot_word_ptr_default(port)[0] = value;
     }
 }
 
@@ -136,27 +125,6 @@ accumulate_expected_stats(struct VpuStatsExpectation *stats,
 }
 
 static void
-launch_vpu_cmd(uint32_t device_id, uint32_t sync_indicator,
-               uint32_t read_mask, uint32_t write_mask,
-               uint32_t repetition)
-{
-    NpuCmd cmd;
-
-    cmd.clear();
-    cmd.setDeviceType(NPU_DEVICE_TYPE_VPU);
-    cmd.setDeviceId(device_id);
-    cmd.setOpCode(VPU_OP_EXEC);
-    cmd.setSyncIndicator(sync_indicator);
-    cmd.setSetIndicatorSns(1U);
-    cmd.clearCommonReservedBits();
-    cmd.setWord(1U, read_mask);
-    cmd.setWord(2U, write_mask);
-    cmd.setWord(3U, repetition);
-    cmd.setWord(4U, 0U);
-    cmd.launchCmd();
-}
-
-static void
 print_slot_snapshot(const char *prefix, const uint32_t *slots)
 {
     printf("%s", prefix);
@@ -173,7 +141,7 @@ wait_for_expected_slots(const uint32_t *expected_slots, uint64_t timeout)
         int matched = 1;
 
         for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
-            if (*spm_slot_ptr(port) != expected_slots[port]) {
+            if (npu_spm_slot_word_ptr_default(port)[0] != expected_slots[port]) {
                 matched = 0;
                 break;
             }
@@ -198,29 +166,33 @@ main(void)
     seed_spm_slots(expected_slots);
     print_slot_snapshot("VPU_INITIAL", expected_slots);
 
-    launch_vpu_cmd(VPU1_DEVICE_ID, VPU1_CMD0_SYNC, VPU1_CMD0_READ_MASK,
-                   VPU1_CMD0_WRITE_MASK, VPU1_CMD0_REPETITION);
+    vpu_cmd_launch_legacy_exec(VPU1_DEVICE_ID, VPU1_CMD0_SYNC,
+                               VPU1_CMD0_READ_MASK, VPU1_CMD0_WRITE_MASK,
+                               VPU1_CMD0_REPETITION);
     advance_expected_slots(expected_slots, VPU1_CMD0_READ_MASK,
                            VPU1_CMD0_WRITE_MASK, VPU1_CMD0_REPETITION);
     accumulate_expected_stats(&vpu1_stats, VPU1_CMD0_READ_MASK,
                               VPU1_CMD0_WRITE_MASK, VPU1_CMD0_REPETITION);
 
-    launch_vpu_cmd(VPU0_DEVICE_ID, VPU0_CMD0_SYNC, VPU0_CMD0_READ_MASK,
-                   VPU0_CMD0_WRITE_MASK, VPU0_CMD0_REPETITION);
+    vpu_cmd_launch_legacy_exec(VPU0_DEVICE_ID, VPU0_CMD0_SYNC,
+                               VPU0_CMD0_READ_MASK, VPU0_CMD0_WRITE_MASK,
+                               VPU0_CMD0_REPETITION);
     advance_expected_slots(expected_slots, VPU0_CMD0_READ_MASK,
                            VPU0_CMD0_WRITE_MASK, VPU0_CMD0_REPETITION);
     accumulate_expected_stats(&vpu0_stats, VPU0_CMD0_READ_MASK,
                               VPU0_CMD0_WRITE_MASK, VPU0_CMD0_REPETITION);
 
-    launch_vpu_cmd(VPU1_DEVICE_ID, VPU1_CMD1_SYNC, VPU1_CMD1_READ_MASK,
-                   VPU1_CMD1_WRITE_MASK, VPU1_CMD1_REPETITION);
+    vpu_cmd_launch_legacy_exec(VPU1_DEVICE_ID, VPU1_CMD1_SYNC,
+                               VPU1_CMD1_READ_MASK, VPU1_CMD1_WRITE_MASK,
+                               VPU1_CMD1_REPETITION);
     advance_expected_slots(expected_slots, VPU1_CMD1_READ_MASK,
                            VPU1_CMD1_WRITE_MASK, VPU1_CMD1_REPETITION);
     accumulate_expected_stats(&vpu1_stats, VPU1_CMD1_READ_MASK,
                               VPU1_CMD1_WRITE_MASK, VPU1_CMD1_REPETITION);
 
-    launch_vpu_cmd(VPU0_DEVICE_ID, VPU0_CMD1_SYNC, VPU0_CMD1_READ_MASK,
-                   VPU0_CMD1_WRITE_MASK, VPU0_CMD1_REPETITION);
+    vpu_cmd_launch_legacy_exec(VPU0_DEVICE_ID, VPU0_CMD1_SYNC,
+                               VPU0_CMD1_READ_MASK, VPU0_CMD1_WRITE_MASK,
+                               VPU0_CMD1_REPETITION);
     advance_expected_slots(expected_slots, VPU0_CMD1_READ_MASK,
                            VPU0_CMD1_WRITE_MASK, VPU0_CMD1_REPETITION);
     accumulate_expected_stats(&vpu0_stats, VPU0_CMD1_READ_MASK,
@@ -228,7 +200,7 @@ main(void)
 
     if (wait_for_expected_slots(expected_slots, 60000000ULL) != 0) {
         for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
-            actual_slots[port] = *spm_slot_ptr(port);
+            actual_slots[port] = npu_spm_slot_word_ptr_default(port)[0];
         }
 
         print_slot_snapshot("VPU_EXPECTED", expected_slots);
