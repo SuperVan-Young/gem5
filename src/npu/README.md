@@ -24,7 +24,8 @@ one MPU, one DMA" composite object. Instead, the hardware shape is represented
 implicitly by command routing plus multiple instantiated devices:
 
 - two NPU-like units are modeled by creating two `VpuUnit` instances with
-  different `device_id` values, as in `tests/gem5/npu/vpu/`.
+  different `device_id` values, as in
+  `tests/gem5/npu/testcases/vpu/legacy_dual_device_basic/`.
 - one DMA is modeled by `DmaUnit`.
 - an MPU device type is reserved in the test helper headers
   (`NPU_DEVICE_TYPE_MPU = 0x3`) but there is no MPU SimObject or C++
@@ -419,17 +420,17 @@ For the current nonlinear and shared-LUT baseline, the minimum useful
 regression set is:
 
 - unit-style:
-  - `tests/gem5/npu/vpu_unary`
-  - `tests/gem5/npu/vpu_softmax`
+  - `tests/gem5/npu/testcases/vpu/unary_exp`
+  - `tests/gem5/npu/testcases/vpu/softmax_ramp`
 - system-style:
   - `tests/gem5/npu/system_basic`
-  - `tests/gem5/npu/system_vpu_dual`
+  - `tests/gem5/npu/testcases/system/vpu_dual_release_gate`
   - `tests/gem5/npu/system_pipeline`
   - `tests/gem5/npu/system_multiport`
 
 What each group is intended to catch:
 
-- `vpu_unary`: unary correctness plus linear-vs-LUT timing difference
+- `unary_exp`: unary nonlinear path correctness plus LUT timing behavior
 - `vpu_softmax`: softmax correctness plus LUT accounting
 - `system_basic`: command queue routing, sync order, one linear op plus one LUT
   op

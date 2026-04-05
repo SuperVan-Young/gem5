@@ -1,5 +1,0 @@
-# VPU fma build artifacts
-bin/
-src/*.o
-src/*.d
-run_dump/
