@@ -134,7 +134,7 @@ maskFitsPortCount(uint32_t mask, size_t num_ports)
 
 SpecializedExecutionUnit::CPUSidePort::CPUSidePort(
     const std::string &name, SpecializedExecutionUnit *owner)
-    : ResponsePort(name, owner),
+    : ResponsePort(name),
       owner(owner),
       needRetry(false),
       blockedRespPacket(nullptr),
@@ -207,7 +207,7 @@ SpecializedExecutionUnit::CPUSidePort::getAddrRanges() const
 
 SpecializedExecutionUnit::MemSidePort::MemSidePort(
     const std::string &name, SpecializedExecutionUnit *owner)
-    : RequestPort(name, owner), owner(owner), blockedPacket(nullptr)
+    : RequestPort(name), owner(owner), blockedPacket(nullptr)
 {
 }
 

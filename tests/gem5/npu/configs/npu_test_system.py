@@ -14,11 +14,22 @@ from m5.objects import (
     SEWorkload,
     SimpleMemory,
     SpecializedExecutionUnit,
+    SubSystem,
     SrcClockDomain,
     System,
     SystemXBar,
     VoltageDomain,
 )
+
+try:
+    from m5.objects import VpuUnit
+except ImportError:
+    VpuUnit = None
+
+try:
+    from m5.objects import LutUnit
+except ImportError:
+    LutUnit = None
 
 try:
     from m5.objects import DmaUnit
@@ -64,6 +75,16 @@ class NPUTestSystemBuilder:
         self.cpus = []
         self.processes = []
         self.components = {}
+
+    def _attach_component(self, component, attr_name, parent=None, keys=None):
+        self._require_system()
+        owner = self.system if parent is None else parent
+        setattr(owner, attr_name, component)
+        if keys is None:
+            keys = [attr_name]
+        for key in keys:
+            self.components[key] = component
+        return component
 
     def build_base_system(self):
         self.system = System(
@@ -170,6 +191,8 @@ class NPUTestSystemBuilder:
         range_addr=None,
         num_sync_indicator=DEFAULT_NUM_SYNC_INDICATOR,
         attr_name="cmdq",
+        parent=None,
+        component_keys=None,
     ):
         self._require_system()
         if base_addr is None:
@@ -194,9 +217,12 @@ class NPUTestSystemBuilder:
         if num_sync_indicator is not None:
             cmdq.sync_indicator_side = self.system.membus.mem_side_ports
             cmdq.mem_side = self.system.membus.cpu_side_ports
-        setattr(self.system, attr_name, cmdq)
-        self.components[attr_name] = cmdq
-        return cmdq
+        return self._attach_component(
+            cmdq,
+            attr_name,
+            parent=parent,
+            keys=component_keys,
+        )
 
     def add_seu(
         self,
@@ -207,6 +233,8 @@ class NPUTestSystemBuilder:
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
         attr_name="seu",
+        parent=None,
+        component_keys=None,
     ):
         self._require_system()
         if base_addr is None:
@@ -222,9 +250,89 @@ class NPUTestSystemBuilder:
         seu.cpu_side = self.system.membus.mem_side_ports
         for _ in range(num_mem_side_ports):
             seu.mem_side = self.system.membus.cpu_side_ports
-        setattr(self.system, attr_name, seu)
-        self.components[attr_name] = seu
-        return seu
+        return self._attach_component(
+            seu,
+            attr_name,
+            parent=parent,
+            keys=component_keys,
+        )
+
+    def add_vpu(
+        self,
+        vpu_id,
+        macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
+        num_mem_side_ports=1,
+        base_addr=None,
+        debug_process_latency="50ns",
+        sync_enqueue_on_data_write=True,
+        lut=None,
+        attr_name=None,
+        parent=None,
+        component_keys=None,
+    ):
+        self._require_system()
+        if VpuUnit is None:
+            raise RuntimeError(
+                "VpuUnit is not available in the current build"
+            )
+        if base_addr is None:
+            base_addr = self.addr_map.seu_base + (vpu_id << 20)
+        if attr_name is None:
+            attr_name = f"vpu{vpu_id}"
+        kwargs = {
+            "device_id": vpu_id,
+            "base_addr": base_addr,
+            "macro_cmd_bytes": macro_cmd_bytes,
+            "cmd_queue_depth": cmd_queue_depth,
+            "num_mem_side_ports": num_mem_side_ports,
+            "debug_process_latency": debug_process_latency,
+            "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
+        }
+        if lut is not None:
+            kwargs["lut"] = lut
+        vpu = VpuUnit(
+            **kwargs,
+        )
+        vpu.cpu_side = self.system.membus.mem_side_ports
+        for _ in range(num_mem_side_ports):
+            vpu.mem_side = self.system.membus.cpu_side_ports
+        return self._attach_component(
+            vpu,
+            attr_name,
+            parent=parent,
+            keys=component_keys,
+        )
+
+    def add_lut(
+        self,
+        range_reduction_latency="20ns",
+        lookup_latency="30ns",
+        interpolation_latency="20ns",
+        normalize_latency="20ns",
+        table_entries=257,
+        attr_name="lut",
+        parent=None,
+        component_keys=None,
+    ):
+        self._require_system()
+        if LutUnit is None:
+            raise RuntimeError(
+                "LutUnit is not available in the current build"
+            )
+        lut = LutUnit(
+            range_reduction_latency=range_reduction_latency,
+            lookup_latency=lookup_latency,
+            interpolation_latency=interpolation_latency,
+            normalize_latency=normalize_latency,
+            table_entries=table_entries,
+        )
+        return self._attach_component(
+            lut,
+            attr_name,
+            parent=parent,
+            keys=component_keys,
+        )
 
     def add_dma(
         self,
@@ -234,6 +342,8 @@ class NPUTestSystemBuilder:
         base_addr=None,
         sync_enqueue_on_data_write=True,
         attr_name="dma",
+        parent=None,
+        component_keys=None,
     ):
         self._require_system()
         if DmaUnit is None:
@@ -249,9 +359,88 @@ class NPUTestSystemBuilder:
         )
         dma.cpu_side = self.system.membus.mem_side_ports
         dma.mem_side = self.system.membus.cpu_side_ports
-        setattr(self.system, attr_name, dma)
-        self.components[attr_name] = dma
-        return dma
+        return self._attach_component(
+            dma,
+            attr_name,
+            parent=parent,
+            keys=component_keys,
+        )
+
+    def add_mega_seu(
+        self,
+        num_vpus=2,
+        include_dma=True,
+        macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
+        cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
+        vpu_num_mem_side_ports=1,
+        vpu_debug_process_latency="50ns",
+        vpu_sync_enqueue_on_data_write=True,
+        dma_buffer_size=4096,
+        dma_sync_enqueue_on_data_write=True,
+        lut_range_reduction_latency="20ns",
+        lut_lookup_latency="30ns",
+        lut_interpolation_latency="20ns",
+        lut_normalize_latency="20ns",
+        lut_table_entries=257,
+        base_addr=None,
+        dma_base=None,
+        attr_name="seu",
+        expose_legacy_component_aliases=True,
+    ):
+        self._require_system()
+        if base_addr is None:
+            base_addr = self.addr_map.seu_base
+
+        seu = self._attach_component(SubSystem(), attr_name, keys=[attr_name])
+
+        lut_keys = [f"{attr_name}.lut"]
+        if expose_legacy_component_aliases:
+            lut_keys.append("lut")
+        lut = self.add_lut(
+            range_reduction_latency=lut_range_reduction_latency,
+            lookup_latency=lut_lookup_latency,
+            interpolation_latency=lut_interpolation_latency,
+            normalize_latency=lut_normalize_latency,
+            table_entries=lut_table_entries,
+            attr_name="lut",
+            parent=seu,
+            component_keys=lut_keys,
+        )
+
+        if include_dma:
+            dma_keys = [f"{attr_name}.dma"]
+            if expose_legacy_component_aliases:
+                dma_keys.append("dma")
+            self.add_dma(
+                macro_cmd_bytes=macro_cmd_bytes,
+                cmd_queue_depth=cmd_queue_depth,
+                bank_size=dma_buffer_size,
+                base_addr=dma_base,
+                sync_enqueue_on_data_write=dma_sync_enqueue_on_data_write,
+                attr_name="dma",
+                parent=seu,
+                component_keys=dma_keys,
+            )
+
+        for vpu_id in range(num_vpus):
+            vpu_keys = [f"{attr_name}.vpu{vpu_id}"]
+            if expose_legacy_component_aliases:
+                vpu_keys.append(f"vpu{vpu_id}")
+            self.add_vpu(
+                vpu_id=vpu_id,
+                macro_cmd_bytes=macro_cmd_bytes,
+                cmd_queue_depth=cmd_queue_depth,
+                num_mem_side_ports=vpu_num_mem_side_ports,
+                base_addr=base_addr + (vpu_id << 20),
+                debug_process_latency=vpu_debug_process_latency,
+                sync_enqueue_on_data_write=vpu_sync_enqueue_on_data_write,
+                lut=lut,
+                attr_name=f"vpu{vpu_id}",
+                parent=seu,
+                component_keys=vpu_keys,
+            )
+
+        return seu
 
     def instantiate_root(self, full_system=False):
         self._require_system()
@@ -294,6 +483,27 @@ class NPUTestSystemBuilder:
         if size is None:
             size = 2 * macro_cmd_bytes
         base_addr = self.addr_map.seu_base if base_addr is None else base_addr
+        process.map(base_addr, base_addr, size, False)
+        return process
+
+    def map_vpu(
+        self,
+        vpu_id,
+        process=None,
+        cpu_id=0,
+        size=None,
+        base_addr=None,
+        attr_name=None,
+    ):
+        process = self._resolve_process(process, cpu_id)
+        if attr_name is None:
+            attr_name = f"vpu{vpu_id}"
+        vpu = self.components[attr_name]
+        macro_cmd_bytes = int(vpu.macro_cmd_bytes)
+        if size is None:
+            size = 2 * macro_cmd_bytes
+        if base_addr is None:
+            base_addr = self.addr_map.seu_base + (vpu_id << 20)
         process.map(base_addr, base_addr, size, False)
         return process
 

@@ -1,0 +1,5 @@
+# VPU test build artifacts
+bin/
+src/*.o
+src/*.d
+run_dump/
