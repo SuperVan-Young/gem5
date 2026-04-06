@@ -55,4 +55,3 @@ main(void)
     printf("VPU_SOFTMAX_FLAT_PASS\n");
     return 0;
 }
-

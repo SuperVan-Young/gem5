@@ -27,9 +27,9 @@
 
 import re
 import sys
+import unittest
 from pathlib import Path
 from unittest.mock import patch
-import unittest
 
 repo_root = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(repo_root / "ext"))
@@ -41,8 +41,8 @@ from runner_common import (  # noqa: E402
     NpuScenarioSpec,
     build_verifiers,
     make_binary_config_args,
-    make_testcase_build_fixture,
     make_named_regex_verifier,
+    make_testcase_build_fixture,
     register_npu_scenarios,
     register_npu_test,
     resolve_binary_path,

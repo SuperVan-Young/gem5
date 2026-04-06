@@ -26,7 +26,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "npu/mega/ScratchpadMemory.hh"
+#include "npu/ScratchpadMemory.hh"
 
 #include "base/trace.hh"
 #include "debug/Drain.hh"

@@ -8,7 +8,7 @@ from m5.SimObject import *
 
 class MegaCmdQueue(ClockedObject):
     type = "MegaCmdQueue"
-    cxx_header = "npu/mega/MegaCmdQueue.hh"
+    cxx_header = "npu/MegaCmdQueue.hh"
     cxx_class = "gem5::MegaCmdQueue"
 
     cpu_side = VectorResponsePort("CPU-side request input ports")

@@ -26,7 +26,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "npu/mega/MegaCmdQueue.hh"
+#include "npu/MegaCmdQueue.hh"
 
 #include <algorithm>
 #include <cstring>

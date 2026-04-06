@@ -26,8 +26,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __NPU_MEGA_DMA_UNIT_HH__
-#define __NPU_MEGA_DMA_UNIT_HH__
+#ifndef __NPU_DMA_UNIT_HH__
+#define __NPU_DMA_UNIT_HH__
 
 #include <array>
 #include <cstddef>
@@ -37,7 +37,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "npu/mega/SpecializedExecutionUnit.hh"
+#include "npu/SpecializedExecutionUnit.hh"
 #include "params/DmaUnit.hh"
 
 namespace gem5
@@ -263,4 +263,4 @@ class DmaUnit : public SpecializedExecutionUnit
 
 } // namespace gem5
 
-#endif // __NPU_MEGA_DMA_UNIT_HH__
+#endif // __NPU_DMA_UNIT_HH__

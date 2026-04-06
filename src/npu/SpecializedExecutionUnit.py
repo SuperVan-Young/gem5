@@ -8,7 +8,7 @@ from m5.SimObject import *
 
 class SpecializedExecutionUnit(ClockedObject):
     type = "SpecializedExecutionUnit"
-    cxx_header = "npu/mega/SpecializedExecutionUnit.hh"
+    cxx_header = "npu/SpecializedExecutionUnit.hh"
     cxx_class = "gem5::SpecializedExecutionUnit"
 
     cpu_side = ResponsePort("CPU-side MMIO request input port")

@@ -26,16 +26,16 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __NPU_MEGA_VPU_UNIT_HH__
-#define __NPU_MEGA_VPU_UNIT_HH__
+#ifndef __NPU_VPU_UNIT_HH__
+#define __NPU_VPU_UNIT_HH__
 
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
 
-#include "npu/mega/LutUnit.hh"
-#include "npu/mega/SpecializedExecutionUnit.hh"
+#include "npu/LutUnit.hh"
+#include "npu/SpecializedExecutionUnit.hh"
 #include "params/VpuUnit.hh"
 
 namespace gem5
@@ -262,4 +262,4 @@ class VpuUnit : public SpecializedExecutionUnit
 
 } // namespace gem5
 
-#endif // __NPU_MEGA_VPU_UNIT_HH__
+#endif // __NPU_VPU_UNIT_HH__

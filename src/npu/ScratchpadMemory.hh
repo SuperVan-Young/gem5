@@ -35,8 +35,8 @@
  * deterministic access latency and explicit data management.
  */
 
-#ifndef __NPU_MEGA_SCRATCHPAD_MEMORY_HH__
-#define __NPU_MEGA_SCRATCHPAD_MEMORY_HH__
+#ifndef __NPU_SCRATCHPAD_MEMORY_HH__
+#define __NPU_SCRATCHPAD_MEMORY_HH__
 
 #include <list>
 
@@ -184,4 +184,4 @@ class ScratchpadMemory : public memory::AbstractMemory
 } // namespace npu
 } // namespace gem5
 
-#endif // __NPU_MEGA_SCRATCHPAD_MEMORY_HH__
+#endif // __NPU_SCRATCHPAD_MEMORY_HH__

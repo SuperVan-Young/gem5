@@ -27,4 +27,3 @@ register_npu_test(
         fixtures=(make_testcase_build_fixture(__file__),),
     )
 )
-

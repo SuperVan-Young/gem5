@@ -84,4 +84,3 @@ for key, value in result.items():
 
 if verify_simulation_result(result):
     print("VPU_UNARY_F2I_PASS")
-

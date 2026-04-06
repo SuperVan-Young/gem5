@@ -38,7 +38,7 @@ class ScratchpadMemory(AbstractMemory):
     """
 
     type = "ScratchpadMemory"
-    cxx_header = "npu/mega/ScratchpadMemory.hh"
+    cxx_header = "npu/ScratchpadMemory.hh"
     cxx_class = "gem5::npu::ScratchpadMemory"
 
     port = ResponsePort("This port sends responses and receives requests")

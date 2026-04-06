@@ -190,15 +190,21 @@ def _run_expected_panic(params, config_path, binary_path, scenario):
 
 
 def register_dma_panic_test(reference_file, case_name):
-    from gem5 import verifier
-    from gem5.fixture import Gem5Fixture, TempdirFixture
-    from testlib import TestFunction, TestSuite
-    from testlib.configuration import constants
-
     from runner_common import (
         make_testcase_build_fixture,
         resolve_binary_path,
         resolve_config_path,
+    )
+    from testlib import (
+        TestFunction,
+        TestSuite,
+    )
+    from testlib.configuration import constants
+
+    from gem5 import verifier
+    from gem5.fixture import (
+        Gem5Fixture,
+        TempdirFixture,
     )
 
     spec = get_dma_panic_case(case_name)

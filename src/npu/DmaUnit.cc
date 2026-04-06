@@ -26,7 +26,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "npu/mega/DmaUnit.hh"
+#include "npu/DmaUnit.hh"
 
 #include <algorithm>
 #include <cstring>
@@ -157,6 +157,7 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
                 parsed.dstMemSpace = MemorySpace::Invalid;
                 break;
             }
+            parsed.dstBankId = parsed.bankCfg & 0xfU;
             break;
         }
     }

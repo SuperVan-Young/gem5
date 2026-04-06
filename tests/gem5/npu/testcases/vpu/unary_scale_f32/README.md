@@ -17,4 +17,3 @@ workload 发送一条 `VSCALE` 浮点命令，对 4 个元素执行乘 0.5 运�
 
 仿真结束时，源槽位应被正确更新，VPU 队列应为空，`issue_busy` 应为 false，且各项基础计数都应为 1。
 测试通过时输出稳定的 `VPU_UNARY_SCALE_F32_PASS`。
-

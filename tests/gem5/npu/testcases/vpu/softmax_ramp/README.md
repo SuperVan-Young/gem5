@@ -17,4 +17,3 @@ workload 发送一条 `VSOFTMAX` 命令，对 4 个递增浮点元素做 softmax
 
 仿真结束时，目标槽位应与 golden 结果一致，VPU 队列应为空，`issue_busy` 应为 false，基础计数应为 1，且 LUT 与 softmax 路径的计数/时序应一致。
 测试通过时输出稳定的 `VPU_SOFTMAX_RAMP_PASS`。
-

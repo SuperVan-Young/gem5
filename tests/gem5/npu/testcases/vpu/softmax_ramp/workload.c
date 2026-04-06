@@ -55,4 +55,3 @@ main(void)
     printf("VPU_SOFTMAX_RAMP_PASS\n");
     return 0;
 }
-

@@ -26,8 +26,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef __NPU_MEGA_MEGA_CMD_QUEUE_HH__
-#define __NPU_MEGA_MEGA_CMD_QUEUE_HH__
+#ifndef __NPU_MEGA_CMD_QUEUE_HH__
+#define __NPU_MEGA_CMD_QUEUE_HH__
 
 #include <cstdint>
 #include <deque>
@@ -183,4 +183,4 @@ class MegaCmdQueue : public ClockedObject
 
 } // namespace gem5
 
-#endif // __NPU_MEGA_MEGA_CMD_QUEUE_HH__
+#endif // __NPU_MEGA_CMD_QUEUE_HH__

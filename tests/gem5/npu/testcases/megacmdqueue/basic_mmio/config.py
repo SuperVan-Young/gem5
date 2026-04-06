@@ -17,7 +17,6 @@ from npu_test_common import (  # noqa: E402
 )
 from npu_test_system import NPUTestSystemBuilder  # noqa: E402
 
-
 EXPECTED_EXIT_CAUSE = "exiting with last active thread context"
 EXPECTED_QUEUE_OCCUPANCY = 2
 
