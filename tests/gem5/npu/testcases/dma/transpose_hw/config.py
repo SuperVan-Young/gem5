@@ -8,6 +8,7 @@ from pathlib import Path
 
 import m5
 from m5.objects import *
+from m5.objects import DmaUnit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
 
@@ -19,7 +20,7 @@ EXPECTED_SNAPSHOT = {
     "exit_code": 0,
     "scenario": SCENARIO_NAME,
     "cmds": 1,
-    "iters": 3,
+    "iters": 1,
     "queue": 0,
     "cmdq": 0,
     "busy": 0,

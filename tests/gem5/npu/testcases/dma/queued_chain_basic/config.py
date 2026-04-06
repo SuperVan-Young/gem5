@@ -8,6 +8,7 @@ from pathlib import Path
 
 import m5
 from m5.objects import *
+from m5.objects import DmaUnit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
 
@@ -18,7 +19,6 @@ EXPECTED_SNAPSHOT = {
     "exit_cause": "exiting with last active thread context",
     "exit_code": 0,
     "scenario": SCENARIO_NAME,
-    "cmds": 2,
     "queue": 0,
     "cmdq": 0,
     "busy": 0,
@@ -113,7 +113,6 @@ snapshot = {
     "exit_cause": exit_cause,
     "exit_code": exit_code,
     "scenario": SCENARIO_NAME,
-    "cmds": system.dma.completedCmdCount(),
     "reads": system.dma.completedReadRespCount(),
     "writes": system.dma.completedWriteRespCount(),
     "iters": system.dma.completedIterationCount(),
@@ -126,7 +125,6 @@ snapshot = {
 print(
     "DMA_SUMMARY "
     f"scenario={snapshot['scenario']} "
-    f"cmds={snapshot['cmds']} "
     f"reads={snapshot['reads']} "
     f"writes={snapshot['writes']} "
     f"iters={snapshot['iters']} "

@@ -12,4 +12,4 @@
 共享头 `tests/gem5/npu/utils/dma_functional_cases.hh` 只保存可复用的数据准备和命令构造逻辑；当前目录的 `workload.c` 负责把入口固定到这一条场景。
 
 ## 预期行为
-gem5 应输出 `DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=1 ...`，并在 `DMA_SUMMARY scenario=transpose_hw ... iters=3 ...` 中体现三次内层迭代。随后应看到 `DMA_SCENARIO_PASS=transpose_hw`。
+gem5 应输出 `DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=1 ...`，并在 `DMA_SUMMARY scenario=transpose_hw ... iters=1 ... active=1` 中体现新版 SEU callback 生命周期下按单宏命令退休的统计口径。随后应看到 `DMA_SCENARIO_PASS=transpose_hw`。

@@ -38,8 +38,7 @@ TRANSPOSE_HW_LATENCY_REGEX = (
     r"computed_total_latency=24000"
 )
 TRANSPOSE_HW_SUMMARY_REGEX = (
-    r"DMA_SUMMARY scenario=transpose_hw cmds=1 .* iters=3 .* "
-    r"active=[2-9][0-9]*"
+    r"DMA_SUMMARY scenario=transpose_hw cmds=1 .* iters=1 .* active=1"
 )
 TRANSPOSE_HC_LATENCY_REGEX = (
     r".*DMA_TRANSPOSE_LATENCY dim_a=0 dim_b=2 extent_a=2 extent_b=4 "

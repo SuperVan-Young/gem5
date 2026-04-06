@@ -12,4 +12,4 @@
 共享头 `tests/gem5/npu/utils/dma_functional_cases.hh` 只保存可复用的数据准备和命令构造逻辑；当前目录的 `workload.c` 负责把入口固定到这一条场景。
 
 ## 预期行为
-gem5 最终应输出 `DMA_SCENARIO_PASS=sync_completion`。这说明第二次搬运确实发生在第一次 DMA 完成之后，而不是与其乱序交错。
+gem5 最终应输出 `DMA_SCENARIO_PASS=sync_completion`。这说明第二次搬运确实发生在第一次 DMA 完成之后，而不是与其乱序交错，同时 DMA 队列应已排空。

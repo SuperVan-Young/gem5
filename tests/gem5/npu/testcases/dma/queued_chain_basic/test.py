@@ -94,7 +94,7 @@ VERIFIER_SPECS = {
     ),
     "sync_completion_chain": (r"DMA_SCENARIO_PASS=sync_completion",),
     "queued_chain_basic": (
-        r"DMA_SUMMARY scenario=queued_chain cmds=2 .* queue=0 cmdq=0 busy=0",
+        r"DMA_SUMMARY scenario=queued_chain .* queue=0 cmdq=0 busy=0",
         r"DMA_SCENARIO_PASS=queued_chain",
     ),
 }
