@@ -47,6 +47,27 @@
 namespace gem5
 {
 
+/*
+ * SpecializedExecutionUnit now models a generic SEU as:
+ *
+ *   MMIO staging -> dispatchQueue -> issueQueue -> uopQueue -> callback/event
+ *
+ * The base class owns all scheduling and transaction bookkeeping.
+ * Subclasses are expected to provide command semantics only:
+ *
+ * 1. classify a macro command into load/exec/store,
+ * 2. choose the target issue queue,
+ * 3. emit the first batch of uops in prologue,
+ * 4. use mem/event callbacks to append later uops or mark epilogue pending.
+ *
+ * Important execution rule:
+ *
+ * - uops do not need to be generated all at once in prologue.
+ * - a callback may append more uops later.
+ * - epilogue is not triggered just because the uop queue is temporarily empty.
+ * - a callback must explicitly move the macro command to EpiloguePending.
+ * - prologue/epilogue always assert the uop queue is empty when they run.
+ */
 class SpecializedExecutionUnit : public ClockedObject
 {
   public:
@@ -54,59 +75,23 @@ class SpecializedExecutionUnit : public ClockedObject
     {
         Idle,
         Prologue,
+        Active,
+        EpiloguePending,
         Epilogue,
-        Completing,
+        Done,
     };
 
-    struct MemTxnContext
+    enum class MacroCmdKind : uint8_t
     {
-        enum class Kind
-        {
-            Mvin,
-            Mvout,
-            SyncWrite,
-        };
-
-        PacketPtr pkt = nullptr;
-        PortID portId = InvalidPortID;
-        Kind kind = Kind::Mvin;
-        uint64_t iteration = 0;
-        uint64_t token = 0;
-        Addr addr = 0;
-        size_t size = 0;
+        Load = 0,
+        Exec = 1,
+        Store = 2,
     };
 
-    struct MicroOpContext
+    enum class IssueQueueKind : uint8_t
     {
-        enum class Kind
-        {
-            Load,
-            Exec,
-            Store,
-            SyncWrite,
-        };
-
-        Kind kind = Kind::Load;
-        PortID portId = InvalidPortID;
-        uint64_t iteration = 0;
-        uint64_t token = 0;
-        Addr addr = 0;
-        size_t size = 0;
-        Tick latency = 0;
-    };
-
-    struct MemRequestDesc
-    {
-        // Request description used by the base class to materialize packets.
-        // Subclasses should treat this as a declarative description, not as a
-        // live packet or transaction owner.
-        PortID portId = InvalidPortID;
-        MemTxnContext::Kind kind = MemTxnContext::Kind::Mvin;
-        Addr addr = 0;
-        size_t size = 0;
-        std::vector<uint8_t> data;
-        uint64_t iteration = 0;
-        uint64_t token = 0;
+        Exec = 0,
+        Mem = 1,
     };
 
     struct CmdFields
@@ -119,40 +104,89 @@ class SpecializedExecutionUnit : public ClockedObject
         bool setIndicatorSnd = false;
     };
 
-    struct ActiveExecution
+    /*
+     * MicroOpContext describes an already materialized unit of work that is
+     * ready to execute. The queue stores only uops that are ready right now.
+     * Later callbacks may append more uops into the same queue.
+     */
+    struct MicroOpContext
     {
-        Phase phase = Phase::Idle;
-        std::vector<uint8_t> cmd;
-        CmdFields fields;
-        uint32_t readMask = 0;
-        uint32_t writeMask = 0;
-        uint32_t repetition = 0;
-        uint32_t reserved = 0;
-        uint64_t iteration = 0;
-        uint64_t completedIterations = 0;
-        uint64_t prologueCount = 0;
-        uint64_t executeCount = 0;
-        uint64_t epilogueCount = 0;
-        uint64_t completedReadRespCount = 0;
-        uint64_t completedWriteRespCount = 0;
-        std::vector<PortID> readPorts;
-        std::vector<PortID> writePorts;
-        std::unordered_map<PortID, std::vector<uint8_t>> readResults;
-        std::unordered_map<PortID, std::vector<uint8_t>> writeResults;
-        uint64_t nextIterationToPrepare = 0;
-        uint64_t nextIterationToRetire = 0;
-        bool completionIssued = false;
-        bool finalizePending = false;
+        enum class Kind
+        {
+            Load,
+            Exec,
+            Store,
+            SyncWrite,
+        };
+
+        Kind kind = Kind::Exec;
+        uint64_t macroCmdId = 0;
+        uint32_t ownerIssueQueueId = 0;
+        PortID portId = InvalidPortID;
+        uint64_t token = 0;
+        Addr addr = 0;
+        size_t size = 0;
+        Tick latency = 0;
+        std::vector<uint8_t> data;
     };
 
-    struct IterationState
+    /*
+     * MemTxnContext tracks in-flight packets so the base infrastructure can
+     * route responses back to the owning macro command and issue queue.
+     */
+    struct MemTxnContext
     {
-        bool prepared = false;
-        bool execQueued = false;
-        bool execCompleted = false;
-        bool epilogueDone = false;
-        size_t pendingLoads = 0;
-        size_t pendingStores = 0;
+        enum class Kind
+        {
+            Load,
+            Store,
+            SyncWrite,
+        };
+
+        PacketPtr pkt = nullptr;
+        Kind kind = Kind::Load;
+        uint64_t macroCmdId = 0;
+        uint32_t ownerIssueQueueId = 0;
+        PortID portId = InvalidPortID;
+        uint64_t token = 0;
+        Addr addr = 0;
+        size_t size = 0;
+    };
+
+    /*
+     * MacroCmdContext is the lifecycle object for one macro command.
+     * The base class owns dispatch, issue, callback routing, and completion.
+     * Subclasses are expected to mutate this object only through command
+     * semantic hooks and the protected helper methods below.
+     */
+    struct MacroCmdContext
+    {
+        uint64_t macroCmdId = 0;
+        std::vector<uint8_t> cmd;
+        CmdFields fields;
+        MacroCmdKind kind = MacroCmdKind::Exec;
+        uint32_t targetIssueQueueId = 0;
+        Phase phase = Phase::Idle;
+        bool waitingCallback = false;
+        bool completionIssued = false;
+        bool epilogueQueued = false;
+        std::optional<PortID> boundMemPortId;
+        std::deque<MicroOpContext> uopQueue;
+    };
+
+    /*
+     * IssueQueueState models resource ownership. The queue and the mapped mem
+     * port are intentionally kept separate: the queue represents scheduling
+     * policy, while the optional mem port association represents one default
+     * resource mapping strategy.
+     */
+    struct IssueQueueState
+    {
+        uint32_t issueQueueId = 0;
+        IssueQueueKind kind = IssueQueueKind::Exec;
+        std::deque<uint64_t> waitingMacroCmdIds;
+        std::optional<uint64_t> activeMacroCmdId;
+        std::optional<PortID> mappedMemPortId;
     };
 
   private:
@@ -170,7 +204,6 @@ class SpecializedExecutionUnit : public ClockedObject
         CPUSidePort(const std::string &name, SpecializedExecutionUnit *owner);
 
         void trySendRetry();
-        void setNeedRetry() { needRetry = true; }
 
       protected:
         Tick recvAtomic(PacketPtr pkt) override
@@ -213,24 +246,7 @@ class SpecializedExecutionUnit : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
-    struct QueuedMemOp
-    {
-        MemRequestDesc desc;
-    };
-
-    struct QueuedExecOp
-    {
-        MicroOpContext ctx;
-    };
-
   public:
-    // Port-aware buffer helpers for subclasses. The base class materializes
-    // packets, selects the port, and tracks the transaction lifecycle.
-    bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer,
-                           PortID port_id);
-    bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer,
-                            PortID port_id);
-
     uint64_t queueOccupancy() const;
     uint64_t completedCmdCount() const;
     bool isIssueBusy() const;
@@ -242,62 +258,30 @@ class SpecializedExecutionUnit : public ClockedObject
     uint64_t epilogueCount() const;
     uint64_t maxActiveMicroOps() const;
 
-    virtual void onCommandBegin(ActiveExecution &exec) { (void)exec; }
-    virtual void prologue(ActiveExecution &exec) { (void)exec; }
-    virtual void buildMvinRequests(ActiveExecution &exec,
-                                   std::vector<MemRequestDesc> &reqs)
-    {
-        (void)exec;
-        (void)reqs;
-    }
-    virtual void onMvinResponse(ActiveExecution &exec,
-                                const MemTxnContext &txn,
-                                PacketPtr pkt)
-    {
-        (void)exec;
-        (void)txn;
-        (void)pkt;
-    }
-    virtual Tick execute(ActiveExecution &exec)
-    {
-        (void)exec;
-        return debugProcessLatency;
-    }
-    virtual void buildMvoutRequests(ActiveExecution &exec,
-                                    std::vector<MemRequestDesc> &reqs)
-    {
-        (void)exec;
-        (void)reqs;
-    }
-    virtual void onMvoutResponse(ActiveExecution &exec,
-                                 const MemTxnContext &txn,
-                                 PacketPtr pkt)
-    {
-        (void)exec;
-        (void)txn;
-        (void)pkt;
-    }
-    virtual void epilogue(ActiveExecution &exec) { (void)exec; }
-    virtual bool shouldExit(const ActiveExecution &exec) const
-    {
-        return exec.repetition == 0 ||
-               exec.completedIterations >= exec.repetition;
-    }
-    virtual void onMicroOpComplete(ActiveExecution &exec,
-                                   const MicroOpContext &ctx,
-                                   PacketPtr pkt)
-    {
-        (void)exec;
-        (void)ctx;
-        (void)pkt;
-    }
-
   protected:
-    // Compatibility entry point; completion sync defaults to port 0.
-    virtual void sendCompletionSyncWord(uint32_t word);
-    virtual bool handleMemResponse(PacketPtr pkt);
+    virtual MacroCmdKind classifyMacroCmd(
+        const std::vector<uint8_t> &cmd) const;
+    virtual uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                                        MacroCmdKind kind) const;
+    virtual std::vector<IssueQueueState> buildIssueQueues() const;
+
+    virtual void onMacroCmdBegin(MacroCmdContext &macroCmd);
+    virtual void buildUops(MacroCmdContext &macroCmd);
+    virtual void onMemUopComplete(MacroCmdContext &macroCmd,
+                                  const MemTxnContext &txn, PacketPtr pkt);
+    virtual void onExecUopComplete(MacroCmdContext &macroCmd,
+                                   const MicroOpContext &uop);
+    virtual void onMacroCmdEnd(MacroCmdContext &macroCmd);
+
     virtual bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
                                          uint32_t &word) const;
+    virtual void sendCompletionSyncWord(uint32_t word);
+
+    void appendLoadUop(MacroCmdContext &macroCmd, Addr addr, size_t size);
+    void appendStoreUop(MacroCmdContext &macroCmd, Addr addr, size_t size,
+                        const std::vector<uint8_t> &data);
+    void appendExecUop(MacroCmdContext &macroCmd, Tick latency);
+    void markEpiloguePending(MacroCmdContext &macroCmd);
 
   protected:
     bool validMmioOffset(Addr offset, size_t size) const;
@@ -308,18 +292,38 @@ class SpecializedExecutionUnit : public ClockedObject
     bool handleRequest(PacketPtr pkt);
     void tryScheduleIssue();
     void issueOneCommand();
-    uint32_t extractCmdWord(const std::vector<uint8_t> &cmd) const;
-    CmdFields parseCmdFields(uint32_t word) const;
+    bool handleMemResponse(PacketPtr pkt);
 
+    uint32_t extractCmdWord(const std::vector<uint8_t> &cmd) const;
+    uint32_t readCmdWord(const std::vector<uint8_t> &cmd,
+                         size_t word_idx) const;
+    CmdFields parseCmdFields(uint32_t word) const;
     AddrRangeList getAddrRanges() const;
 
+    IssueQueueState &getIssueQueue(uint32_t issueQueueId);
+    const IssueQueueState &getIssueQueue(uint32_t issueQueueId) const;
+    bool issueQueueExists(uint32_t issueQueueId) const;
+    PortID mappedMemPort(const MacroCmdContext &macroCmd) const;
+
+    void dispatchCommands();
+    void activateIssueQueues();
+    void runPendingEpilogues();
+    void issueReadyUops();
+    void runMacroCmdPrologue(MacroCmdContext &macroCmd);
+    void runMacroCmdEpilogue(MacroCmdContext &macroCmd);
+    void finishMacroCmd(MacroCmdContext &macroCmd);
+    void releaseIssueQueueOwner(uint32_t issueQueueId, uint64_t macroCmdId);
+    void issueOneUop(MacroCmdContext &macroCmd, MicroOpContext uop);
+    void issueMemUop(MacroCmdContext &macroCmd, MicroOpContext uop);
+    void issueExecUop(MacroCmdContext &macroCmd, MicroOpContext uop);
+    void finishExecution(uint32_t issueQueueId);
+    void sendTrackedPacket(const MemTxnContext &txn,
+                           const std::vector<uint8_t> *data = nullptr);
+    void updateConcurrentMicroOps();
+    bool hasSchedulableWork() const;
+
     CPUSidePort cpuSidePort;
-    MemSidePort memSidePort;
     StagingBuffer stagingBuffer;
-    std::deque<std::vector<uint8_t>> cmdQueue;
-    std::vector<std::deque<QueuedMemOp>> loadQueues;
-    std::vector<std::deque<QueuedMemOp>> storeQueues;
-    std::deque<QueuedExecOp> execQueue;
 
     const uint32_t macroCmdBytes;
     const uint32_t cmdQueueDepth;
@@ -327,53 +331,31 @@ class SpecializedExecutionUnit : public ClockedObject
     const bool syncEnqueueOnDataWrite;
     Tick debugProcessLatency;
 
-    bool issueCmdBusy;
-    uint64_t completedCount;
-    uint64_t maxConcurrentMicroOps;
     std::vector<std::unique_ptr<MemSidePort>> memSidePorts;
-    std::vector<uint8_t> activeCmd;
-    ActiveExecution activeExecution;
-    std::unordered_map<uint64_t, IterationState> iterationStates;
+    std::deque<uint64_t> dispatchQueue;
+    std::deque<uint64_t> pendingEpilogueCmdIds;
+    std::vector<IssueQueueState> issueQueues;
+    std::unordered_map<uint64_t, MacroCmdContext> macroCmdContexts;
     std::unordered_map<PacketPtr, MemTxnContext> activeMemTxns;
-    std::optional<MicroOpContext> activeExecOp;
-    std::vector<bool> memPortBusy;
-    uint64_t nextMemTxnToken = 0;
+    std::unordered_map<uint32_t, MicroOpContext> activeExecUops;
+    std::unordered_map<uint32_t, std::unique_ptr<EventFunctionWrapper>>
+        execCompletionEvents;
+
+    uint64_t nextMacroCmdId = 1;
+    uint64_t nextMicroOpToken = 1;
+    uint64_t completedCount = 0;
+    uint64_t completedReadCount = 0;
+    uint64_t completedWriteCount = 0;
+    uint64_t completedIterationValue = 0;
+    uint64_t prologueCountValue = 0;
+    uint64_t executeCountValue = 0;
+    uint64_t epilogueCountValue = 0;
+    uint64_t maxConcurrentMicroOpsValue = 0;
 
     EventFunctionWrapper issueEvent;
-    EventFunctionWrapper finishExecutionEvent;
 
-    // Legacy path retained for compatibility; prefer the port-aware buffer
-    // helpers above.
-    virtual void startExecuteCommand(const std::vector<uint8_t> &cmd);
-    void sendCompletionSyncWord(uint32_t word, PortID port_id);
-
-    void finishExecution();
-    Tick process(const std::vector<uint8_t> &cmd);
-    void completeActiveCommand();
-    void sendMemRequest(PacketPtr pkt);
-    void sendMemRequest(PacketPtr pkt, PortID port_id);
-    bool startBlockingRead(Addr addr, size_t size, uint8_t *buffer);
-    bool startBlockingWrite(Addr addr, size_t size, const uint8_t *buffer);
     MemSidePort &getMemSidePort(PortID idx);
     const MemSidePort &getMemSidePort(PortID idx) const;
-    void beginActiveCommand(ActiveExecution &exec);
-    void updateConcurrentMicroOps();
-    void prepareIteration(ActiveExecution &exec, uint64_t iteration);
-    void issueLoadRequests(ActiveExecution &exec, uint64_t iteration);
-    void enqueueLoadRequest(const MemRequestDesc &req_desc);
-    void enqueueStoreRequest(const MemRequestDesc &req_desc);
-    void enqueueExecOp(uint64_t iteration, Tick latency);
-    void pumpMemPort(PortID port_id);
-    void launchExecIfReady();
-    bool handleMvinResponseInternal(ActiveExecution &exec, PacketPtr pkt);
-    bool handleMvoutResponseInternal(ActiveExecution &exec, PacketPtr pkt);
-    void handleIterationLoadsReady(ActiveExecution &exec, uint64_t iteration);
-    void handleExecCompletion(ActiveExecution &exec,
-                              const MicroOpContext &ctx);
-    void issueStoreRequests(ActiveExecution &exec, uint64_t iteration);
-    void retireCompletedIterations(ActiveExecution &exec);
-    void runEpiloguePhase(ActiveExecution &exec, uint64_t iteration);
-    void finalizeActiveCommand(ActiveExecution &exec);
 
   public:
     SpecializedExecutionUnit(const SpecializedExecutionUnitParams &params);

@@ -33,7 +33,6 @@
 
 #include "base/trace.hh"
 #include "debug/SpecializedExecutionUnit.hh"
-#include "sim/system.hh"
 
 namespace gem5
 {
@@ -44,54 +43,22 @@ namespace
 constexpr Addr SyncIndicatorBase = 0x71000000;
 constexpr Addr DefaultSpmBase = 0x60000000;
 constexpr Addr DefaultSpmSlotStride = 0x40;
-constexpr size_t MultiportReadMaskWord = 1;
-constexpr size_t MultiportWriteMaskWord = 2;
-constexpr size_t MultiportRepetitionWord = 3;
-constexpr size_t MultiportReservedWord = 4;
-
-SpecializedExecutionUnit::MemTxnContext::Kind
-inferTxnKind(PacketPtr pkt)
-{
-    if (pkt->isRead()) {
-        return SpecializedExecutionUnit::MemTxnContext::Kind::Mvin;
-    }
-
-    if (pkt->isWrite() && pkt->getAddr() == SyncIndicatorBase) {
-        return SpecializedExecutionUnit::MemTxnContext::Kind::SyncWrite;
-    }
-
-    return SpecializedExecutionUnit::MemTxnContext::Kind::Mvout;
-}
+constexpr size_t QueueSelectWord = 1;
+constexpr size_t UopCountWord = 2;
+constexpr size_t Aux0Word = 3;
+constexpr size_t Aux1Word = 4;
 
 PacketPtr
 buildPacketFromRequest(const RequestPtr &req,
-                       const SpecializedExecutionUnit::MemRequestDesc &desc)
+                       MemCmd cmd,
+                       const std::vector<uint8_t> *data)
 {
-    const MemCmd cmd =
-        desc.kind == SpecializedExecutionUnit::MemTxnContext::Kind::Mvin ?
-        MemCmd::ReadReq : MemCmd::WriteReq;
     PacketPtr pkt = new Packet(req, cmd);
     pkt->allocate();
-
-    if (desc.kind == SpecializedExecutionUnit::MemTxnContext::Kind::Mvout &&
-        !desc.data.empty()) {
-        pkt->setData(desc.data.data());
+    if (cmd == MemCmd::WriteReq && data && !data->empty()) {
+        pkt->setData(data->data());
     }
-
     return pkt;
-}
-
-uint32_t
-readCmdWord(const std::vector<uint8_t> &cmd, size_t word_idx)
-{
-    const size_t offset = word_idx * sizeof(uint32_t);
-    if (cmd.size() < offset + sizeof(uint32_t)) {
-        return 0;
-    }
-
-    uint32_t word = 0;
-    std::memcpy(&word, cmd.data() + offset, sizeof(word));
-    return word;
 }
 
 std::vector<uint8_t>
@@ -100,34 +67,6 @@ packWord(uint32_t value)
     std::vector<uint8_t> bytes(sizeof(value), 0);
     std::memcpy(bytes.data(), &value, sizeof(value));
     return bytes;
-}
-
-uint32_t
-unpackWord(const std::vector<uint8_t> &bytes)
-{
-    uint32_t value = 0;
-    if (!bytes.empty()) {
-        std::memcpy(&value, bytes.data(),
-                    std::min(bytes.size(), sizeof(value)));
-    }
-    return value;
-}
-
-uint32_t
-defaultInitialSlotValue(PortID port_id)
-{
-    return 0x00010011U + (static_cast<uint32_t>(port_id) * 0x00011111U);
-}
-
-bool
-maskFitsPortCount(uint32_t mask, size_t num_ports)
-{
-    if (num_ports >= 32) {
-        return true;
-    }
-
-    const uint32_t valid_mask = (1U << num_ports) - 1U;
-    return (mask & ~valid_mask) == 0;
 }
 
 } // anonymous namespace
@@ -160,12 +99,10 @@ SpecializedExecutionUnit::CPUSidePort::sendDeferredResponse()
 
     PacketPtr pkt = blockedRespPacket;
     blockedRespPacket = nullptr;
-
     if (!sendTimingResp(pkt)) {
         blockedRespPacket = pkt;
         return;
     }
-
     trySendRetry();
 }
 
@@ -216,7 +153,6 @@ SpecializedExecutionUnit::MemSidePort::sendPacket(PacketPtr pkt)
 {
     panic_if(blockedPacket != nullptr,
              "Should never try to send if blocked!");
-
     if (!sendTimingReq(pkt)) {
         blockedPacket = pkt;
     }
@@ -241,40 +177,32 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
     const SpecializedExecutionUnitParams &params)
     : ClockedObject(params),
       cpuSidePort(params.name + ".cpu_side", this),
-      memSidePort(params.name + ".mem_side_legacy", this),
       macroCmdBytes(params.macro_cmd_bytes),
       cmdQueueDepth(params.cmd_queue_depth),
       baseAddr(params.base_addr),
       syncEnqueueOnDataWrite(params.sync_enqueue_on_data_write),
       debugProcessLatency(params.debug_process_latency),
-      issueCmdBusy(false),
-      completedCount(0),
-      maxConcurrentMicroOps(0),
-      activeCmd(macroCmdBytes, 0),
-      issueEvent([this] { issueOneCommand(); }, name() + ".issueEvent"),
-      finishExecutionEvent([this] { finishExecution(); },
-                           name() + ".finishExecutionEvent")
+      issueEvent([this] { issueOneCommand(); }, name() + ".issueEvent")
 {
     panic_if(params.num_mem_side_ports == 0,
              "SpecializedExecutionUnit requires at least one mem_side port");
 
     stagingBuffer.bytes.resize(macroCmdBytes, 0);
     memSidePorts.reserve(params.num_mem_side_ports);
-    loadQueues.resize(params.num_mem_side_ports);
-    storeQueues.resize(params.num_mem_side_ports);
-    memPortBusy.resize(params.num_mem_side_ports, false);
     for (PortID i = 0; i < params.num_mem_side_ports; ++i) {
         auto port = std::make_unique<MemSidePort>(
             csprintf("%s.mem_side[%d]", params.name, i), this);
         port->portId = i;
         memSidePorts.push_back(std::move(port));
     }
+    issueQueues = buildIssueQueues();
 
     DPRINTF(SpecializedExecutionUnit,
             "Created SEU: base_addr=%#x cmd_bytes=%u queue_depth=%u "
-            "mem_ports=%llu\n",
+            "mem_ports=%llu issue_queues=%llu\n",
             baseAddr, macroCmdBytes, cmdQueueDepth,
-            static_cast<unsigned long long>(memSidePorts.size()));
+            static_cast<unsigned long long>(memSidePorts.size()),
+            static_cast<unsigned long long>(issueQueues.size()));
 }
 
 SpecializedExecutionUnit::~SpecializedExecutionUnit()
@@ -285,7 +213,6 @@ void
 SpecializedExecutionUnit::init()
 {
     ClockedObject::init();
-
     if (cpuSidePort.isConnected()) {
         cpuSidePort.sendRangeChange();
     }
@@ -340,8 +267,9 @@ SpecializedExecutionUnit::validMmioOffset(Addr offset, size_t size) const
 }
 
 bool
-SpecializedExecutionUnit::writeDataBytes(Addr offset, const uint8_t *src,
-                                          size_t size)
+SpecializedExecutionUnit::writeDataBytes(Addr offset,
+                                         const uint8_t *src,
+                                         size_t size)
 {
     if (!validMmioOffset(offset, size)) {
         return false;
@@ -355,18 +283,17 @@ SpecializedExecutionUnit::writeDataBytes(Addr offset, const uint8_t *src,
 bool
 SpecializedExecutionUnit::writeDataChunk(Addr offset, PacketPtr pkt)
 {
-    size_t size = pkt->getSize();
+    const size_t size = pkt->getSize();
     if (!validMmioOffset(offset, size)) {
         return false;
     }
-    const uint8_t *data = pkt->getConstPtr<uint8_t>();
-    return writeDataBytes(offset, data, size);
+    return writeDataBytes(offset, pkt->getConstPtr<uint8_t>(), size);
 }
 
 bool
 SpecializedExecutionUnit::canLaunchCmd() const
 {
-    return cmdQueue.size() < cmdQueueDepth;
+    return queueOccupancy() < cmdQueueDepth;
 }
 
 bool
@@ -374,15 +301,36 @@ SpecializedExecutionUnit::launchStagedCmd()
 {
     if (!canLaunchCmd()) {
         DPRINTF(SpecializedExecutionUnit,
-                "Launch rejected: queue full (%llu/%u)\n",
-                static_cast<unsigned long long>(cmdQueue.size()),
+                "Launch rejected: queue full occupancy=%llu depth=%u\n",
+                static_cast<unsigned long long>(queueOccupancy()),
                 cmdQueueDepth);
         return false;
     }
-    cmdQueue.push_back(stagingBuffer.bytes);
+
+    MacroCmdContext macro_cmd;
+    macro_cmd.macroCmdId = nextMacroCmdId++;
+    macro_cmd.cmd = stagingBuffer.bytes;
+    macro_cmd.fields = parseCmdFields(extractCmdWord(macro_cmd.cmd));
+    macro_cmd.kind = classifyMacroCmd(macro_cmd.cmd);
+    macro_cmd.targetIssueQueueId =
+        classifyIssueQueue(macro_cmd.cmd, macro_cmd.kind);
+    panic_if(!issueQueueExists(macro_cmd.targetIssueQueueId),
+             "%s: macro command chose missing issue queue %u",
+             name(), macro_cmd.targetIssueQueueId);
+    if (const auto &queue = getIssueQueue(macro_cmd.targetIssueQueueId);
+        queue.mappedMemPortId.has_value()) {
+        macro_cmd.boundMemPortId = queue.mappedMemPortId;
+    }
+
+    macroCmdContexts.emplace(macro_cmd.macroCmdId, std::move(macro_cmd));
+    dispatchQueue.push_back(nextMacroCmdId - 1);
+
     DPRINTF(SpecializedExecutionUnit,
-            "Launched command, queue size now %llu\n",
-            static_cast<unsigned long long>(cmdQueue.size()));
+            "Launched macro command id=%llu dispatch=%llu occupancy=%llu\n",
+            static_cast<unsigned long long>(nextMacroCmdId - 1),
+            static_cast<unsigned long long>(dispatchQueue.size()),
+            static_cast<unsigned long long>(queueOccupancy()));
+
     tryScheduleIssue();
     return true;
 }
@@ -394,33 +342,26 @@ SpecializedExecutionUnit::handleRequest(PacketPtr pkt)
         panic("SpecializedExecutionUnit only accepts write requests");
     }
 
-    Addr addr = pkt->getAddr();
-    Addr offset = addr - baseAddr;
-
+    const Addr addr = pkt->getAddr();
+    const Addr offset = addr - baseAddr;
     if (!validMmioOffset(offset, pkt->getSize())) {
         panic("MMIO write out of bounds: addr=%#x offset=%#x size=%u",
               addr, offset, pkt->getSize());
     }
 
     DPRINTF(SpecializedExecutionUnit,
-            "MMIO write: addr=%#x offset=%#x size=%u\n",
+            "MMIO write addr=%#x offset=%#x size=%u\n",
             addr, offset, pkt->getSize());
 
     bool success = true;
     if (offset < macroCmdBytes) {
-        // Staging area write
         writeDataChunk(offset, pkt);
-
         if (syncEnqueueOnDataWrite && offset == 0) {
             success = launchStagedCmd();
         }
     } else {
-        // Control area write - trigger launch
         success = launchStagedCmd();
     }
-
-    // Response will be sent in the next cycle by CPUSidePort::recvTimingReq
-    // Do not send response here
 
     return success;
 }
@@ -428,547 +369,495 @@ SpecializedExecutionUnit::handleRequest(PacketPtr pkt)
 void
 SpecializedExecutionUnit::tryScheduleIssue()
 {
-    if (!issueEvent.scheduled() && !cmdQueue.empty() && !issueCmdBusy) {
+    if (!issueEvent.scheduled() && hasSchedulableWork()) {
         schedule(issueEvent, nextCycle());
     }
+}
+
+bool
+SpecializedExecutionUnit::hasSchedulableWork() const
+{
+    if (!dispatchQueue.empty() || !pendingEpilogueCmdIds.empty()) {
+        return true;
+    }
+
+    for (const auto &queue : issueQueues) {
+        if (queue.activeMacroCmdId.has_value() ||
+            !queue.waitingMacroCmdIds.empty()) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 void
 SpecializedExecutionUnit::issueOneCommand()
 {
-    if (issueCmdBusy || cmdQueue.empty()) {
+    runPendingEpilogues();
+    dispatchCommands();
+    activateIssueQueues();
+    issueReadyUops();
+
+    if (hasSchedulableWork()) {
+        tryScheduleIssue();
+    }
+}
+
+void
+SpecializedExecutionUnit::dispatchCommands()
+{
+    while (!dispatchQueue.empty()) {
+        const uint64_t macro_id = dispatchQueue.front();
+        dispatchQueue.pop_front();
+        auto it = macroCmdContexts.find(macro_id);
+        if (it == macroCmdContexts.end()) {
+            continue;
+        }
+
+        auto &macro_cmd = it->second;
+        auto &queue = getIssueQueue(macro_cmd.targetIssueQueueId);
+        queue.waitingMacroCmdIds.push_back(macro_id);
+
+        DPRINTF(SpecializedExecutionUnit,
+                "Dispatch macro=%llu to issue_queue=%u waiters=%llu\n",
+                static_cast<unsigned long long>(macro_id),
+                macro_cmd.targetIssueQueueId,
+                static_cast<unsigned long long>(
+                    queue.waitingMacroCmdIds.size()));
+    }
+}
+
+void
+SpecializedExecutionUnit::activateIssueQueues()
+{
+    for (auto &queue : issueQueues) {
+        if (queue.activeMacroCmdId.has_value() ||
+            queue.waitingMacroCmdIds.empty()) {
+            continue;
+        }
+
+        const uint64_t macro_id = queue.waitingMacroCmdIds.front();
+        queue.waitingMacroCmdIds.pop_front();
+        queue.activeMacroCmdId = macro_id;
+
+        auto it = macroCmdContexts.find(macro_id);
+        panic_if(it == macroCmdContexts.end(),
+                 "%s: missing macro command %llu during activation",
+                 name(), static_cast<unsigned long long>(macro_id));
+        runMacroCmdPrologue(it->second);
+    }
+}
+
+void
+SpecializedExecutionUnit::runMacroCmdPrologue(MacroCmdContext &macroCmd)
+{
+    panic_if(!macroCmd.uopQueue.empty(),
+             "%s: prologue requires empty uop queue for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
+
+    macroCmd.phase = Phase::Prologue;
+    prologueCountValue++;
+    onMacroCmdBegin(macroCmd);
+    buildUops(macroCmd);
+
+    if (macroCmd.phase == Phase::EpiloguePending) {
+        markEpiloguePending(macroCmd);
         return;
     }
 
-    std::vector<uint8_t> cmd = cmdQueue.front();
-    cmdQueue.pop_front();
-    activeCmd = cmd;
-    issueCmdBusy = true;
-
-    DPRINTF(SpecializedExecutionUnit,
-            "Issuing command, queue size now %llu\n",
-            static_cast<unsigned long long>(cmdQueue.size()));
-
-    startExecuteCommand(activeCmd);
+    macroCmd.phase = Phase::Active;
 }
 
 void
-SpecializedExecutionUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
+SpecializedExecutionUnit::issueReadyUops()
 {
-    activeExecution.cmd = cmd;
-    beginActiveCommand(activeExecution);
-    prepareIteration(activeExecution, 0);
+    for (auto &queue : issueQueues) {
+        if (!queue.activeMacroCmdId.has_value()) {
+            continue;
+        }
+
+        auto it = macroCmdContexts.find(*queue.activeMacroCmdId);
+        if (it == macroCmdContexts.end()) {
+            continue;
+        }
+        auto &macro_cmd = it->second;
+
+        if (macro_cmd.phase != Phase::Active ||
+            macro_cmd.waitingCallback || macro_cmd.uopQueue.empty()) {
+            continue;
+        }
+
+        MicroOpContext uop = std::move(macro_cmd.uopQueue.front());
+        macro_cmd.uopQueue.pop_front();
+        issueOneUop(macro_cmd, std::move(uop));
+    }
 }
 
 void
-SpecializedExecutionUnit::completeActiveCommand()
+SpecializedExecutionUnit::issueOneUop(MacroCmdContext &macroCmd,
+                                      MicroOpContext uop)
 {
-    issueCmdBusy = false;
+    panic_if(macroCmd.phase != Phase::Active,
+             "%s: issueOneUop requires Active phase for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
 
-    uint32_t syncWord = 0;
-    const bool sentCompletionSync =
-        buildCompletionSyncWord(activeCmd, syncWord);
-    if (sentCompletionSync) {
-        sendCompletionSyncWord(syncWord);
+    macroCmd.waitingCallback = true;
+    switch (uop.kind) {
+      case MicroOpContext::Kind::Load:
+      case MicroOpContext::Kind::Store:
+        issueMemUop(macroCmd, std::move(uop));
+        break;
+      case MicroOpContext::Kind::Exec:
+        issueExecUop(macroCmd, std::move(uop));
+        break;
+      case MicroOpContext::Kind::SyncWrite:
+        panic("%s: sync-write uops are not issued from issue queues", name());
+    }
+}
+
+void
+SpecializedExecutionUnit::issueMemUop(MacroCmdContext &macroCmd,
+                                      MicroOpContext uop)
+{
+    const PortID port_id =
+        uop.portId == InvalidPortID ? mappedMemPort(macroCmd) : uop.portId;
+
+    MemTxnContext txn;
+    txn.kind = uop.kind == MicroOpContext::Kind::Load ?
+        MemTxnContext::Kind::Load : MemTxnContext::Kind::Store;
+    txn.macroCmdId = macroCmd.macroCmdId;
+    txn.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    txn.portId = port_id;
+    txn.token = uop.token;
+    txn.addr = uop.addr;
+    txn.size = uop.size;
+
+    sendTrackedPacket(txn, uop.kind == MicroOpContext::Kind::Store ?
+        &uop.data : nullptr);
+}
+
+void
+SpecializedExecutionUnit::issueExecUop(MacroCmdContext &macroCmd,
+                                       MicroOpContext uop)
+{
+    const uint32_t queue_id = macroCmd.targetIssueQueueId;
+    panic_if(activeExecUops.find(queue_id) != activeExecUops.end(),
+             "%s: issue queue %u already has an active exec uop",
+             name(), queue_id);
+
+    executeCountValue++;
+    activeExecUops.emplace(queue_id, uop);
+    auto event = std::make_unique<EventFunctionWrapper>(
+        [this, queue_id] { finishExecution(queue_id); },
+        csprintf("%s.execComplete[%u]", name(), queue_id));
+    schedule(*event, curTick() + std::max<Tick>(1, uop.latency));
+    execCompletionEvents.emplace(queue_id, std::move(event));
+    updateConcurrentMicroOps();
+}
+
+void
+SpecializedExecutionUnit::finishExecution(uint32_t issueQueueId)
+{
+    auto uop_it = activeExecUops.find(issueQueueId);
+    panic_if(uop_it == activeExecUops.end(),
+             "%s: exec completion without active exec uop on queue %u",
+             name(), issueQueueId);
+    const MicroOpContext uop = uop_it->second;
+    activeExecUops.erase(uop_it);
+    execCompletionEvents.erase(issueQueueId);
+
+    auto macro_it = macroCmdContexts.find(uop.macroCmdId);
+    panic_if(macro_it == macroCmdContexts.end(),
+             "%s: missing macro command %llu for exec completion",
+             name(), static_cast<unsigned long long>(uop.macroCmdId));
+
+    auto &macro_cmd = macro_it->second;
+    macro_cmd.waitingCallback = false;
+    onExecUopComplete(macro_cmd, uop);
+
+    updateConcurrentMicroOps();
+    tryScheduleIssue();
+}
+
+void
+SpecializedExecutionUnit::runPendingEpilogues()
+{
+    const size_t count = pendingEpilogueCmdIds.size();
+    for (size_t i = 0; i < count; ++i) {
+        const uint64_t macro_id = pendingEpilogueCmdIds.front();
+        pendingEpilogueCmdIds.pop_front();
+
+        auto it = macroCmdContexts.find(macro_id);
+        if (it == macroCmdContexts.end()) {
+            continue;
+        }
+        auto &macro_cmd = it->second;
+        macro_cmd.epilogueQueued = false;
+        if (macro_cmd.phase != Phase::EpiloguePending) {
+            continue;
+        }
+        runMacroCmdEpilogue(macro_cmd);
+    }
+}
+
+void
+SpecializedExecutionUnit::runMacroCmdEpilogue(MacroCmdContext &macroCmd)
+{
+    panic_if(!macroCmd.uopQueue.empty(),
+             "%s: epilogue requires empty uop queue for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
+    panic_if(macroCmd.waitingCallback,
+             "%s: epilogue requires no outstanding callback for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
+
+    macroCmd.phase = Phase::Epilogue;
+    epilogueCountValue++;
+    onMacroCmdEnd(macroCmd);
+    finishMacroCmd(macroCmd);
+}
+
+void
+SpecializedExecutionUnit::finishMacroCmd(MacroCmdContext &macroCmd)
+{
+    if (macroCmd.completionIssued) {
+        return;
     }
 
+    macroCmd.completionIssued = true;
+    macroCmd.phase = Phase::Done;
     completedCount++;
+    completedIterationValue++;
 
-    DPRINTF(SpecializedExecutionUnit,
-            "Finished command %llu, queue size %llu\n",
-            static_cast<unsigned long long>(completedCount),
-            static_cast<unsigned long long>(cmdQueue.size()));
-
-    if (!sentCompletionSync && !cmdQueue.empty()) {
-        schedule(issueEvent, nextCycle());
+    const uint64_t macro_id = macroCmd.macroCmdId;
+    const uint32_t queue_id = macroCmd.targetIssueQueueId;
+    uint32_t sync_word = 0;
+    if (buildCompletionSyncWord(macroCmd.cmd, sync_word)) {
+        sendCompletionSyncWord(sync_word);
     }
 
-    // If we previously blocked a launch due to full queue, retry now
+    DPRINTF(SpecializedExecutionUnit,
+            "Finished macro=%llu queue=%u completed=%llu occupancy=%llu\n",
+            static_cast<unsigned long long>(macro_id), queue_id,
+            static_cast<unsigned long long>(completedCount),
+            static_cast<unsigned long long>(queueOccupancy()));
+
+    releaseIssueQueueOwner(queue_id, macro_id);
+    macroCmdContexts.erase(macro_id);
     cpuSidePort.trySendRetry();
 }
 
 void
-SpecializedExecutionUnit::finishExecution()
+SpecializedExecutionUnit::releaseIssueQueueOwner(uint32_t issueQueueId,
+                                                 uint64_t macroCmdId)
 {
-    panic_if(!activeExecOp.has_value(),
-             "%s: exec completion event without active exec op", name());
-    const MicroOpContext ctx = *activeExecOp;
-    activeExecOp.reset();
-    handleExecCompletion(activeExecution, ctx);
-    launchExecIfReady();
+    auto &queue = getIssueQueue(issueQueueId);
+    if (queue.activeMacroCmdId.has_value() &&
+        *queue.activeMacroCmdId == macroCmdId) {
+        queue.activeMacroCmdId.reset();
+    }
 }
 
-Tick
-SpecializedExecutionUnit::process(const std::vector<uint8_t> &cmd)
+bool
+SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
 {
+    auto it = activeMemTxns.find(pkt);
+    panic_if(it == activeMemTxns.end(),
+             "%s: received response for unknown packet addr=%#x",
+             name(), pkt->getAddr());
+
+    const MemTxnContext txn = it->second;
     DPRINTF(SpecializedExecutionUnit,
-            "Processing command, latency=%lu ticks\n", debugProcessLatency);
-    return debugProcessLatency;
-}
-
-void
-SpecializedExecutionUnit::beginActiveCommand(ActiveExecution &exec)
-{
-    const uint64_t total_prologues = exec.prologueCount;
-    const uint64_t total_executes = exec.executeCount;
-    const uint64_t total_epilogues = exec.epilogueCount;
-    const uint64_t total_reads = exec.completedReadRespCount;
-    const uint64_t total_writes = exec.completedWriteRespCount;
-    const uint64_t total_iterations = exec.completedIterations;
-
-    exec = ActiveExecution{};
-    exec.cmd = activeCmd;
-    exec.fields = parseCmdFields(extractCmdWord(exec.cmd));
-    exec.phase = Phase::Prologue;
-    exec.prologueCount = total_prologues;
-    exec.executeCount = total_executes;
-    exec.epilogueCount = total_epilogues;
-    exec.completedReadRespCount = total_reads;
-    exec.completedWriteRespCount = total_writes;
-    exec.completedIterations = total_iterations;
-    exec.nextIterationToPrepare = 0;
-    exec.nextIterationToRetire = 0;
-    exec.completionIssued = false;
-    exec.finalizePending = false;
-
-    exec.readMask = readCmdWord(exec.cmd, MultiportReadMaskWord);
-    exec.writeMask = readCmdWord(exec.cmd, MultiportWriteMaskWord);
-    exec.repetition = readCmdWord(exec.cmd, MultiportRepetitionWord);
-    exec.reserved = readCmdWord(exec.cmd, MultiportReservedWord);
-
-    panic_if(!maskFitsPortCount(exec.readMask, memSidePorts.size()),
-             "%s: read mask %#x exceeds mem port count %llu",
-             name(), exec.readMask,
-             static_cast<unsigned long long>(memSidePorts.size()));
-    panic_if(!maskFitsPortCount(exec.writeMask, memSidePorts.size()),
-             "%s: write mask %#x exceeds mem port count %llu",
-             name(), exec.writeMask,
-             static_cast<unsigned long long>(memSidePorts.size()));
-    if (exec.repetition == 0) {
-        exec.repetition = 1;
-    }
-
-    for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
-         ++port) {
-        exec.readResults[port] = packWord(defaultInitialSlotValue(port));
-        loadQueues[port].clear();
-        storeQueues[port].clear();
-        memPortBusy[port] = false;
-    }
-    execQueue.clear();
-    activeExecOp.reset();
-    iterationStates.clear();
-    maxConcurrentMicroOps = 0;
-
-    onCommandBegin(exec);
-}
-
-void
-SpecializedExecutionUnit::prepareIteration(ActiveExecution &exec,
-                                           uint64_t iteration)
-{
-    if (iteration >= exec.repetition) {
-        return;
-    }
-    auto [iter_it, inserted] =
-        iterationStates.emplace(iteration, IterationState{});
-    IterationState &state = iter_it->second;
-    if (state.prepared) {
-        return;
-    }
-
-    exec.phase = Phase::Prologue;
-    exec.iteration = iteration;
-    exec.readPorts.clear();
-    exec.writePorts.clear();
-    exec.writeResults.clear();
-    exec.prologueCount++;
-    for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
-         ++port) {
-        const uint32_t bit = 1U << port;
-        if ((exec.readMask & bit) != 0) {
-            exec.readPorts.push_back(port);
-        }
-        if ((exec.writeMask & bit) != 0) {
-            exec.writePorts.push_back(port);
-        }
-    }
-    state.prepared = true;
-    prologue(exec);
-    exec.nextIterationToPrepare = std::max(exec.nextIterationToPrepare,
-                                           iteration + 1);
-    issueLoadRequests(exec, iteration);
-}
-
-void
-SpecializedExecutionUnit::issueLoadRequests(ActiveExecution &exec,
-                                            uint64_t iteration)
-{
-    exec.iteration = iteration;
-    std::vector<MemRequestDesc> reqs;
-    buildMvinRequests(exec, reqs);
-
-    if (reqs.empty()) {
-        for (const PortID port : exec.readPorts) {
-            MemRequestDesc req;
-            req.portId = port;
-            req.kind = MemTxnContext::Kind::Mvin;
-            req.addr = DefaultSpmBase +
-                       (static_cast<Addr>(port) * DefaultSpmSlotStride);
-            req.size = sizeof(uint32_t);
-            reqs.push_back(req);
-        }
-    }
-
-    if (reqs.empty()) {
-        handleIterationLoadsReady(exec, iteration);
-        return;
-    }
-    IterationState &state = iterationStates.at(iteration);
-    state.pendingLoads = reqs.size();
-    for (auto &req_desc : reqs) {
-        req_desc.kind = MemTxnContext::Kind::Mvin;
-        req_desc.iteration = iteration;
-        req_desc.token = nextMemTxnToken++;
-        enqueueLoadRequest(req_desc);
-    }
-}
-
-void
-SpecializedExecutionUnit::enqueueLoadRequest(const MemRequestDesc &req_desc)
-{
-    panic_if(req_desc.portId < 0 ||
-             static_cast<size_t>(req_desc.portId) >= loadQueues.size(),
-             "%s: invalid load queue port %d", name(), req_desc.portId);
-    loadQueues[req_desc.portId].push_back({req_desc});
-    pumpMemPort(req_desc.portId);
-}
-
-bool
-SpecializedExecutionUnit::handleMvinResponseInternal(ActiveExecution &exec,
-                                                      PacketPtr pkt)
-{
-    auto it = activeMemTxns.find(pkt);
-    panic_if(it == activeMemTxns.end(),
-             "%s: missing mvin transaction for packet addr=%#x",
-             name(), pkt->getAddr());
-
-    const MemTxnContext txn = it->second;
-    const uint8_t *data = pkt->getConstPtr<uint8_t>();
-    exec.iteration = txn.iteration;
-    exec.readResults[txn.portId] =
-        std::vector<uint8_t>(data, data + pkt->getSize());
-    exec.completedReadRespCount++;
-    onMvinResponse(exec, txn, pkt);
-    onMicroOpComplete(exec, MicroOpContext{
-        MicroOpContext::Kind::Load, txn.portId, txn.iteration,
-        txn.token, txn.addr, txn.size, 0}, pkt);
+            "Received mem response macro=%llu queue=%u port=%d kind=%d\n",
+            static_cast<unsigned long long>(txn.macroCmdId),
+            txn.ownerIssueQueueId, txn.portId, static_cast<int>(txn.kind));
 
     activeMemTxns.erase(it);
-    memPortBusy[txn.portId] = false;
-    delete pkt;
-    pumpMemPort(txn.portId);
 
-    IterationState &state = iterationStates.at(txn.iteration);
-    panic_if(state.pendingLoads == 0,
-             "%s: unexpected mvin completion for iteration %llu", name(),
-             static_cast<unsigned long long>(txn.iteration));
-    state.pendingLoads--;
-    if (state.pendingLoads == 0) {
-        handleIterationLoadsReady(exec, txn.iteration);
+    if (txn.kind == MemTxnContext::Kind::SyncWrite) {
+        delete pkt;
+        updateConcurrentMicroOps();
+        tryScheduleIssue();
+        return true;
     }
+
+    auto macro_it = macroCmdContexts.find(txn.macroCmdId);
+    panic_if(macro_it == macroCmdContexts.end(),
+             "%s: missing macro command %llu for mem response",
+             name(), static_cast<unsigned long long>(txn.macroCmdId));
+
+    auto &macro_cmd = macro_it->second;
+    macro_cmd.waitingCallback = false;
+    if (txn.kind == MemTxnContext::Kind::Load) {
+        completedReadCount++;
+    } else {
+        completedWriteCount++;
+    }
+    onMemUopComplete(macro_cmd, txn, pkt);
+
+    delete pkt;
+    updateConcurrentMicroOps();
+    tryScheduleIssue();
     return true;
 }
 
 void
-SpecializedExecutionUnit::handleIterationLoadsReady(ActiveExecution &exec,
-                                                    uint64_t iteration)
+SpecializedExecutionUnit::sendTrackedPacket(const MemTxnContext &txn,
+                                            const std::vector<uint8_t> *data)
 {
-    exec.iteration = iteration;
-    IterationState &state = iterationStates.at(iteration);
-    if (state.execQueued) {
-        return;
-    }
-    state.execQueued = true;
-    exec.executeCount++;
-    const Tick execLatency = execute(exec);
-    enqueueExecOp(iteration, execLatency);
-    if (iteration + 1 < exec.repetition) {
-        prepareIteration(exec, iteration + 1);
-    }
-}
-
-bool
-SpecializedExecutionUnit::handleMvoutResponseInternal(ActiveExecution &exec,
-                                                       PacketPtr pkt)
-{
-    auto it = activeMemTxns.find(pkt);
-    panic_if(it == activeMemTxns.end(),
-             "%s: missing mvout transaction for packet addr=%#x",
-             name(), pkt->getAddr());
-
-    const MemTxnContext txn = it->second;
-    exec.iteration = txn.iteration;
-    exec.completedWriteRespCount++;
-    if (auto write_it = exec.writeResults.find(txn.portId);
-        write_it != exec.writeResults.end()) {
-        exec.readResults[txn.portId] = write_it->second;
-    }
-    onMvoutResponse(exec, txn, pkt);
-    onMicroOpComplete(exec, MicroOpContext{
-        MicroOpContext::Kind::Store, txn.portId, txn.iteration,
-        txn.token, txn.addr, txn.size, 0}, pkt);
-
-    activeMemTxns.erase(it);
-    memPortBusy[txn.portId] = false;
-    delete pkt;
-    pumpMemPort(txn.portId);
-
-    IterationState &state = iterationStates.at(txn.iteration);
-    panic_if(state.pendingStores == 0,
-             "%s: unexpected mvout completion for iteration %llu", name(),
-             static_cast<unsigned long long>(txn.iteration));
-    state.pendingStores--;
-    if (state.pendingStores == 0) {
-        runEpiloguePhase(exec, txn.iteration);
-    }
-    return true;
-}
-
-void
-SpecializedExecutionUnit::enqueueStoreRequest(const MemRequestDesc &req_desc)
-{
-    panic_if(req_desc.portId < 0 ||
-             static_cast<size_t>(req_desc.portId) >= storeQueues.size(),
-             "%s: invalid store queue port %d", name(), req_desc.portId);
-    storeQueues[req_desc.portId].push_back({req_desc});
-    pumpMemPort(req_desc.portId);
-}
-
-void
-SpecializedExecutionUnit::enqueueExecOp(uint64_t iteration, Tick latency)
-{
-    execQueue.push_back({MicroOpContext{
-        MicroOpContext::Kind::Exec,
-        InvalidPortID,
-        iteration,
-        nextMemTxnToken++,
-        0,
-        0,
-        latency,
-    }});
-    launchExecIfReady();
-}
-
-void
-SpecializedExecutionUnit::pumpMemPort(PortID port_id)
-{
-    if (memPortBusy[port_id]) {
-        return;
-    }
-
-    std::deque<QueuedMemOp> *queue = nullptr;
-    if (!loadQueues[port_id].empty()) {
-        queue = &loadQueues[port_id];
-    } else if (!storeQueues[port_id].empty()) {
-        queue = &storeQueues[port_id];
-    }
-
-    if (queue == nullptr) {
-        return;
-    }
-
-    const MemRequestDesc req_desc = queue->front().desc;
-    queue->pop_front();
-
+    const MemCmd cmd = txn.kind == MemTxnContext::Kind::Load ?
+        MemCmd::ReadReq : MemCmd::WriteReq;
     RequestPtr req = std::make_shared<Request>(
-        req_desc.addr, req_desc.size, Request::Flags(),
-        Request::funcRequestorId);
-    PacketPtr pkt = buildPacketFromRequest(req, req_desc);
+        txn.addr, txn.size, Request::Flags(), Request::funcRequestorId);
+    PacketPtr pkt = buildPacketFromRequest(req, cmd, data);
 
-    MemTxnContext txn;
-    txn.pkt = pkt;
-    txn.portId = req_desc.portId;
-    txn.kind = req_desc.kind;
-    txn.iteration = req_desc.iteration;
-    txn.token = req_desc.token;
-    txn.addr = req_desc.addr;
-    txn.size = req_desc.size;
+    MemTxnContext tracked = txn;
+    tracked.pkt = pkt;
+    auto [it, inserted] = activeMemTxns.emplace(pkt, tracked);
+    panic_if(!inserted, "%s: duplicate in-flight packet registration", name());
 
-    auto [it, inserted] = activeMemTxns.emplace(pkt, txn);
-    panic_if(!inserted, "%s: duplicate in-flight packet registration",
-             name());
-    memPortBusy[port_id] = true;
-    getMemSidePort(port_id).sendPacket(pkt);
+    DPRINTF(SpecializedExecutionUnit,
+            "sendTrackedPacket macro=%llu queue=%u port=%d kind=%d "
+            "addr=%#x size=%u\n",
+            static_cast<unsigned long long>(txn.macroCmdId),
+            txn.ownerIssueQueueId, txn.portId, static_cast<int>(txn.kind),
+            txn.addr, static_cast<unsigned>(txn.size));
+
+    getMemSidePort(txn.portId).sendPacket(pkt);
     updateConcurrentMicroOps();
-}
-
-void
-SpecializedExecutionUnit::launchExecIfReady()
-{
-    if (activeExecOp.has_value() || execQueue.empty()) {
-        return;
-    }
-
-    activeExecOp = execQueue.front().ctx;
-    execQueue.pop_front();
-    updateConcurrentMicroOps();
-    schedule(finishExecutionEvent,
-             curTick() + std::max<Tick>(1, activeExecOp->latency));
-}
-
-void
-SpecializedExecutionUnit::handleExecCompletion(ActiveExecution &exec,
-                                               const MicroOpContext &ctx)
-{
-    exec.iteration = ctx.iteration;
-    IterationState &state = iterationStates.at(ctx.iteration);
-    state.execCompleted = true;
-    onMicroOpComplete(exec, ctx, nullptr);
-    issueStoreRequests(exec, ctx.iteration);
-}
-
-void
-SpecializedExecutionUnit::issueStoreRequests(ActiveExecution &exec,
-                                             uint64_t iteration)
-{
-    exec.iteration = iteration;
-    exec.phase = Phase::Completing;
-    std::vector<MemRequestDesc> reqs;
-    buildMvoutRequests(exec, reqs);
-
-    if (reqs.empty()) {
-        uint32_t signature = 0;
-        for (const PortID port : exec.readPorts) {
-            signature += unpackWord(exec.readResults[port]);
-        }
-        for (const PortID port : exec.writePorts) {
-            if (exec.writeResults.find(port) == exec.writeResults.end()) {
-                const uint32_t current = unpackWord(exec.readResults[port]);
-                const uint32_t value = current + signature +
-                    ((static_cast<uint32_t>(iteration) + 1U) * 0x10U) +
-                    (static_cast<uint32_t>(port) + 1U);
-                exec.writeResults[port] = packWord(value);
-            }
-            MemRequestDesc req;
-            req.portId = port;
-            req.kind = MemTxnContext::Kind::Mvout;
-            req.addr = DefaultSpmBase +
-                       (static_cast<Addr>(port) * DefaultSpmSlotStride);
-            req.size = sizeof(uint32_t);
-            req.data = exec.writeResults[port];
-            reqs.push_back(req);
-        }
-    }
-
-    IterationState &state = iterationStates.at(iteration);
-    state.pendingStores = reqs.size();
-    if (reqs.empty()) {
-        runEpiloguePhase(exec, iteration);
-        return;
-    }
-
-    for (auto &req_desc : reqs) {
-        req_desc.kind = MemTxnContext::Kind::Mvout;
-        req_desc.iteration = iteration;
-        req_desc.token = nextMemTxnToken++;
-        enqueueStoreRequest(req_desc);
-    }
-}
-
-void
-SpecializedExecutionUnit::retireCompletedIterations(ActiveExecution &exec)
-{
-    while (exec.nextIterationToRetire < exec.repetition) {
-        auto it = iterationStates.find(exec.nextIterationToRetire);
-        if (it == iterationStates.end() || !it->second.epilogueDone) {
-            break;
-        }
-
-        exec.completedIterations++;
-        exec.nextIterationToRetire++;
-    }
-
-    if (exec.completedIterations >= exec.repetition &&
-        activeMemTxns.empty() && execQueue.empty() &&
-        !activeExecOp.has_value()) {
-        finalizeActiveCommand(exec);
-    }
-}
-
-void
-SpecializedExecutionUnit::runEpiloguePhase(ActiveExecution &exec,
-                                           uint64_t iteration)
-{
-    exec.phase = Phase::Epilogue;
-    exec.iteration = iteration;
-    IterationState &state = iterationStates.at(iteration);
-    if (state.epilogueDone) {
-        return;
-    }
-
-    exec.epilogueCount++;
-    epilogue(exec);
-    state.epilogueDone = true;
-
-    retireCompletedIterations(exec);
-}
-
-void
-SpecializedExecutionUnit::finalizeActiveCommand(ActiveExecution &exec)
-{
-    if (exec.completionIssued) {
-        return;
-    }
-
-    ActiveExecution exit_view = exec;
-    exit_view.completedIterations = exec.repetition;
-    panic_if(!shouldExit(exit_view),
-             "%s: command reached finalizeActiveCommand before shouldExit",
-             name());
-
-    exec.phase = Phase::Completing;
-    exec.completionIssued = true;
-    completeActiveCommand();
-    exec.phase = Phase::Idle;
 }
 
 void
 SpecializedExecutionUnit::updateConcurrentMicroOps()
 {
     const uint64_t active_ops =
-        activeMemTxns.size() + (activeExecOp.has_value() ? 1U : 0U);
-    maxConcurrentMicroOps = std::max(maxConcurrentMicroOps, active_ops);
+        activeMemTxns.size() + activeExecUops.size();
+    maxConcurrentMicroOpsValue =
+        std::max(maxConcurrentMicroOpsValue, active_ops);
+}
+
+SpecializedExecutionUnit::MacroCmdKind
+SpecializedExecutionUnit::classifyMacroCmd(
+    const std::vector<uint8_t> &cmd) const
+{
+    switch (parseCmdFields(extractCmdWord(cmd)).opCode) {
+      case 0:
+        return MacroCmdKind::Exec;
+      case 1:
+        return MacroCmdKind::Load;
+      case 2:
+        return MacroCmdKind::Store;
+      default:
+        panic("%s: unsupported base SEU opcode %#x", name(),
+              parseCmdFields(extractCmdWord(cmd)).opCode);
+    }
+}
+
+uint32_t
+SpecializedExecutionUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                                             MacroCmdKind kind) const
+{
+    const uint32_t queue_select = readCmdWord(cmd, QueueSelectWord);
+    if (kind == MacroCmdKind::Exec) {
+        return 0;
+    }
+
+    panic_if(memSidePorts.empty(), "%s: no mem-side ports configured", name());
+    return 1 + (queue_select % memSidePorts.size());
+}
+
+std::vector<SpecializedExecutionUnit::IssueQueueState>
+SpecializedExecutionUnit::buildIssueQueues() const
+{
+    std::vector<IssueQueueState> queues;
+    queues.push_back({0, IssueQueueKind::Exec, {}, {}, {}});
+    for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
+         ++port) {
+        queues.push_back({static_cast<uint32_t>(port) + 1,
+                          IssueQueueKind::Mem, {}, {}, port});
+    }
+    return queues;
 }
 
 void
-SpecializedExecutionUnit::sendMemRequest(PacketPtr pkt)
+SpecializedExecutionUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
-    sendMemRequest(pkt, 0);
+    (void)macroCmd;
 }
 
 void
-SpecializedExecutionUnit::sendMemRequest(PacketPtr pkt, PortID port_id)
+SpecializedExecutionUnit::buildUops(MacroCmdContext &macroCmd)
 {
-    MemTxnContext txn;
-    txn.pkt = pkt;
-    txn.portId = port_id;
-    txn.kind = inferTxnKind(pkt);
-    txn.iteration = activeExecution.iteration;
-    txn.token = nextMemTxnToken++;
-    txn.addr = pkt->getAddr();
-    txn.size = pkt->getSize();
+    const uint32_t uop_count =
+        std::max<uint32_t>(1, readCmdWord(macroCmd.cmd, UopCountWord));
+    const uint32_t aux0 = readCmdWord(macroCmd.cmd, Aux0Word);
+    const uint32_t aux1 = readCmdWord(macroCmd.cmd, Aux1Word);
 
-    auto [it, inserted] = activeMemTxns.emplace(pkt, txn);
-    panic_if(!inserted, "%s: duplicate in-flight packet registration", name());
+    switch (macroCmd.kind) {
+      case MacroCmdKind::Exec: {
+        const Tick per_uop_latency = aux0 == 0 ?
+            debugProcessLatency :
+            clockPeriod() * std::max<uint32_t>(1, aux0);
+        for (uint32_t i = 0; i < uop_count; ++i) {
+            appendExecUop(macroCmd, per_uop_latency);
+        }
+        break;
+      }
+      case MacroCmdKind::Load:
+      case MacroCmdKind::Store: {
+        const PortID port_id = mappedMemPort(macroCmd);
+        const Addr base_addr =
+            DefaultSpmBase +
+            (static_cast<Addr>(port_id) * DefaultSpmSlotStride);
+        const uint32_t stride = aux1 == 0 ? sizeof(uint32_t) : aux1;
+        for (uint32_t i = 0; i < uop_count; ++i) {
+            const Addr addr =
+                base_addr + aux0 + (static_cast<Addr>(i) * stride);
+            if (macroCmd.kind == MacroCmdKind::Load) {
+                appendLoadUop(macroCmd, addr, sizeof(uint32_t));
+            } else {
+                const uint32_t value =
+                    0xAC000000U + (static_cast<uint32_t>(port_id) << 12) +
+                    (static_cast<uint32_t>(macroCmd.macroCmdId) << 4) + i;
+                appendStoreUop(macroCmd, addr, sizeof(uint32_t),
+                               packWord(value));
+            }
+        }
+        break;
+      }
+    }
 
-    DPRINTF(SpecializedExecutionUnit,
-            "sendMemRequest: port=%d kind=%d addr=%#x size=%u inflight=%llu\n",
-            port_id, static_cast<int>(txn.kind), txn.addr, txn.size,
-            static_cast<unsigned long long>(activeMemTxns.size()));
+    if (macroCmd.uopQueue.empty()) {
+        markEpiloguePending(macroCmd);
+    }
+}
 
-    getMemSidePort(port_id).sendPacket(pkt);
-    updateConcurrentMicroOps();
+void
+SpecializedExecutionUnit::onMemUopComplete(MacroCmdContext &macroCmd,
+                                           const MemTxnContext &txn,
+                                           PacketPtr pkt)
+{
+    (void)txn;
+    (void)pkt;
+    if (macroCmd.uopQueue.empty()) {
+        markEpiloguePending(macroCmd);
+    }
+}
+
+void
+SpecializedExecutionUnit::onExecUopComplete(MacroCmdContext &macroCmd,
+                                            const MicroOpContext &uop)
+{
+    (void)uop;
+    if (macroCmd.uopQueue.empty()) {
+        markEpiloguePending(macroCmd);
+    }
+}
+
+void
+SpecializedExecutionUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
+{
+    (void)macroCmd;
 }
 
 bool
@@ -990,34 +879,148 @@ SpecializedExecutionUnit::buildCompletionSyncWord(
 void
 SpecializedExecutionUnit::sendCompletionSyncWord(uint32_t word)
 {
-    sendCompletionSyncWord(word, 0);
+    MemTxnContext txn;
+    txn.kind = MemTxnContext::Kind::SyncWrite;
+    txn.macroCmdId = 0;
+    txn.ownerIssueQueueId = 0;
+    txn.portId = 0;
+    txn.token = nextMicroOpToken++;
+    txn.addr = SyncIndicatorBase;
+    txn.size = sizeof(uint32_t);
+    const auto data = packWord(word);
+
+    DPRINTF(SpecializedExecutionUnit,
+            "completion sync write word=%#x\n", word);
+    sendTrackedPacket(txn, &data);
 }
 
 void
-SpecializedExecutionUnit::sendCompletionSyncWord(uint32_t word, PortID port_id)
+SpecializedExecutionUnit::appendLoadUop(MacroCmdContext &macroCmd,
+                                        Addr addr, size_t size)
 {
-    RequestPtr req = std::make_shared<Request>(
-        SyncIndicatorBase, sizeof(uint32_t), Request::Flags(),
-        Request::funcRequestorId);
-    PacketPtr pkt = new Packet(req, MemCmd::WriteReq);
-    pkt->allocate();
-    pkt->setData(reinterpret_cast<const uint8_t *>(&word));
+    MicroOpContext uop;
+    uop.kind = MicroOpContext::Kind::Load;
+    uop.macroCmdId = macroCmd.macroCmdId;
+    uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    uop.portId = mappedMemPort(macroCmd);
+    uop.token = nextMicroOpToken++;
+    uop.addr = addr;
+    uop.size = size;
+    macroCmd.uopQueue.push_back(std::move(uop));
+}
 
-    DPRINTF(
-        SpecializedExecutionUnit,
-        "completion sync write word=%#x port=%d\n", word, port_id);
-    sendMemRequest(pkt, port_id);
+void
+SpecializedExecutionUnit::appendStoreUop(MacroCmdContext &macroCmd,
+                                         Addr addr, size_t size,
+                                         const std::vector<uint8_t> &data)
+{
+    MicroOpContext uop;
+    uop.kind = MicroOpContext::Kind::Store;
+    uop.macroCmdId = macroCmd.macroCmdId;
+    uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    uop.portId = mappedMemPort(macroCmd);
+    uop.token = nextMicroOpToken++;
+    uop.addr = addr;
+    uop.size = size;
+    uop.data = data;
+    macroCmd.uopQueue.push_back(std::move(uop));
+}
+
+void
+SpecializedExecutionUnit::appendExecUop(MacroCmdContext &macroCmd,
+                                        Tick latency)
+{
+    MicroOpContext uop;
+    uop.kind = MicroOpContext::Kind::Exec;
+    uop.macroCmdId = macroCmd.macroCmdId;
+    uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    uop.portId = InvalidPortID;
+    uop.token = nextMicroOpToken++;
+    uop.latency = latency;
+    macroCmd.uopQueue.push_back(std::move(uop));
+}
+
+void
+SpecializedExecutionUnit::markEpiloguePending(MacroCmdContext &macroCmd)
+{
+    if (macroCmd.phase == Phase::Done ||
+        macroCmd.phase == Phase::Epilogue ||
+        macroCmd.phase == Phase::EpiloguePending) {
+        if (macroCmd.phase == Phase::EpiloguePending &&
+            !macroCmd.epilogueQueued) {
+            macroCmd.epilogueQueued = true;
+            pendingEpilogueCmdIds.push_back(macroCmd.macroCmdId);
+        }
+        return;
+    }
+
+    macroCmd.phase = Phase::EpiloguePending;
+    if (!macroCmd.epilogueQueued) {
+        macroCmd.epilogueQueued = true;
+        pendingEpilogueCmdIds.push_back(macroCmd.macroCmdId);
+    }
+    tryScheduleIssue();
+}
+
+SpecializedExecutionUnit::IssueQueueState &
+SpecializedExecutionUnit::getIssueQueue(uint32_t issueQueueId)
+{
+    for (auto &queue : issueQueues) {
+        if (queue.issueQueueId == issueQueueId) {
+            return queue;
+        }
+    }
+    panic("%s: issue queue %u not found", name(), issueQueueId);
+}
+
+const SpecializedExecutionUnit::IssueQueueState &
+SpecializedExecutionUnit::getIssueQueue(uint32_t issueQueueId) const
+{
+    for (const auto &queue : issueQueues) {
+        if (queue.issueQueueId == issueQueueId) {
+            return queue;
+        }
+    }
+    panic("%s: issue queue %u not found", name(), issueQueueId);
+}
+
+bool
+SpecializedExecutionUnit::issueQueueExists(uint32_t issueQueueId) const
+{
+    for (const auto &queue : issueQueues) {
+        if (queue.issueQueueId == issueQueueId) {
+            return true;
+        }
+    }
+    return false;
+}
+
+PortID
+SpecializedExecutionUnit::mappedMemPort(const MacroCmdContext &macroCmd) const
+{
+    panic_if(!macroCmd.boundMemPortId.has_value(),
+             "%s: macro command %llu has no mapped mem port",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
+    return *macroCmd.boundMemPortId;
 }
 
 uint32_t
 SpecializedExecutionUnit::extractCmdWord(const std::vector<uint8_t> &cmd) const
 {
-    if (cmd.size() < sizeof(uint32_t)) {
+    return readCmdWord(cmd, 0);
+}
+
+uint32_t
+SpecializedExecutionUnit::readCmdWord(const std::vector<uint8_t> &cmd,
+                                      size_t word_idx) const
+{
+    const size_t offset = word_idx * sizeof(uint32_t);
+    if (cmd.size() < offset + sizeof(uint32_t)) {
         return 0;
     }
 
     uint32_t word = 0;
-    std::memcpy(&word, cmd.data(), sizeof(word));
+    std::memcpy(&word, cmd.data() + offset, sizeof(word));
     return word;
 }
 
@@ -1040,86 +1043,15 @@ SpecializedExecutionUnit::setDebugProcessLatency(Tick latency)
     debugProcessLatency = latency;
 }
 
-bool
-SpecializedExecutionUnit::startBlockingRead(Addr addr, size_t size,
-                                             uint8_t *buffer, PortID port_id)
-{
-    RequestPtr req = std::make_shared<Request>(
-        addr, size, Request::Flags(), Request::funcRequestorId);
-    PacketPtr pkt = new Packet(req, MemCmd::ReadReq);
-    pkt->allocate();
-    pkt->dataStatic(buffer);
-    sendMemRequest(pkt, port_id);
-    return true;
-}
-
-bool
-SpecializedExecutionUnit::startBlockingWrite(Addr addr, size_t size,
-                                              const uint8_t *buffer,
-                                              PortID port_id)
-{
-    RequestPtr req = std::make_shared<Request>(
-        addr, size, Request::Flags(), Request::funcRequestorId);
-    PacketPtr pkt = new Packet(req, MemCmd::WriteReq);
-    pkt->allocate();
-    pkt->dataStatic(const_cast<uint8_t *>(buffer));
-    sendMemRequest(pkt, port_id);
-    return true;
-}
-
-bool
-SpecializedExecutionUnit::startBlockingRead(Addr addr, size_t size,
-                                             uint8_t *buffer)
-{
-    return startBlockingRead(addr, size, buffer, 0);
-}
-
-bool
-SpecializedExecutionUnit::startBlockingWrite(Addr addr, size_t size,
-                                              const uint8_t *buffer)
-{
-    return startBlockingWrite(addr, size, buffer, 0);
-}
-
-bool
-SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
-{
-    auto it = activeMemTxns.find(pkt);
-    panic_if(it == activeMemTxns.end(),
-             "%s: received response for unknown packet addr=%#x",
-             name(), pkt->getAddr());
-
-    const MemTxnContext txn = it->second;
-    DPRINTF(SpecializedExecutionUnit,
-            "Received memory response for addr=%#x port=%d kind=%d "
-            "remaining_before=%llu\n",
-            pkt->getAddr(), txn.portId, static_cast<int>(txn.kind),
-            static_cast<unsigned long long>(activeMemTxns.size()));
-
-    switch (txn.kind) {
-      case MemTxnContext::Kind::Mvin:
-        return handleMvinResponseInternal(activeExecution, pkt);
-      case MemTxnContext::Kind::Mvout:
-        return handleMvoutResponseInternal(activeExecution, pkt);
-      case MemTxnContext::Kind::SyncWrite:
-        onMicroOpComplete(activeExecution, MicroOpContext{
-            MicroOpContext::Kind::SyncWrite, txn.portId, txn.iteration,
-            txn.token, txn.addr, txn.size, 0}, pkt);
-        activeMemTxns.erase(it);
-        delete pkt;
-        if (activeMemTxns.empty() && !issueCmdBusy && !cmdQueue.empty()) {
-            tryScheduleIssue();
-        }
-        return true;
-    }
-
-    panic("%s: unhandled memory transaction kind", name());
-}
-
 uint64_t
 SpecializedExecutionUnit::queueOccupancy() const
 {
-    return cmdQueue.size();
+    uint64_t total = dispatchQueue.size();
+    for (const auto &queue : issueQueues) {
+        total += queue.waitingMacroCmdIds.size();
+        total += queue.activeMacroCmdId.has_value() ? 1U : 0U;
+    }
+    return total;
 }
 
 uint64_t
@@ -1131,49 +1063,50 @@ SpecializedExecutionUnit::completedCmdCount() const
 bool
 SpecializedExecutionUnit::isIssueBusy() const
 {
-    return issueCmdBusy;
+    return queueOccupancy() != 0 || !activeMemTxns.empty() ||
+           !activeExecUops.empty() || !pendingEpilogueCmdIds.empty();
 }
 
 uint64_t
 SpecializedExecutionUnit::completedReadRespCount() const
 {
-    return activeExecution.completedReadRespCount;
+    return completedReadCount;
 }
 
 uint64_t
 SpecializedExecutionUnit::completedWriteRespCount() const
 {
-    return activeExecution.completedWriteRespCount;
+    return completedWriteCount;
 }
 
 uint64_t
 SpecializedExecutionUnit::completedIterationCount() const
 {
-    return activeExecution.completedIterations;
+    return completedIterationValue;
 }
 
 uint64_t
 SpecializedExecutionUnit::prologueCount() const
 {
-    return activeExecution.prologueCount;
+    return prologueCountValue;
 }
 
 uint64_t
 SpecializedExecutionUnit::executeCount() const
 {
-    return activeExecution.executeCount;
+    return executeCountValue;
 }
 
 uint64_t
 SpecializedExecutionUnit::epilogueCount() const
 {
-    return activeExecution.epilogueCount;
+    return epilogueCountValue;
 }
 
 uint64_t
 SpecializedExecutionUnit::maxActiveMicroOps() const
 {
-    return maxConcurrentMicroOps;
+    return maxConcurrentMicroOpsValue;
 }
 
 } // namespace gem5
