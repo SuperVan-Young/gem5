@@ -22,11 +22,11 @@ EXPECTED_EXIT_CODE = 0
 EXPECTED_SHARED_LUT_REQUESTS = 4
 EXPECTED_SHARED_LUT_COMMANDS = 1
 EXPECTED_VPU0 = {
-    "completed_cmds": 1,
-    "prologues": 1,
+    "completed_cmds": 3,
+    "prologues": 3,
     "executes": 1,
-    "epilogues": 1,
-    "iterations": 1,
+    "epilogues": 3,
+    "iterations": 3,
     "read_resps": 1,
     "write_resps": 1,
 }

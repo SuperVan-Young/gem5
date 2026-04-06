@@ -103,7 +103,7 @@ advance_expected_slots(uint32_t *slots, uint32_t read_mask,
 
         for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
             if ((write_mask & (1U << port)) != 0U) {
-                slots[port] = mix_slot_value(slots[port], signature, iteration,
+                slots[port] = mix_slot_value(slots[port], signature, 0U,
                                              port);
             }
         }
@@ -135,25 +135,15 @@ print_slot_snapshot(const char *prefix, const uint32_t *slots)
 }
 
 static int
-wait_for_expected_slots(const uint32_t *expected_slots, uint64_t timeout)
+verify_expected_slots(const uint32_t *expected_slots)
 {
-    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
-        int matched = 1;
-
-        for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
-            if (npu_spm_slot_word_ptr_default(port)[0] !=
-                expected_slots[port]) {
-                matched = 0;
-                break;
-            }
-        }
-
-        if (matched) {
-            return 0;
+    for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
+        if (npu_spm_slot_word_ptr_default(port)[0] != expected_slots[port]) {
+            return -1;
         }
     }
 
-    return -1;
+    return 0;
 }
 
 int
@@ -175,6 +165,9 @@ main(void)
                            VPU1_CMD0_WRITE_MASK, VPU1_CMD0_REPETITION);
     accumulate_expected_stats(&vpu1_stats, VPU1_CMD0_READ_MASK,
                               VPU1_CMD0_WRITE_MASK, VPU1_CMD0_REPETITION);
+    if (verify_expected_slots(expected_slots) != 0) {
+        goto fail;
+    }
 
     vpu_cmd_launch_legacy_exec(VPU0_DEVICE_ID, VPU0_CMD0_SYNC,
                                VPU0_CMD0_READ_MASK, VPU0_CMD0_WRITE_MASK,
@@ -183,6 +176,9 @@ main(void)
                            VPU0_CMD0_WRITE_MASK, VPU0_CMD0_REPETITION);
     accumulate_expected_stats(&vpu0_stats, VPU0_CMD0_READ_MASK,
                               VPU0_CMD0_WRITE_MASK, VPU0_CMD0_REPETITION);
+    if (verify_expected_slots(expected_slots) != 0) {
+        goto fail;
+    }
 
     vpu_cmd_launch_legacy_exec(VPU1_DEVICE_ID, VPU1_CMD1_SYNC,
                                VPU1_CMD1_READ_MASK, VPU1_CMD1_WRITE_MASK,
@@ -191,6 +187,9 @@ main(void)
                            VPU1_CMD1_WRITE_MASK, VPU1_CMD1_REPETITION);
     accumulate_expected_stats(&vpu1_stats, VPU1_CMD1_READ_MASK,
                               VPU1_CMD1_WRITE_MASK, VPU1_CMD1_REPETITION);
+    if (verify_expected_slots(expected_slots) != 0) {
+        goto fail;
+    }
 
     vpu_cmd_launch_legacy_exec(VPU0_DEVICE_ID, VPU0_CMD1_SYNC,
                                VPU0_CMD1_READ_MASK, VPU0_CMD1_WRITE_MASK,
@@ -199,18 +198,8 @@ main(void)
                            VPU0_CMD1_WRITE_MASK, VPU0_CMD1_REPETITION);
     accumulate_expected_stats(&vpu0_stats, VPU0_CMD1_READ_MASK,
                               VPU0_CMD1_WRITE_MASK, VPU0_CMD1_REPETITION);
-
-    if (wait_for_expected_slots(expected_slots, 60000000ULL) != 0) {
-        for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
-            actual_slots[port] = npu_spm_slot_word_ptr_default(port)[0];
-        }
-
-        print_slot_snapshot("VPU_LEGACY_DUAL_DEVICE_BASIC_EXPECTED",
-                            expected_slots);
-        print_slot_snapshot("VPU_LEGACY_DUAL_DEVICE_BASIC_ACTUAL",
-                            actual_slots);
-        printf("VPU_LEGACY_DUAL_DEVICE_BASIC_FAIL\n");
-        return 1;
+    if (verify_expected_slots(expected_slots) != 0) {
+        goto fail;
     }
 
     print_slot_snapshot("VPU_LEGACY_DUAL_DEVICE_BASIC_FINAL",
@@ -231,4 +220,16 @@ main(void)
     printf("VPU1_EXPECTED_ITERATIONS=%u\n", vpu1_stats.iterations);
     printf("VPU_LEGACY_DUAL_DEVICE_BASIC_PASS\n");
     return 0;
+
+fail:
+    for (uint32_t port = 0U; port < VPU_NUM_PORTS; ++port) {
+        actual_slots[port] = npu_spm_slot_word_ptr_default(port)[0];
+    }
+
+    print_slot_snapshot("VPU_LEGACY_DUAL_DEVICE_BASIC_EXPECTED",
+                        expected_slots);
+    print_slot_snapshot("VPU_LEGACY_DUAL_DEVICE_BASIC_ACTUAL",
+                        actual_slots);
+    printf("VPU_LEGACY_DUAL_DEVICE_BASIC_FAIL\n");
+    return 1;
 }

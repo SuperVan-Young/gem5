@@ -7,14 +7,17 @@ CXXSRC := workload.c ../../../utils/golden/vpu_unary.cc
 CXX := riscv64-linux-gnu-g++
 CPPFLAGS := -I../../../utils -I../../../utils/cmd -I../../../utils/golden
 LDFLAGS := -lm
+HEADERS := $(wildcard ../../../utils/*.hh) \
+	$(wildcard ../../../utils/cmd/*.hh) \
+	$(wildcard ../../../utils/golden/*.hh)
 
 .PHONY: all clean
 
 all: $(OUT)
 
-$(OUT): $(CXXSRC)
+$(OUT): $(CXXSRC) $(HEADERS)
 	mkdir -p $(OUTDIR)
-	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $^ $(LDFLAGS)
+	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $(CXXSRC) $(LDFLAGS)
 
 clean:
 	rm -f $(OUT)

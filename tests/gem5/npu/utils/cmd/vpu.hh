@@ -3,9 +3,11 @@
 
 #include <stdint.h>
 
+#include "../npu_sync.hh"
 #include "common.hh"
 
-enum VpuOpcode {
+enum VpuOpcode
+{
     VPU_OP_EXEC = 0x0U,
     VPU_OP_VADD = 0x1U,
     VPU_OP_VSUB = 0x2U,
@@ -24,12 +26,14 @@ enum VpuOpcode {
     VPU_OP_VSOFTMAX = 0xFU,
 };
 
-enum VpuDataType {
+enum VpuDataType
+{
     VPU_DATA_I32 = 0x0U,
     VPU_DATA_F32 = 0x1U,
 };
 
-enum VpuCmdWord {
+enum VpuCmdWord
+{
     VPU_CMD_WORD_READ_MASK = 1U,
     VPU_CMD_WORD_WRITE_MASK = 2U,
     VPU_CMD_WORD_REPETITION = 3U,
@@ -39,12 +43,40 @@ enum VpuCmdWord {
     VPU_CMD_WORD_DST_STRIDE = 7U,
     VPU_CMD_WORD_DATA_TYPE = 8U,
     VPU_CMD_WORD_SCALAR_BITS = 9U,
+    VPU_CMD_WORD_SRC0_ADDR = 10U,
+    VPU_CMD_WORD_SRC1_ADDR = 11U,
+    VPU_CMD_WORD_SRC2_ADDR = 12U,
+    VPU_CMD_WORD_DST_ADDR = 13U,
 };
 
+enum VpuAddressLayout
+{
+    VPU_LOCAL_INPUT_BASE = 0x80000000U,
+    VPU_LOCAL_OUTPUT_BASE = 0x81000000U,
+    VPU_LOCAL_SLOT_STRIDE = 0x40U,
+    VPU_DEFAULT_INPUT_BUFFER = 0U,
+    VPU_DEFAULT_OUTPUT_BUFFER = 0U,
+};
+
+static inline uint32_t
+vpu_first_port(uint32_t mask)
+{
+    uint32_t port = 0U;
+    while (((mask >> port) & 0x1U) == 0U) {
+        ++port;
+    }
+    return port;
+}
+
+static inline uint32_t
+vpu_local_addr(uint32_t base, uint32_t buffer_index)
+{
+    return base + (buffer_index * VPU_LOCAL_SLOT_STRIDE);
+}
+
 static inline void
-vpu_cmd_init(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
-             uint32_t sync_indicator, uint32_t read_mask,
-             uint32_t write_mask, uint32_t repetition)
+vpu_cmd_init_raw(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
+                 uint32_t sync_indicator)
 {
     cmd->clear();
     cmd->setDeviceType(NPU_DEVICE_TYPE_VPU);
@@ -55,27 +87,83 @@ vpu_cmd_init(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
         cmd->setSetIndicatorSns(1U);
     }
     cmd->clearCommonReservedBits();
-    cmd->setWord(VPU_CMD_WORD_READ_MASK, read_mask);
-    cmd->setWord(VPU_CMD_WORD_WRITE_MASK, write_mask);
-    cmd->setWord(VPU_CMD_WORD_REPETITION, repetition);
 }
 
 static inline void
-vpu_cmd_set_vector_fields(NpuCmd *cmd, uint32_t flags, uint32_t elem_count,
+vpu_cmd_set_common_fields(NpuCmd *cmd, uint32_t read_mask,
+                          uint32_t write_mask, uint32_t repetition,
+                          uint32_t flags, uint32_t elem_count,
                           uint32_t src_stride_bytes,
-                          uint32_t dst_stride_bytes, uint32_t data_type)
+                          uint32_t dst_stride_bytes, uint32_t data_type,
+                          uint32_t scalar_bits, uint32_t src0_addr,
+                          uint32_t src1_addr, uint32_t src2_addr,
+                          uint32_t dst_addr)
 {
+    cmd->setWord(VPU_CMD_WORD_READ_MASK, read_mask);
+    cmd->setWord(VPU_CMD_WORD_WRITE_MASK, write_mask);
+    cmd->setWord(VPU_CMD_WORD_REPETITION, repetition);
     cmd->setWord(VPU_CMD_WORD_FLAGS, flags);
     cmd->setWord(VPU_CMD_WORD_ELEM_COUNT, elem_count);
     cmd->setWord(VPU_CMD_WORD_SRC_STRIDE, src_stride_bytes);
     cmd->setWord(VPU_CMD_WORD_DST_STRIDE, dst_stride_bytes);
     cmd->setWord(VPU_CMD_WORD_DATA_TYPE, data_type);
+    cmd->setWord(VPU_CMD_WORD_SCALAR_BITS, scalar_bits);
+    cmd->setWord(VPU_CMD_WORD_SRC0_ADDR, src0_addr);
+    cmd->setWord(VPU_CMD_WORD_SRC1_ADDR, src1_addr);
+    cmd->setWord(VPU_CMD_WORD_SRC2_ADDR, src2_addr);
+    cmd->setWord(VPU_CMD_WORD_DST_ADDR, dst_addr);
 }
 
 static inline void
-vpu_cmd_set_scalar_bits(NpuCmd *cmd, uint32_t scalar_bits)
+vpu_cmd_launch_load_one(uint32_t device_id, uint32_t sync_indicator,
+                        uint32_t port, uint32_t elem_count,
+                        uint32_t src_stride_bytes, uint32_t data_type,
+                        uint32_t input_buffer_index)
 {
-    cmd->setWord(VPU_CMD_WORD_SCALAR_BITS, scalar_bits);
+    NpuCmd cmd;
+    vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VLOAD, sync_indicator);
+    vpu_cmd_set_common_fields(
+        &cmd, 1U << port, 0U, 1U, 0U, elem_count, src_stride_bytes, 0U,
+        data_type, 0U, 0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE), 0U, 0U,
+        vpu_local_addr(VPU_LOCAL_INPUT_BASE, input_buffer_index));
+    cmd.launchCmd();
+}
+
+static inline void
+vpu_cmd_launch_store_one(uint32_t device_id, uint32_t sync_indicator,
+                         uint32_t port, uint32_t elem_count,
+                         uint32_t dst_stride_bytes, uint32_t data_type,
+                         uint32_t source_local_base,
+                         uint32_t buffer_index)
+{
+    NpuCmd cmd;
+    vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VSTORE, sync_indicator);
+    vpu_cmd_set_common_fields(
+        &cmd, 0U, 1U << port, 1U, 0U, elem_count, 0U, dst_stride_bytes,
+        data_type, 0U,
+        vpu_local_addr(source_local_base, buffer_index), 0U, 0U,
+        0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE));
+    cmd.launchCmd();
+}
+
+static inline void
+vpu_cmd_launch_compute(uint32_t device_id, uint32_t op_code,
+                       uint32_t sync_indicator, uint32_t read_mask,
+                       uint32_t write_mask, uint32_t repetition,
+                       uint32_t elem_count, uint32_t src_stride_bytes,
+                       uint32_t dst_stride_bytes, uint32_t data_type,
+                       uint32_t scalar_bits)
+{
+    NpuCmd cmd;
+    vpu_cmd_init_raw(&cmd, device_id, op_code, sync_indicator);
+    vpu_cmd_set_common_fields(
+        &cmd, read_mask, write_mask, repetition, 0U, elem_count,
+        src_stride_bytes, dst_stride_bytes, data_type, scalar_bits,
+        vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
+        vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
+        vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
+        vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER));
+    cmd.launchCmd();
 }
 
 static inline void
@@ -85,12 +173,30 @@ vpu_cmd_launch_binary(uint32_t device_id, uint32_t op_code,
                       uint32_t elem_count, uint32_t src_stride_bytes,
                       uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmd();
+    uint32_t remaining = read_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        vpu_cmd_launch_load_one(device_id, 0U, port, elem_count,
+                                src_stride_bytes, data_type,
+                                VPU_DEFAULT_INPUT_BUFFER);
+    }
+
+    vpu_cmd_launch_compute(device_id, op_code, 0U, read_mask,
+                           write_mask, repetition, elem_count,
+                           src_stride_bytes, dst_stride_bytes, data_type, 0U);
+
+    uint32_t remaining_writes = write_mask;
+    while (remaining_writes != 0U) {
+        const uint32_t port = vpu_first_port(remaining_writes);
+        remaining_writes &= ~(1U << port);
+        const uint32_t store_sync =
+            remaining_writes == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_store_one(device_id, store_sync, port, elem_count,
+                                 dst_stride_bytes, data_type,
+                                 VPU_LOCAL_OUTPUT_BASE,
+                                 VPU_DEFAULT_OUTPUT_BUFFER);
+    }
 }
 
 static inline void
@@ -101,12 +207,10 @@ vpu_cmd_launch_binary_at(uint64_t port_base, uint32_t device_id,
                          uint32_t src_stride_bytes,
                          uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmdAt(port_base);
+    (void)port_base;
+    vpu_cmd_launch_binary(device_id, op_code, sync_indicator, read_mask,
+                          write_mask, repetition, elem_count,
+                          src_stride_bytes, dst_stride_bytes, data_type);
 }
 
 static inline void
@@ -116,12 +220,34 @@ vpu_cmd_launch_unary(uint32_t device_id, uint32_t op_code,
                      uint32_t elem_count, uint32_t src_stride_bytes,
                      uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmd();
+    const uint32_t store_elem_count =
+        (op_code == VPU_OP_VREDUCE_SUM || op_code == VPU_OP_VREDUCE_MAX) ?
+        1U : elem_count;
+
+    uint32_t remaining = read_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        vpu_cmd_launch_load_one(device_id, 0U, port, elem_count,
+                                src_stride_bytes, data_type,
+                                VPU_DEFAULT_INPUT_BUFFER);
+    }
+
+    vpu_cmd_launch_compute(device_id, op_code, 0U, read_mask,
+                           write_mask, repetition, elem_count,
+                           src_stride_bytes, dst_stride_bytes, data_type, 0U);
+
+    uint32_t remaining_writes = write_mask;
+    while (remaining_writes != 0U) {
+        const uint32_t port = vpu_first_port(remaining_writes);
+        remaining_writes &= ~(1U << port);
+        const uint32_t store_sync =
+            remaining_writes == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_store_one(device_id, store_sync, port, store_elem_count,
+                                 dst_stride_bytes, data_type,
+                                 VPU_LOCAL_OUTPUT_BASE,
+                                 VPU_DEFAULT_OUTPUT_BUFFER);
+    }
 }
 
 static inline void
@@ -132,12 +258,10 @@ vpu_cmd_launch_unary_at(uint64_t port_base, uint32_t device_id,
                         uint32_t src_stride_bytes,
                         uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmdAt(port_base);
+    (void)port_base;
+    vpu_cmd_launch_unary(device_id, op_code, sync_indicator, read_mask,
+                         write_mask, repetition, elem_count,
+                         src_stride_bytes, dst_stride_bytes, data_type);
 }
 
 static inline void
@@ -147,12 +271,30 @@ vpu_cmd_launch_ternary(uint32_t device_id, uint32_t op_code,
                        uint32_t elem_count, uint32_t src_stride_bytes,
                        uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmd();
+    uint32_t remaining = read_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        vpu_cmd_launch_load_one(device_id, 0U, port, elem_count,
+                                src_stride_bytes, data_type,
+                                VPU_DEFAULT_INPUT_BUFFER);
+    }
+
+    vpu_cmd_launch_compute(device_id, op_code, 0U, read_mask,
+                           write_mask, repetition, elem_count,
+                           src_stride_bytes, dst_stride_bytes, data_type, 0U);
+
+    uint32_t remaining_writes = write_mask;
+    while (remaining_writes != 0U) {
+        const uint32_t port = vpu_first_port(remaining_writes);
+        remaining_writes &= ~(1U << port);
+        const uint32_t store_sync =
+            remaining_writes == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_store_one(device_id, store_sync, port, elem_count,
+                                 dst_stride_bytes, data_type,
+                                 VPU_LOCAL_OUTPUT_BASE,
+                                 VPU_DEFAULT_OUTPUT_BUFFER);
+    }
 }
 
 static inline void
@@ -163,12 +305,10 @@ vpu_cmd_launch_ternary_at(uint64_t port_base, uint32_t device_id,
                           uint32_t src_stride_bytes,
                           uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, op_code, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    cmd.launchCmdAt(port_base);
+    (void)port_base;
+    vpu_cmd_launch_ternary(device_id, op_code, sync_indicator, read_mask,
+                           write_mask, repetition, elem_count,
+                           src_stride_bytes, dst_stride_bytes, data_type);
 }
 
 static inline void
@@ -178,13 +318,31 @@ vpu_cmd_launch_scale(uint32_t device_id, uint32_t sync_indicator,
                      uint32_t src_stride_bytes, uint32_t dst_stride_bytes,
                      uint32_t data_type, uint32_t scalar_bits)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, VPU_OP_VSCALE, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    vpu_cmd_set_scalar_bits(&cmd, scalar_bits);
-    cmd.launchCmd();
+    uint32_t remaining = read_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        vpu_cmd_launch_load_one(device_id, 0U, port, elem_count,
+                                src_stride_bytes, data_type,
+                                VPU_DEFAULT_INPUT_BUFFER);
+    }
+
+    vpu_cmd_launch_compute(device_id, VPU_OP_VSCALE, 0U, read_mask,
+                           write_mask, repetition, elem_count,
+                           src_stride_bytes, dst_stride_bytes, data_type,
+                           scalar_bits);
+
+    uint32_t remaining_writes = write_mask;
+    while (remaining_writes != 0U) {
+        const uint32_t port = vpu_first_port(remaining_writes);
+        remaining_writes &= ~(1U << port);
+        const uint32_t store_sync =
+            remaining_writes == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_store_one(device_id, store_sync, port, elem_count,
+                                 dst_stride_bytes, data_type,
+                                 VPU_LOCAL_OUTPUT_BASE,
+                                 VPU_DEFAULT_OUTPUT_BUFFER);
+    }
 }
 
 static inline void
@@ -195,13 +353,10 @@ vpu_cmd_launch_scale_at(uint64_t port_base, uint32_t device_id,
                         uint32_t dst_stride_bytes, uint32_t data_type,
                         uint32_t scalar_bits)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, VPU_OP_VSCALE, sync_indicator, read_mask,
-                 write_mask, repetition);
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes,
-                              dst_stride_bytes, data_type);
-    vpu_cmd_set_scalar_bits(&cmd, scalar_bits);
-    cmd.launchCmdAt(port_base);
+    (void)port_base;
+    vpu_cmd_launch_scale(device_id, sync_indicator, read_mask, write_mask,
+                         repetition, elem_count, src_stride_bytes,
+                         dst_stride_bytes, data_type, scalar_bits);
 }
 
 static inline void
@@ -209,15 +364,15 @@ vpu_cmd_launch_load(uint32_t device_id, uint32_t sync_indicator,
                     uint32_t read_mask, uint32_t elem_count,
                     uint32_t src_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, VPU_OP_VLOAD, sync_indicator, read_mask,
-                 0U, 1U);
-    if (sync_indicator != 0U) {
-        cmd.setSetIndicatorSns(1U);
+    uint32_t remaining = read_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        const uint32_t load_sync = remaining == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_load_one(device_id, load_sync, port, elem_count,
+                                src_stride_bytes, data_type,
+                                VPU_DEFAULT_INPUT_BUFFER);
     }
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, src_stride_bytes, 0U,
-                              data_type);
-    cmd.launchCmd();
 }
 
 static inline void
@@ -225,15 +380,16 @@ vpu_cmd_launch_store(uint32_t device_id, uint32_t sync_indicator,
                      uint32_t write_mask, uint32_t elem_count,
                      uint32_t dst_stride_bytes, uint32_t data_type)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, VPU_OP_VSTORE, sync_indicator, 0U,
-                 write_mask, 1U);
-    if (sync_indicator != 0U) {
-        cmd.setSetIndicatorSns(1U);
+    uint32_t remaining = write_mask;
+    while (remaining != 0U) {
+        const uint32_t port = vpu_first_port(remaining);
+        remaining &= ~(1U << port);
+        const uint32_t store_sync = remaining == 0U ? sync_indicator : 0U;
+        vpu_cmd_launch_store_one(device_id, store_sync, port, elem_count,
+                                 dst_stride_bytes, data_type,
+                                 VPU_LOCAL_INPUT_BASE,
+                                 VPU_DEFAULT_INPUT_BUFFER);
     }
-    vpu_cmd_set_vector_fields(&cmd, 0U, elem_count, 0U, dst_stride_bytes,
-                              data_type);
-    cmd.launchCmd();
 }
 
 static inline void
@@ -241,11 +397,39 @@ vpu_cmd_launch_legacy_exec(uint32_t device_id, uint32_t sync_indicator,
                            uint32_t read_mask, uint32_t write_mask,
                            uint32_t repetition)
 {
-    NpuCmd cmd;
-    vpu_cmd_init(&cmd, device_id, VPU_OP_EXEC, sync_indicator, read_mask,
-                 write_mask, repetition);
-    cmd.setWord(VPU_CMD_WORD_FLAGS, 0U);
-    cmd.launchCmd();
+    for (uint32_t iteration = 0U; iteration < repetition; ++iteration) {
+        uint32_t load_mask = read_mask | write_mask;
+
+        while (load_mask != 0U) {
+            const uint32_t port = vpu_first_port(load_mask);
+            load_mask &= ~(1U << port);
+            vpu_cmd_launch_load_one(device_id, 0U, port, 1U,
+                                    sizeof(uint32_t), VPU_DATA_I32,
+                                    VPU_DEFAULT_INPUT_BUFFER);
+        }
+
+        vpu_cmd_launch_compute(device_id, VPU_OP_EXEC, 0U, read_mask,
+                               write_mask, 1U, 1U, sizeof(uint32_t),
+                               sizeof(uint32_t), VPU_DATA_I32, 0U);
+
+        uint32_t remaining_writes = write_mask;
+        while (remaining_writes != 0U) {
+            const uint32_t port = vpu_first_port(remaining_writes);
+            remaining_writes &= ~(1U << port);
+            const uint32_t store_sync =
+                (iteration + 1U == repetition && remaining_writes == 0U) ?
+                sync_indicator : 0U;
+            vpu_cmd_launch_store_one(device_id, store_sync, port, 1U,
+                                     sizeof(uint32_t), VPU_DATA_I32,
+                                     VPU_LOCAL_OUTPUT_BASE,
+                                     VPU_DEFAULT_OUTPUT_BUFFER);
+        }
+    }
+
+    if (sync_indicator != 0U) {
+        npu_launch_sync_wait(device_id, sync_indicator, 0U, 0U, 0U);
+        npu_cmd_sync_done();
+    }
 }
 
 #endif
