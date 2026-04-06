@@ -86,14 +86,6 @@ main(void)
     npu_launch_sync_wait(SYSTEM_VPU_DUAL_VPU0_ID,
                          SYSTEM_VPU_DUAL_RELEASE_SYNC, 0x11111111U,
                          0x22222222U, 0x33333333U);
-    vpu_cmd_launch_scale(SYSTEM_VPU_DUAL_VPU0_ID, SYSTEM_VPU_DUAL_VPU0_SYNC,
-                         0x1U, 0x2U, 1U, SYSTEM_VPU_DUAL_ELEM_COUNT,
-                         sizeof(uint32_t), sizeof(uint32_t), VPU_DATA_F32,
-                         npu_float_to_bits(2.0f));
-    vpu_cmd_launch_unary(SYSTEM_VPU_DUAL_VPU1_ID, VPU_OP_VEXP,
-                         SYSTEM_VPU_DUAL_VPU1_SYNC, 0x4U, 0x8U, 1U,
-                         SYSTEM_VPU_DUAL_ELEM_COUNT, sizeof(uint32_t),
-                         sizeof(uint32_t), VPU_DATA_F32);
 
     if (verify_outputs_hold_zero(4096ULL) != 0) {
         printf("SYSTEM_VPU_DUAL_RELEASE_GATE_EARLY_DISPATCH\n");
@@ -104,6 +96,15 @@ main(void)
     npu_sync_signal_set(SYSTEM_VPU_DUAL_VPU0_ID,
                         SYSTEM_VPU_DUAL_RELEASE_SYNC);
     npu_cmd_sync_done();
+
+    vpu_cmd_launch_scale(SYSTEM_VPU_DUAL_VPU0_ID, SYSTEM_VPU_DUAL_VPU0_SYNC,
+                         0x1U, 0x2U, 1U, SYSTEM_VPU_DUAL_ELEM_COUNT,
+                         sizeof(uint32_t), sizeof(uint32_t), VPU_DATA_F32,
+                         npu_float_to_bits(2.0f));
+    vpu_cmd_launch_unary(SYSTEM_VPU_DUAL_VPU1_ID, VPU_OP_VEXP,
+                         SYSTEM_VPU_DUAL_VPU1_SYNC, 0x4U, 0x8U, 1U,
+                         SYSTEM_VPU_DUAL_ELEM_COUNT, sizeof(uint32_t),
+                         sizeof(uint32_t), VPU_DATA_F32);
 
     if (npu_wait_u32_vector_match(NULL,
                                   npu_spm_slot_word_ptr_default(

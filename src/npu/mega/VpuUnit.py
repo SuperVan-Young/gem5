@@ -17,6 +17,28 @@ class VpuUnit(SpecializedExecutionUnit):
         "Shared LUT resource used by VSQRT/VEXP/VSOFTMAX; the default is a "
         "single-resource single-queue model",
     )
+    num_input_ports = Param.Unsigned(
+        1, "Number of logical local input ports visible to compute commands"
+    )
+    num_output_ports = Param.Unsigned(
+        1, "Number of logical local output ports visible to compute commands"
+    )
+    input_buffer_count = Param.Unsigned(
+        2, "Number of local input buffers per logical port"
+    )
+    output_buffer_count = Param.Unsigned(
+        2, "Number of local output buffers per logical port"
+    )
+    local_input_base = Param.Addr(
+        0x80000000, "Base tag used to encode local input-buffer addresses"
+    )
+    local_output_base = Param.Addr(
+        0x81000000, "Base tag used to encode local output-buffer addresses"
+    )
+    local_buffer_stride = Param.Unsigned(
+        0x40,
+        "Stride of one logical local-buffer slot in the encoded address map",
+    )
 
     cxx_exports = [
         PyBindMethod("lutRequestCount"),

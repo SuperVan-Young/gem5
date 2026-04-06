@@ -40,13 +40,40 @@
 namespace gem5
 {
 
+namespace
+{
+
+constexpr uint32_t LocalRegionTagMask = 0xFF000000U;
+constexpr uint32_t LocalRegionInputTag = 0x80000000U;
+constexpr uint32_t LocalRegionOutputTag = 0x81000000U;
+
+} // anonymous namespace
+
 VpuUnit::VpuUnit(const VpuUnitParams &params)
     : SpecializedExecutionUnit(params), deviceId(params.device_id),
       lut(params.lut),
-      residentBuffers(params.num_mem_side_ports),
-      residentBufferValid(params.num_mem_side_ports, false)
+      numMemPorts(params.num_mem_side_ports),
+      numInputPorts(params.num_input_ports),
+      numOutputPorts(params.num_output_ports),
+      inputBufferCount(params.input_buffer_count),
+      outputBufferCount(params.output_buffer_count),
+      localInputBase(params.local_input_base),
+      localOutputBase(params.local_output_base),
+      localBufferStride(params.local_buffer_stride),
+      inputBuffers(numInputPorts,
+                   std::vector<LocalBufferSlot>(inputBufferCount)),
+      outputBuffers(numOutputPorts,
+                    std::vector<LocalBufferSlot>(outputBufferCount))
 {
     panic_if(lut == nullptr, "%s: lut must not be null", name());
+    panic_if(numMemPorts == 0, "%s: mem ports must be non-zero", name());
+    panic_if(numInputPorts == 0 || numOutputPorts == 0,
+             "%s: input/output ports must be non-zero", name());
+    panic_if(inputBufferCount == 0 || outputBufferCount == 0,
+             "%s: input/output buffer counts must be non-zero", name());
+    panic_if(
+        localBufferStride == 0,
+        "%s: local buffer stride must be non-zero", name());
 }
 
 uint32_t
@@ -71,14 +98,7 @@ VpuUnit::packWord(uint32_t value) const
 uint32_t
 VpuUnit::cmdWord(const std::vector<uint8_t> &cmd, size_t wordIdx) const
 {
-    const size_t offset = wordIdx * sizeof(uint32_t);
-    if (cmd.size() < offset + sizeof(uint32_t)) {
-        return 0;
-    }
-
-    uint32_t word = 0;
-    std::memcpy(&word, cmd.data() + offset, sizeof(word));
-    return word;
+    return readCmdWord(cmd, wordIdx);
 }
 
 Addr
@@ -126,27 +146,23 @@ VpuUnit::decodeOpcode(uint8_t opCode) const
       default:
         fatal("%s: unsupported VPU opCode=%u", name(), opCode);
     }
-
-    panic("%s: unreachable VPU opcode decode", name());
 }
 
 VpuUnit::DecodedVectorOp
-VpuUnit::decodeVectorOp(const ActiveExecution &exec) const
+VpuUnit::decodeVectorOp(const MacroCmdContext &macroCmd) const
 {
     DecodedVectorOp op;
-    op.opcode = decodeOpcode(exec.fields.opCode);
+    op.opcode = decodeOpcode(macroCmd.fields.opCode);
     op.legacyExec = op.opcode == Opcode::Exec;
-    if (op.legacyExec) {
-        return op;
-    }
+    op.flags = cmdWord(macroCmd.cmd, FlagsWord);
+    op.elemCount = cmdWord(macroCmd.cmd, ElemCountWord);
+    op.srcStrideBytes = cmdWord(macroCmd.cmd, SrcStrideWord);
+    op.dstStrideBytes = cmdWord(macroCmd.cmd, DstStrideWord);
+    op.scalarBits = cmdWord(macroCmd.cmd, ScalarBitsWord);
+    op.repetition = std::max<uint32_t>(
+        1, cmdWord(macroCmd.cmd, RepetitionWord));
 
-    op.flags = cmdWord(exec.cmd, FlagsWord);
-    op.elemCount = cmdWord(exec.cmd, ElemCountWord);
-    op.srcStrideBytes = cmdWord(exec.cmd, SrcStrideWord);
-    op.dstStrideBytes = cmdWord(exec.cmd, DstStrideWord);
-    op.scalarBits = cmdWord(exec.cmd, ScalarBitsWord);
-
-    const uint32_t rawDataType = cmdWord(exec.cmd, DataTypeWord);
+    const uint32_t rawDataType = cmdWord(macroCmd.cmd, DataTypeWord);
     switch (rawDataType) {
       case static_cast<uint32_t>(DataType::Int32):
         op.dataType = DataType::Int32;
@@ -161,139 +177,241 @@ VpuUnit::decodeVectorOp(const ActiveExecution &exec) const
     if (op.elemCount == 0) {
         op.elemCount = 1;
     }
-
-    op.elemSize = sizeof(uint32_t);
-
     if (op.srcStrideBytes == 0) {
-        op.srcStrideBytes = op.elemSize;
+        op.srcStrideBytes = sizeof(uint32_t);
     }
     if (op.dstStrideBytes == 0) {
-        op.dstStrideBytes = op.elemSize;
+        op.dstStrideBytes = sizeof(uint32_t);
     }
 
-    panic_if(op.srcStrideBytes < op.elemSize,
-             "%s: src stride %u smaller than element size %zu",
-             name(), op.srcStrideBytes, op.elemSize);
-    panic_if(op.dstStrideBytes < op.elemSize,
-             "%s: dst stride %u smaller than element size %zu",
-             name(), op.dstStrideBytes, op.elemSize);
-
-    op.srcSpanBytes = (static_cast<size_t>(op.elemCount - 1) *
-                       static_cast<size_t>(op.srcStrideBytes)) + op.elemSize;
-    op.dstSpanBytes = (static_cast<size_t>(op.elemCount - 1) *
-                       static_cast<size_t>(op.dstStrideBytes)) + op.elemSize;
-
-    panic_if(op.srcSpanBytes > SpmSlotStride,
-             "%s: source span %zu exceeds SPM slot stride %#llx",
-             name(), op.srcSpanBytes,
-             static_cast<unsigned long long>(SpmSlotStride));
-    panic_if(op.dstSpanBytes > SpmSlotStride,
-             "%s: destination span %zu exceeds SPM slot stride %#llx",
-             name(), op.dstSpanBytes,
-             static_cast<unsigned long long>(SpmSlotStride));
-    panic_if(op.flags != 0,
-             "%s: unsupported VPU flags=%#x for opCode=%u", name(), op.flags,
-             exec.fields.opCode);
-
-    if (op.opcode == Opcode::VCvtI2F) {
-        panic_if(op.dataType != DataType::Float32,
-                 "%s: VCvtI2F requires Float32 destination data type",
-                 name());
-    }
-    if (op.opcode == Opcode::VCvtF2I) {
-        panic_if(op.dataType != DataType::Int32,
-                 "%s: VCvtF2I requires Int32 destination data type", name());
-    }
-    if (op.opcode == Opcode::VSqrt) {
-        panic_if(op.dataType != DataType::Float32,
-                 "%s: VSqrt requires Float32 data type", name());
-    }
-    if (op.opcode == Opcode::VFma) {
-        panic_if(op.dataType != DataType::Float32,
-                 "%s: VFMA requires Float32 data type", name());
-    }
-    if (op.opcode == Opcode::VExp || op.opcode == Opcode::VSoftmax) {
-        panic_if(op.dataType != DataType::Float32,
-                 "%s: nonlinear LUT ops require Float32 data type", name());
-    }
+    op.elemSize = sizeof(uint32_t);
+    op.srcSpanBytes =
+        (static_cast<size_t>(op.elemCount - 1) * op.srcStrideBytes) +
+        op.elemSize;
+    op.dstSpanBytes =
+        (static_cast<size_t>(op.elemCount - 1) * op.dstStrideBytes) +
+        op.elemSize;
 
     return op;
 }
 
-void
-VpuUnit::validateVectorPortLayout(const ActiveExecution &exec,
-                                  const DecodedVectorOp &op) const
+std::vector<PortID>
+VpuUnit::decodeMask(uint32_t mask) const
 {
-    if (op.legacyExec) {
+    std::vector<PortID> ports;
+    for (PortID port = 0; port < static_cast<PortID>(numMemPorts); ++port) {
+        if ((mask & (1U << port)) != 0) {
+            ports.push_back(port);
+        }
+    }
+    return ports;
+}
+
+void
+VpuUnit::validatePortLayout(const VpuMacroState &state) const
+{
+    const auto &op = state.op;
+    if (op.opcode == Opcode::VLoad) {
+        panic_if(
+            state.readPorts.size() != 1,
+            "%s: VLOAD expects one source port per macro command", name());
+        return;
+    }
+    if (op.opcode == Opcode::VStore) {
+        panic_if(state.writePorts.size() != 1,
+                 "%s: VSTORE expects one destination port per macro command",
+                 name());
         return;
     }
 
     switch (op.opcode) {
+      case Opcode::Exec:
+        panic_if(state.writePorts.empty(),
+                 "%s: legacy exec requires write ports", name());
+        break;
       case Opcode::VAdd:
       case Opcode::VSub:
       case Opcode::VMul:
       case Opcode::VDiv:
-        panic_if(exec.writePorts.empty(),
-                 "%s: vector op requires at least one write port", name());
-        panic_if(exec.readPorts.size() != exec.writePorts.size() * 2,
-                 "%s: binary vector op requires exactly two read ports per "
-                 "write port (reads=%zu writes=%zu)",
-                 name(), exec.readPorts.size(), exec.writePorts.size());
+        panic_if(state.writePorts.empty() ||
+                 state.readPorts.size() != state.writePorts.size() * 2,
+                 "%s: binary op requires exactly two reads per write",
+                 name());
         break;
       case Opcode::VFma:
-        panic_if(exec.writePorts.empty(),
-                 "%s: vector op requires at least one write port", name());
-        panic_if(exec.readPorts.size() != exec.writePorts.size() * 3,
-                 "%s: VFMA requires exactly three read ports per write port "
-                 "(reads=%zu writes=%zu)",
-                 name(), exec.readPorts.size(), exec.writePorts.size());
+        panic_if(state.writePorts.empty() ||
+                 state.readPorts.size() != state.writePorts.size() * 3,
+                 "%s: VFMA requires exactly three reads per write", name());
         break;
       case Opcode::VReduceSum:
       case Opcode::VReduceMax:
-        panic_if(exec.writePorts.empty(),
-                 "%s: vector op requires at least one write port", name());
-        panic_if(exec.readPorts.size() != exec.writePorts.size(),
-                 "%s: reduce op requires one read port per write port "
-                 "(reads=%zu writes=%zu)",
-                 name(), exec.readPorts.size(), exec.writePorts.size());
-        break;
-      case Opcode::VLoad:
-        panic_if(exec.readPorts.empty(),
-                 "%s: VLOAD requires at least one read port", name());
-        panic_if(!exec.writePorts.empty(),
-                 "%s: VLOAD does not accept write ports", name());
-        break;
-      case Opcode::VStore:
-        panic_if(!exec.readPorts.empty(),
-                 "%s: VSTORE does not accept read ports", name());
-        panic_if(exec.writePorts.empty(),
-                 "%s: VSTORE requires at least one write port", name());
-        break;
       case Opcode::VScale:
       case Opcode::VCvtI2F:
       case Opcode::VCvtF2I:
       case Opcode::VSqrt:
       case Opcode::VExp:
       case Opcode::VSoftmax:
-        panic_if(exec.writePorts.empty(),
-                 "%s: vector op requires at least one write port", name());
-        panic_if(exec.readPorts.size() != exec.writePorts.size(),
-                 "%s: unary vector op requires one read port per write port "
-                 "(reads=%zu writes=%zu)",
-                 name(), exec.readPorts.size(), exec.writePorts.size());
+        panic_if(state.writePorts.empty() ||
+                 state.readPorts.size() != state.writePorts.size(),
+                 "%s: unary/reduce op requires one read per write", name());
         break;
-      case Opcode::Exec:
-        panic("%s: unexpected legacy opcode in vector port validation",
-              name());
+      case Opcode::VLoad:
+      case Opcode::VStore:
+        break;
     }
+}
+
+bool
+VpuUnit::isSpmAddr(Addr addr) const
+{
+    return addr >= SpmBase && addr < (SpmBase + (numMemPorts * SpmSlotStride));
+}
+
+bool
+VpuUnit::isInputLocalAddr(Addr addr) const
+{
+    return (addr & LocalRegionTagMask) ==
+           (localInputBase & LocalRegionTagMask);
+}
+
+bool
+VpuUnit::isOutputLocalAddr(Addr addr) const
+{
+    return (addr & LocalRegionTagMask) ==
+           (localOutputBase & LocalRegionTagMask);
+}
+
+VpuUnit::LocalAddr
+VpuUnit::decodeLocalAddr(
+    Addr addr, BufferRole expected, size_t accessSize) const
+{
+    const Addr base = expected == BufferRole::Input ? localInputBase :
+        localOutputBase;
+    const uint32_t baseTag = static_cast<uint32_t>(base & LocalRegionTagMask);
+    panic_if((addr & LocalRegionTagMask) != baseTag,
+             "%s: address %#llx is not in expected local-buffer region",
+             name(), static_cast<unsigned long long>(addr));
+
+    const uint32_t bufferCount =
+        expected == BufferRole::Input ? inputBufferCount : outputBufferCount;
+    const Addr offset = addr - base;
+    const uint32_t slotIndex = offset / localBufferStride;
+    const size_t intraOffset = offset % localBufferStride;
+
+    panic_if(intraOffset + accessSize > localBufferStride,
+             "%s: local-buffer access exceeds slot stride", name());
+
+    panic_if(slotIndex >= bufferCount,
+             "%s: local-buffer index %u out of range", name(), slotIndex);
+    return {expected, 0, slotIndex, intraOffset};
+}
+
+PortID
+VpuUnit::decodeSpmPort(Addr addr, size_t accessSize) const
+{
+    panic_if(!isSpmAddr(addr), "%s: address %#llx is not in SPM range", name(),
+             static_cast<unsigned long long>(addr));
+    const Addr offset = addr - SpmBase;
+    const PortID port = offset / SpmSlotStride;
+    const size_t intra = offset % SpmSlotStride;
+    panic_if(intra + accessSize > SpmSlotStride,
+             "%s: SPM access exceeds slot stride", name());
+    return port;
+}
+
+void
+VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
+                         VpuMacroState &state) const
+{
+    fatal_if(macroCmd.fields.deviceType != VpuDeviceType,
+             "%s: unexpected deviceType=%u for VPU command", name(),
+             macroCmd.fields.deviceType);
+    fatal_if(macroCmd.fields.deviceId != deviceId,
+             "%s: command deviceId=%u does not match instance deviceId=%u",
+             name(), macroCmd.fields.deviceId, deviceId);
+
+    state.readMask = cmdWord(macroCmd.cmd, ReadMaskWord);
+    state.writeMask = cmdWord(macroCmd.cmd, WriteMaskWord);
+    state.readPorts = decodeMask(state.readMask);
+    state.writePorts = decodeMask(state.writeMask);
+    state.src0Addr = cmdWord(macroCmd.cmd, Src0AddrWord);
+    state.src1Addr = cmdWord(macroCmd.cmd, Src1AddrWord);
+    state.src2Addr = cmdWord(macroCmd.cmd, Src2AddrWord);
+    state.dstAddr = cmdWord(macroCmd.cmd, DstAddrWord);
+
+    validatePortLayout(state);
+
+    if (state.op.opcode == Opcode::VLoad) {
+        panic_if(!isSpmAddr(state.src0Addr),
+                 "%s: VLOAD source must be in SPM", name());
+        panic_if(!isInputLocalAddr(state.dstAddr),
+                 "%s: VLOAD destination must be input local-buffer", name());
+    } else if (state.op.opcode == Opcode::VStore) {
+        panic_if(!isInputLocalAddr(state.src0Addr) &&
+                     !isOutputLocalAddr(state.src0Addr),
+                 "%s: VSTORE source must be a local-buffer address", name());
+        panic_if(!isSpmAddr(state.dstAddr),
+                 "%s: VSTORE destination must be in SPM", name());
+    } else {
+        panic_if(!isInputLocalAddr(state.src0Addr),
+                 "%s: compute src0 must be input local-buffer", name());
+        if (!state.readPorts.empty()) {
+            panic_if(!isInputLocalAddr(state.src1Addr) &&
+                         state.readPorts.size() > 1,
+                     "%s: compute src1 must be input local-buffer", name());
+        }
+        if (state.op.opcode == Opcode::VFma) {
+            panic_if(!isInputLocalAddr(state.src2Addr),
+                     "%s: compute src2 must be input local-buffer", name());
+        }
+        panic_if(
+            !isOutputLocalAddr(state.dstAddr),
+            "%s: compute destination must be output local-buffer", name());
+    }
+
+    if (state.op.opcode == Opcode::VCvtI2F) {
+        panic_if(state.op.dataType != DataType::Float32,
+                 "%s: VCvtI2F requires Float32 destination", name());
+    }
+    if (state.op.opcode == Opcode::VCvtF2I) {
+        panic_if(state.op.dataType != DataType::Int32,
+                 "%s: VCvtF2I requires Int32 destination", name());
+    }
+    if ((state.op.opcode == Opcode::VSqrt ||
+         state.op.opcode == Opcode::VExp ||
+         state.op.opcode == Opcode::VSoftmax ||
+         state.op.opcode == Opcode::VFma) &&
+        state.op.dataType != DataType::Float32) {
+        panic_if(true, "%s: floating-point VPU op requires Float32", name());
+    }
+}
+
+Tick
+VpuUnit::computeExecLatency(const VpuMacroState &state)
+{
+    Tick extraLatency = 0;
+    if (isLutOpcode(state.op.opcode)) {
+        const uint32_t lutRequests =
+            state.op.opcode == Opcode::VSoftmax ?
+            (state.op.elemCount * state.writePorts.size()) :
+            (state.op.elemCount * state.writePorts.size());
+        extraLatency = lut->reserve(lutOperation(state.op.opcode), lutRequests,
+                                    curTick());
+    }
+
+    const Tick baseLatency = debugProcessLatency;
+    const Tick totalLatency = baseLatency + extraLatency;
+    if (isLinearOpcode(state.op.opcode)) {
+        lastLinearExecuteLatencyValue = totalLatency;
+    }
+    return totalLatency;
 }
 
 uint32_t
 VpuUnit::loadUint32(const std::vector<uint8_t> &bytes, size_t offset) const
 {
     panic_if(offset + sizeof(uint32_t) > bytes.size(),
-             "%s: uint32 load out of range offset=%zu size=%zu",
-             name(), offset, bytes.size());
+             "%s: uint32 load out of range", name());
     uint32_t value = 0;
     std::memcpy(&value, bytes.data() + offset, sizeof(value));
     return value;
@@ -302,10 +420,9 @@ VpuUnit::loadUint32(const std::vector<uint8_t> &bytes, size_t offset) const
 float
 VpuUnit::loadFloat32(const std::vector<uint8_t> &bytes, size_t offset) const
 {
+    panic_if(offset + sizeof(float) > bytes.size(),
+             "%s: float load out of range", name());
     float value = 0.0f;
-    panic_if(offset + sizeof(value) > bytes.size(),
-             "%s: float load out of range offset=%zu size=%zu",
-             name(), offset, bytes.size());
     std::memcpy(&value, bytes.data() + offset, sizeof(value));
     return value;
 }
@@ -314,9 +431,8 @@ void
 VpuUnit::storeUint32(std::vector<uint8_t> &bytes, size_t offset,
                      uint32_t value) const
 {
-    panic_if(offset + sizeof(value) > bytes.size(),
-             "%s: uint32 store out of range offset=%zu size=%zu",
-             name(), offset, bytes.size());
+    panic_if(offset + sizeof(uint32_t) > bytes.size(),
+             "%s: uint32 store out of range", name());
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
@@ -324,9 +440,8 @@ void
 VpuUnit::storeFloat32(std::vector<uint8_t> &bytes, size_t offset,
                       float value) const
 {
-    panic_if(offset + sizeof(value) > bytes.size(),
-             "%s: float store out of range offset=%zu size=%zu",
-             name(), offset, bytes.size());
+    panic_if(offset + sizeof(float) > bytes.size(),
+             "%s: float store out of range", name());
     std::memcpy(bytes.data() + offset, &value, sizeof(value));
 }
 
@@ -340,7 +455,8 @@ VpuUnit::isLutOpcode(Opcode opcode) const
 bool
 VpuUnit::isLinearOpcode(Opcode opcode) const
 {
-    return !isLutOpcode(opcode) && opcode != Opcode::Exec;
+    return !isLutOpcode(opcode) && opcode != Opcode::VLoad &&
+           opcode != Opcode::VStore;
 }
 
 LutUnit::Operation
@@ -354,536 +470,604 @@ VpuUnit::lutOperation(Opcode opcode) const
       case Opcode::VSoftmax:
         return LutUnit::Operation::Softmax;
       default:
-        panic("%s: opcode %u does not use LUT", name(),
-              static_cast<uint32_t>(opcode));
+        panic("%s: opcode does not use LUT", name());
     }
 }
 
-void
-VpuUnit::validateCommand(const ActiveExecution &exec) const
+VpuUnit::LocalBufferSlot &
+VpuUnit::bufferSlot(const LocalAddr &addr)
 {
-    fatal_if(exec.fields.deviceType != VpuDeviceType,
-             "%s: unexpected deviceType=%u for VPU command", name(),
-             exec.fields.deviceType);
-    fatal_if(exec.fields.deviceId != deviceId,
-             "%s: command deviceId=%u does not match instance deviceId=%u",
-             name(), exec.fields.deviceId, deviceId);
-    decodeVectorOp(exec);
+    auto &buffers =
+        addr.role == BufferRole::Input ? inputBuffers : outputBuffers;
+    return buffers.at(addr.portId).at(addr.bufferIndex);
+}
+
+const VpuUnit::LocalBufferSlot &
+VpuUnit::bufferSlot(const LocalAddr &addr) const
+{
+    const auto &buffers =
+        addr.role == BufferRole::Input ? inputBuffers : outputBuffers;
+    return buffers.at(addr.portId).at(addr.bufferIndex);
+}
+
+const std::vector<uint8_t> &
+VpuUnit::sourceBytes(const VpuMacroState &state, size_t sourceIndex,
+                     PortID logicalPort) const
+{
+    const Addr base =
+        sourceIndex == 0 ? state.src0Addr :
+        sourceIndex == 1 ? state.src1Addr : state.src2Addr;
+    LocalAddr addr = decodeLocalAddr(
+        base, BufferRole::Input, state.op.srcSpanBytes);
+    addr.portId = logicalPort;
+    const auto &slot = bufferSlot(addr);
+    panic_if(!slot.valid || slot.bytes.size() < state.op.srcSpanBytes,
+             "%s: missing input buffer data for port=%d buffer=%u",
+             name(), logicalPort, addr.bufferIndex);
+    return slot.bytes;
+}
+
+bool
+VpuUnit::sourceReady(const VpuMacroState &state, size_t sourceIndex,
+                     PortID logicalPort) const
+{
+    const Addr base =
+        sourceIndex == 0 ? state.src0Addr :
+        sourceIndex == 1 ? state.src1Addr : state.src2Addr;
+    LocalAddr addr = decodeLocalAddr(
+        base, BufferRole::Input, state.op.srcSpanBytes);
+    addr.portId = logicalPort;
+    const auto &slot = bufferSlot(addr);
+    return slot.valid && slot.bytes.size() >= state.op.srcSpanBytes;
+}
+
+bool
+VpuUnit::computeInputsReady(const VpuMacroState &state) const
+{
+    switch (state.op.opcode) {
+      case Opcode::Exec:
+        for (const PortID port : state.readPorts) {
+            if (!sourceReady(state, 0, port)) {
+                return false;
+            }
+        }
+        for (const PortID port : state.writePorts) {
+            if (!sourceReady(state, 0, port)) {
+                return false;
+            }
+        }
+        return true;
+      case Opcode::VAdd:
+      case Opcode::VSub:
+      case Opcode::VMul:
+      case Opcode::VDiv:
+        for (size_t dstIndex = 0;
+             dstIndex < state.writePorts.size(); ++dstIndex) {
+            if (!sourceReady(state, 0, state.readPorts[dstIndex * 2]) ||
+                !sourceReady(state, 1, state.readPorts[(dstIndex * 2) + 1])) {
+                return false;
+            }
+        }
+        return true;
+      case Opcode::VFma:
+        for (size_t dstIndex = 0;
+             dstIndex < state.writePorts.size(); ++dstIndex) {
+            if (!sourceReady(state, 0, state.readPorts[dstIndex * 3]) ||
+                !sourceReady(state, 1, state.readPorts[(dstIndex * 3) + 1]) ||
+                !sourceReady(state, 2, state.readPorts[(dstIndex * 3) + 2])) {
+                return false;
+            }
+        }
+        return true;
+      case Opcode::VReduceSum:
+      case Opcode::VReduceMax:
+      case Opcode::VScale:
+      case Opcode::VCvtI2F:
+      case Opcode::VCvtF2I:
+      case Opcode::VSqrt:
+      case Opcode::VExp:
+      case Opcode::VSoftmax:
+        for (size_t dstIndex = 0;
+             dstIndex < state.writePorts.size(); ++dstIndex) {
+            if (!sourceReady(state, 0, state.readPorts[dstIndex])) {
+                return false;
+            }
+        }
+        return true;
+      case Opcode::VLoad:
+      case Opcode::VStore:
+        return true;
+    }
+    return true;
+}
+
+bool
+VpuUnit::storeSourceReady(const VpuMacroState &state) const
+{
+    const BufferRole srcRole = isOutputLocalAddr(state.src0Addr) ?
+        BufferRole::Output : BufferRole::Input;
+    const LocalAddr srcAddr = decodeLocalAddr(
+        state.src0Addr, srcRole, state.op.dstSpanBytes);
+    auto actualSrc = srcAddr;
+    actualSrc.portId = state.writePorts.front();
+    const auto &slot = bufferSlot(actualSrc);
+    return slot.valid && slot.bytes.size() >= state.op.dstSpanBytes;
 }
 
 void
-VpuUnit::onCommandBegin(ActiveExecution &exec)
+VpuUnit::writeResultBytes(const VpuMacroState &state, PortID dstPort,
+                          const std::vector<uint8_t> &bytes) const
 {
-    validateCommand(exec);
-    const DecodedVectorOp op = decodeVectorOp(exec);
-    DPRINTF(VPU,
-            "%s begin cmd deviceType=%u deviceId=%u opCode=%u sync=%u "
-            "readMask=%#x writeMask=%#x repetition=%u elemCount=%u "
-            "srcStride=%u dstStride=%u dataType=%u scalar=%#x flags=%#x\n",
-            name(), exec.fields.deviceType, exec.fields.deviceId,
-            exec.fields.opCode, exec.fields.syncIndicator, exec.readMask,
-            exec.writeMask, exec.repetition, op.elemCount, op.srcStrideBytes,
-            op.dstStrideBytes, static_cast<uint32_t>(op.dataType),
-            op.scalarBits, op.flags);
+    LocalAddr addr = decodeLocalAddr(state.dstAddr, BufferRole::Output,
+                                     state.op.dstSpanBytes);
+    addr.portId = dstPort;
+    auto &slot = const_cast<VpuUnit *>(this)->bufferSlot(addr);
+    slot.bytes = bytes;
+    slot.valid = true;
 }
 
 void
-VpuUnit::buildMvinRequests(ActiveExecution &exec,
-                           std::vector<MemRequestDesc> &reqs)
+VpuUnit::appendStoreWhenReady(MacroCmdContext &macroCmd,
+                              const VpuMacroState &state)
 {
-    const DecodedVectorOp op = decodeVectorOp(exec);
-    validateVectorPortLayout(exec, op);
-
-    if (op.opcode == Opcode::VStore) {
+    if (!storeSourceReady(state)) {
+        appendExecUop(macroCmd, 1);
+        macroCmd.uopQueue.back().token =
+            static_cast<uint64_t>(ExecToken::WaitStoreData);
         return;
     }
 
-    for (const PortID port : exec.readPorts) {
-        MemRequestDesc req;
-        req.portId = port;
-        req.kind = MemTxnContext::Kind::Mvin;
-        req.addr = slotAddr(port);
-        req.size = op.legacyExec ? sizeof(uint32_t) : op.srcSpanBytes;
-        reqs.push_back(req);
+    const BufferRole srcRole = isOutputLocalAddr(state.src0Addr) ?
+        BufferRole::Output : BufferRole::Input;
+    const LocalAddr srcAddr = decodeLocalAddr(
+        state.src0Addr, srcRole, state.op.dstSpanBytes);
+    auto actualSrc = srcAddr;
+    actualSrc.portId = state.writePorts.front();
+    const auto &slot = bufferSlot(actualSrc);
+    appendStoreUop(macroCmd, slotAddr(state.writePorts.front()),
+                   state.op.dstSpanBytes,
+                   std::vector<uint8_t>(slot.bytes.begin(),
+                                        slot.bytes.begin() +
+                                            state.op.dstSpanBytes));
+}
 
-        DPRINTF(VPU,
-                "%s iteration=%llu issue read port=%d addr=%#llx size=%u\n",
-                name(),
-                static_cast<unsigned long long>(exec.iteration),
-                port, static_cast<unsigned long long>(req.addr),
-                static_cast<unsigned>(req.size));
+void
+VpuUnit::executeLegacy(VpuMacroState &state) const
+{
+    uint32_t signature = 0;
+    for (const PortID port : state.readPorts) {
+        const auto &bytes = sourceBytes(state, 0, port);
+        signature += unpackWord(bytes);
+    }
+
+    for (const PortID port : state.writePorts) {
+        const auto &currentBytes = sourceBytes(state, 0, port);
+        const uint32_t current = unpackWord(currentBytes);
+        const uint32_t value =
+            current + signature + 0x10U + (static_cast<uint32_t>(port) + 1U);
+        const auto outAddr =
+            decodeLocalAddr(
+                state.dstAddr, BufferRole::Output, sizeof(uint32_t));
+        (void)outAddr;
+        writeResultBytes(state, port, packWord(value));
     }
 }
 
 void
-VpuUnit::onMvinResponse(ActiveExecution &exec, const MemTxnContext &txn,
-                        PacketPtr pkt)
+VpuUnit::executeBinary(const VpuMacroState &state) const
 {
-    uint32_t value = 0;
-    const size_t copy_size =
-        std::min(static_cast<size_t>(pkt->getSize()), sizeof(value));
-    std::memcpy(&value, pkt->getConstPtr<uint8_t>(),
-                copy_size);
-    DPRINTF(VPU,
-            "%s iteration=%llu read response port=%d addr=%#llx value=%#x\n",
-            name(),
-            static_cast<unsigned long long>(exec.iteration), txn.portId,
-            static_cast<unsigned long long>(txn.addr), value);
-}
+    for (size_t dstIndex = 0; dstIndex < state.writePorts.size(); ++dstIndex) {
+        const PortID dstPort = state.writePorts[dstIndex];
+        const PortID lhsPort = state.readPorts[dstIndex * 2];
+        const PortID rhsPort = state.readPorts[(dstIndex * 2) + 1];
+        const auto &lhsBytes = sourceBytes(state, 0, lhsPort);
+        const auto &rhsBytes = sourceBytes(state, 1, rhsPort);
+        std::vector<uint8_t> dstBytes(state.op.dstSpanBytes, 0);
 
-Tick
-VpuUnit::execute(ActiveExecution &exec)
-{
-    const DecodedVectorOp op = decodeVectorOp(exec);
-    Tick extraLatency = 0;
+        for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+            const size_t srcOffset = static_cast<size_t>(elem) *
+                state.op.srcStrideBytes;
+            const size_t dstOffset = static_cast<size_t>(elem) *
+                state.op.dstStrideBytes;
 
-    if (isLutOpcode(op.opcode)) {
-        const uint32_t lutRequests =
-            op.opcode == Opcode::VSoftmax ?
-            (op.elemCount * exec.writePorts.size()) :
-            (op.elemCount * exec.writePorts.size());
-        extraLatency = lut->reserve(lutOperation(op.opcode), lutRequests,
-                                    curTick());
-    }
-
-    if (!op.legacyExec) {
-        if (op.opcode == Opcode::VLoad) {
-            for (const PortID port : exec.readPorts) {
-                panic_if(port < 0 ||
-                         static_cast<size_t>(port) >= residentBuffers.size(),
-                         "%s: VLOAD port %d out of resident buffer range",
-                         name(), port);
-                residentBuffers[port] = exec.readResults[port];
-                residentBufferValid[port] = true;
-                DPRINTF(VPU,
-                        "%s iteration=%llu execute vload port=%d bytes=%u\n",
-                        name(),
-                        static_cast<unsigned long long>(exec.iteration), port,
-                        static_cast<unsigned>(residentBuffers[port].size()));
-            }
-        }
-
-        if (op.opcode == Opcode::VStore) {
-            for (const PortID port : exec.writePorts) {
-                panic_if(port < 0 ||
-                         static_cast<size_t>(port) >= residentBuffers.size(),
-                         "%s: VSTORE port %d out of resident buffer range",
-                         name(), port);
-                panic_if(!residentBufferValid[port],
-                         "%s: VSTORE port %d has no loaded resident buffer",
-                         name(), port);
-                panic_if(residentBuffers[port].size() < op.dstSpanBytes,
-                         "%s: VSTORE port %d resident buffer too small "
-                         "(have=%zu need=%zu)",
-                         name(), port, residentBuffers[port].size(),
-                         op.dstSpanBytes);
-
-                exec.writeResults[port] = std::vector<uint8_t>(
-                    residentBuffers[port].begin(),
-                    residentBuffers[port].begin() + op.dstSpanBytes);
-                DPRINTF(VPU,
-                        "%s iteration=%llu execute vstore port=%d bytes=%u\n",
-                        name(),
-                        static_cast<unsigned long long>(exec.iteration), port,
-                        static_cast<unsigned>(op.dstSpanBytes));
-            }
-        }
-
-        for (size_t dstIndex = 0; dstIndex < exec.writePorts.size(); ++dstIndex) {
-            const PortID dstPort = exec.writePorts[dstIndex];
-            std::vector<uint8_t> dstBytes(op.dstSpanBytes, 0);
-
-            if (op.opcode == Opcode::VAdd || op.opcode == Opcode::VSub ||
-                op.opcode == Opcode::VMul || op.opcode == Opcode::VDiv) {
-                const PortID lhsPort = exec.readPorts[dstIndex * 2];
-                const PortID rhsPort = exec.readPorts[(dstIndex * 2) + 1];
-                const auto &lhsBytes = exec.readResults[lhsPort];
-                const auto &rhsBytes = exec.readResults[rhsPort];
-
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t srcOffset =
-                        static_cast<size_t>(elem) * op.srcStrideBytes;
-                    const size_t dstOffset =
-                        static_cast<size_t>(elem) * op.dstStrideBytes;
-
-                    if (op.dataType == DataType::Int32) {
-                        const uint32_t lhs = loadUint32(lhsBytes, srcOffset);
-                        const uint32_t rhs = loadUint32(rhsBytes, srcOffset);
-                        uint32_t value = 0;
-                        switch (op.opcode) {
-                          case Opcode::VAdd:
-                            value = lhs + rhs;
-                            break;
-                          case Opcode::VSub:
-                            value = lhs - rhs;
-                            break;
-                          case Opcode::VMul:
-                            value = lhs * rhs;
-                            break;
-                          case Opcode::VDiv: {
-                            const int32_t lhsSigned =
-                                static_cast<int32_t>(lhs);
-                            const int32_t rhsSigned =
-                                static_cast<int32_t>(rhs);
-                            int32_t quotient = 0;
-                            if (rhsSigned == 0) {
-                                quotient = 0;
-                            } else if (
-                                lhsSigned == std::numeric_limits<int32_t>::min()
-                                && rhsSigned == -1) {
-                                quotient =
-                                    std::numeric_limits<int32_t>::max();
-                            } else {
-                                quotient = lhsSigned / rhsSigned;
-                            }
-                            value = static_cast<uint32_t>(quotient);
-                            break;
-                          }
-                          default:
-                            panic("%s: unexpected opcode in binary int path",
-                                  name());
-                        }
-                        storeUint32(dstBytes, dstOffset, value);
-                    } else {
-                        const float lhs = loadFloat32(lhsBytes, srcOffset);
-                        const float rhs = loadFloat32(rhsBytes, srcOffset);
-                        float value = 0.0f;
-                        switch (op.opcode) {
-                          case Opcode::VAdd:
-                            value = lhs + rhs;
-                            break;
-                          case Opcode::VSub:
-                            value = lhs - rhs;
-                            break;
-                          case Opcode::VMul:
-                            value = lhs * rhs;
-                            break;
-                          case Opcode::VDiv:
-                            value = lhs / rhs;
-                            break;
-                          default:
-                            panic("%s: unexpected opcode in binary float path",
-                                  name());
-                        }
-                        storeFloat32(dstBytes, dstOffset, value);
+            if (state.op.dataType == DataType::Int32) {
+                const uint32_t lhs = loadUint32(lhsBytes, srcOffset);
+                const uint32_t rhs = loadUint32(rhsBytes, srcOffset);
+                uint32_t value = 0;
+                switch (state.op.opcode) {
+                  case Opcode::VAdd:
+                    value = lhs + rhs;
+                    break;
+                  case Opcode::VSub:
+                    value = lhs - rhs;
+                    break;
+                  case Opcode::VMul:
+                    value = lhs * rhs;
+                    break;
+                  case Opcode::VDiv: {
+                    const int32_t lhsSigned = static_cast<int32_t>(lhs);
+                    const int32_t rhsSigned = static_cast<int32_t>(rhs);
+                    int32_t quotient = 0;
+                    if (rhsSigned != 0) {
+                        quotient = lhsSigned / rhsSigned;
                     }
+                    value = static_cast<uint32_t>(quotient);
+                    break;
+                  }
+                  default:
+                    panic("%s: unexpected integer binary opcode", name());
                 }
-
-                exec.writeResults[dstPort] = dstBytes;
-                DPRINTF(VPU,
-                        "%s iteration=%llu execute binary op=%u dstPort=%d "
-                        "lhsPort=%d rhsPort=%d elemCount=%u\n",
-                        name(), static_cast<unsigned long long>(exec.iteration),
-                        exec.fields.opCode, dstPort, lhsPort, rhsPort,
-                        op.elemCount);
-                continue;
-            }
-
-            if (op.opcode == Opcode::VFma) {
-                const PortID src0Port = exec.readPorts[dstIndex * 3];
-                const PortID src1Port = exec.readPorts[(dstIndex * 3) + 1];
-                const PortID src2Port = exec.readPorts[(dstIndex * 3) + 2];
-                const auto &src0Bytes = exec.readResults[src0Port];
-                const auto &src1Bytes = exec.readResults[src1Port];
-                const auto &src2Bytes = exec.readResults[src2Port];
-
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t srcOffset =
-                        static_cast<size_t>(elem) * op.srcStrideBytes;
-                    const size_t dstOffset =
-                        static_cast<size_t>(elem) * op.dstStrideBytes;
-                    const float src0 = loadFloat32(src0Bytes, srcOffset);
-                    const float src1 = loadFloat32(src1Bytes, srcOffset);
-                    const float src2 = loadFloat32(src2Bytes, srcOffset);
-                    const float value = std::fma(src0, src1, src2);
-                    storeFloat32(dstBytes, dstOffset, value);
-                }
-
-                exec.writeResults[dstPort] = dstBytes;
-                DPRINTF(VPU,
-                        "%s iteration=%llu execute vfma dstPort=%d "
-                        "src0Port=%d src1Port=%d src2Port=%d elemCount=%u\n",
-                        name(), static_cast<unsigned long long>(exec.iteration),
-                        dstPort, src0Port, src1Port, src2Port, op.elemCount);
-                continue;
-            }
-
-            if (op.opcode == Opcode::VReduceSum ||
-                op.opcode == Opcode::VReduceMax) {
-                const PortID srcPort = exec.readPorts[dstIndex];
-                const auto &srcBytes = exec.readResults[srcPort];
-                std::vector<uint8_t> reduceBytes(sizeof(uint32_t), 0);
-
-                if (op.dataType == DataType::Int32) {
-                    int32_t accum = 0;
-                    int32_t current_max = std::numeric_limits<int32_t>::min();
-                    for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                        const size_t srcOffset =
-                            static_cast<size_t>(elem) * op.srcStrideBytes;
-                        const int32_t value = static_cast<int32_t>(
-                            loadUint32(srcBytes, srcOffset));
-                        accum += value;
-                        current_max = std::max(current_max, value);
-                    }
-
-                    const int32_t result =
-                        op.opcode == Opcode::VReduceSum ? accum : current_max;
-                    storeUint32(reduceBytes, 0,
-                                static_cast<uint32_t>(result));
-                } else {
-                    float accum = 0.0f;
-                    float current_max = -std::numeric_limits<float>::infinity();
-                    for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                        const size_t srcOffset =
-                            static_cast<size_t>(elem) * op.srcStrideBytes;
-                        const float value = loadFloat32(srcBytes, srcOffset);
-                        accum += value;
-                        current_max = std::max(current_max, value);
-                    }
-
-                    const float result =
-                        op.opcode == Opcode::VReduceSum ? accum : current_max;
-                    storeFloat32(reduceBytes, 0, result);
-                }
-
-                exec.writeResults[dstPort] = reduceBytes;
-                DPRINTF(VPU,
-                        "%s iteration=%llu execute reduce op=%u srcPort=%d "
-                        "dstPort=%d elemCount=%u\n",
-                        name(), static_cast<unsigned long long>(exec.iteration),
-                        exec.fields.opCode, srcPort, dstPort, op.elemCount);
-                continue;
-            }
-
-            if (op.opcode == Opcode::VLoad || op.opcode == Opcode::VStore) {
-                continue;
-            }
-
-            const PortID srcPort = exec.readPorts[dstIndex];
-            const auto &srcBytes = exec.readResults[srcPort];
-
-            if (op.opcode == Opcode::VSoftmax) {
-                const PortID srcPort = exec.readPorts[dstIndex];
-                const auto &srcBytes = exec.readResults[srcPort];
-                std::vector<float> expValues(op.elemCount, 0.0f);
-                float maxValue = -std::numeric_limits<float>::infinity();
-                float sum = 0.0f;
-
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t srcOffset =
-                        static_cast<size_t>(elem) * op.srcStrideBytes;
-                    maxValue = std::max(maxValue,
-                                        loadFloat32(srcBytes, srcOffset));
-                }
-
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t srcOffset =
-                        static_cast<size_t>(elem) * op.srcStrideBytes;
-                    const float shifted =
-                        loadFloat32(srcBytes, srcOffset) - maxValue;
-                    expValues[elem] = lut->evaluateExp(shifted);
-                    sum += expValues[elem];
-                }
-
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t dstOffset =
-                        static_cast<size_t>(elem) * op.dstStrideBytes;
-                    storeFloat32(dstBytes, dstOffset, expValues[elem] / sum);
-                }
+                storeUint32(dstBytes, dstOffset, value);
             } else {
-                for (uint32_t elem = 0; elem < op.elemCount; ++elem) {
-                    const size_t srcOffset =
-                        static_cast<size_t>(elem) * op.srcStrideBytes;
-                    const size_t dstOffset =
-                        static_cast<size_t>(elem) * op.dstStrideBytes;
-
-                    switch (op.opcode) {
-                      case Opcode::VScale:
-                        if (op.dataType == DataType::Int32) {
-                            const int32_t value = static_cast<int32_t>(
-                                loadUint32(srcBytes, srcOffset));
-                            const int32_t scalar = static_cast<int32_t>(
-                                op.scalarBits);
-                            const int32_t scaled = value * scalar;
-                            storeUint32(dstBytes, dstOffset,
-                                        static_cast<uint32_t>(scaled));
-                        } else {
-                            const float value = loadFloat32(srcBytes,
-                                                            srcOffset);
-                            float scalar = 0.0f;
-                            std::memcpy(&scalar, &op.scalarBits,
-                                        sizeof(scalar));
-                            storeFloat32(dstBytes, dstOffset, value * scalar);
-                        }
-                        break;
-                      case Opcode::VCvtI2F: {
-                        const int32_t value = static_cast<int32_t>(
-                            loadUint32(srcBytes, srcOffset));
-                        storeFloat32(dstBytes, dstOffset,
-                                     static_cast<float>(value));
-                        break;
-                      }
-                      case Opcode::VCvtF2I: {
-                        const float value = loadFloat32(srcBytes, srcOffset);
-                        int32_t converted = 0;
-                        if (std::isnan(value)) {
-                            converted = 0;
-                        } else if (value >=
-                                   static_cast<float>(
-                                       std::numeric_limits<int32_t>::max())) {
-                            converted = std::numeric_limits<int32_t>::max();
-                        } else if (value <=
-                                   static_cast<float>(
-                                       std::numeric_limits<int32_t>::min())) {
-                            converted = std::numeric_limits<int32_t>::min();
-                        } else {
-                            converted = static_cast<int32_t>(std::trunc(
-                                value));
-                        }
-                        storeUint32(dstBytes, dstOffset,
-                                    static_cast<uint32_t>(converted));
-                        break;
-                      }
-                      case Opcode::VSqrt: {
-                        const float value = loadFloat32(srcBytes, srcOffset);
-                        storeFloat32(dstBytes, dstOffset,
-                                     lut->evaluateSqrt(value));
-                        break;
-                      }
-                      case Opcode::VExp: {
-                        const float value = loadFloat32(srcBytes, srcOffset);
-                        storeFloat32(dstBytes, dstOffset,
-                                     lut->evaluateExp(value));
-                        break;
-                      }
-                      default:
-                        panic("%s: unexpected opcode in unary path", name());
-                    }
+                const float lhs = loadFloat32(lhsBytes, srcOffset);
+                const float rhs = loadFloat32(rhsBytes, srcOffset);
+                float value = 0.0f;
+                switch (state.op.opcode) {
+                  case Opcode::VAdd:
+                    value = lhs + rhs;
+                    break;
+                  case Opcode::VSub:
+                    value = lhs - rhs;
+                    break;
+                  case Opcode::VMul:
+                    value = lhs * rhs;
+                    break;
+                  case Opcode::VDiv:
+                    value = lhs / rhs;
+                    break;
+                  default:
+                    panic("%s: unexpected float binary opcode", name());
                 }
+                storeFloat32(dstBytes, dstOffset, value);
             }
-
-            exec.writeResults[dstPort] = dstBytes;
-            DPRINTF(VPU,
-                    "%s iteration=%llu execute unary op=%u srcPort=%d "
-                    "dstPort=%d elemCount=%u scalar=%#x\n",
-                    name(), static_cast<unsigned long long>(exec.iteration),
-                    exec.fields.opCode, srcPort, dstPort, op.elemCount,
-                    op.scalarBits);
         }
+
+        writeResultBytes(state, dstPort, dstBytes);
     }
-
-    DPRINTF(VPU,
-            "%s iteration=%llu execute readPorts=%u writePorts=%u\n",
-            name(), static_cast<unsigned long long>(exec.iteration),
-            static_cast<unsigned>(exec.readPorts.size()),
-            static_cast<unsigned>(exec.writePorts.size()));
-    const Tick baseLatency = SpecializedExecutionUnit::execute(exec);
-    const Tick totalLatency = baseLatency + extraLatency;
-
-    if (isLinearOpcode(op.opcode)) {
-        lastLinearExecuteLatencyValue = totalLatency;
-    }
-
-    return totalLatency;
 }
 
 void
-VpuUnit::buildMvoutRequests(ActiveExecution &exec,
-                            std::vector<MemRequestDesc> &reqs)
+VpuUnit::executeUnary(const VpuMacroState &state) const
 {
-    const DecodedVectorOp op = decodeVectorOp(exec);
-    if (!op.legacyExec) {
-        if (op.opcode == Opcode::VLoad) {
+    for (size_t dstIndex = 0; dstIndex < state.writePorts.size(); ++dstIndex) {
+        const PortID dstPort = state.writePorts[dstIndex];
+        const PortID srcPort = state.readPorts[dstIndex];
+        const auto &srcBytes = sourceBytes(state, 0, srcPort);
+        std::vector<uint8_t> dstBytes(state.op.dstSpanBytes, 0);
+
+        if (state.op.opcode == Opcode::VSoftmax) {
+            std::vector<float> expValues(state.op.elemCount, 0.0f);
+            float maxValue = -std::numeric_limits<float>::infinity();
+            float sum = 0.0f;
+            for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+                const size_t srcOffset = static_cast<size_t>(elem) *
+                    state.op.srcStrideBytes;
+                maxValue = std::max(maxValue,
+                                    loadFloat32(srcBytes, srcOffset));
+            }
+            for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+                const size_t srcOffset = static_cast<size_t>(elem) *
+                    state.op.srcStrideBytes;
+                expValues[elem] = lut->evaluateExp(
+                    loadFloat32(srcBytes, srcOffset) - maxValue);
+                sum += expValues[elem];
+            }
+            for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+                const size_t dstOffset = static_cast<size_t>(elem) *
+                    state.op.dstStrideBytes;
+                storeFloat32(dstBytes, dstOffset, expValues[elem] / sum);
+            }
+            writeResultBytes(state, dstPort, dstBytes);
+            continue;
+        }
+
+        for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+            const size_t srcOffset = static_cast<size_t>(elem) *
+                state.op.srcStrideBytes;
+            const size_t dstOffset = static_cast<size_t>(elem) *
+                state.op.dstStrideBytes;
+
+            switch (state.op.opcode) {
+              case Opcode::VScale:
+                if (state.op.dataType == DataType::Int32) {
+                    const int32_t value = static_cast<int32_t>(
+                        loadUint32(srcBytes, srcOffset));
+                    const int32_t scalar =
+                        static_cast<int32_t>(state.op.scalarBits);
+                    storeUint32(dstBytes, dstOffset,
+                                static_cast<uint32_t>(value * scalar));
+                } else {
+                    float scalar = 0.0f;
+                    const float value = loadFloat32(srcBytes, srcOffset);
+                    std::memcpy(&scalar, &state.op.scalarBits, sizeof(scalar));
+                    storeFloat32(dstBytes, dstOffset, value * scalar);
+                }
+                break;
+              case Opcode::VCvtI2F:
+                storeFloat32(dstBytes, dstOffset, static_cast<float>(
+                    static_cast<int32_t>(loadUint32(srcBytes, srcOffset))));
+                break;
+              case Opcode::VCvtF2I:
+                storeUint32(dstBytes, dstOffset, static_cast<uint32_t>(
+                    static_cast<int32_t>(std::trunc(
+                        loadFloat32(srcBytes, srcOffset)))));
+                break;
+              case Opcode::VSqrt:
+                storeFloat32(
+                    dstBytes, dstOffset,
+                    lut->evaluateSqrt(loadFloat32(srcBytes, srcOffset)));
+                break;
+              case Opcode::VExp:
+                storeFloat32(
+                    dstBytes, dstOffset,
+                    lut->evaluateExp(loadFloat32(srcBytes, srcOffset)));
+                break;
+              default:
+                panic("%s: unexpected unary opcode", name());
+            }
+        }
+
+        writeResultBytes(state, dstPort, dstBytes);
+    }
+}
+
+void
+VpuUnit::executeFma(const VpuMacroState &state) const
+{
+    for (size_t dstIndex = 0; dstIndex < state.writePorts.size(); ++dstIndex) {
+        const PortID dstPort = state.writePorts[dstIndex];
+        const PortID src0Port = state.readPorts[dstIndex * 3];
+        const PortID src1Port = state.readPorts[(dstIndex * 3) + 1];
+        const PortID src2Port = state.readPorts[(dstIndex * 3) + 2];
+        const auto &src0Bytes = sourceBytes(state, 0, src0Port);
+        const auto &src1Bytes = sourceBytes(state, 1, src1Port);
+        const auto &src2Bytes = sourceBytes(state, 2, src2Port);
+        std::vector<uint8_t> dstBytes(state.op.dstSpanBytes, 0);
+
+        for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+            const size_t srcOffset = static_cast<size_t>(elem) *
+                state.op.srcStrideBytes;
+            const size_t dstOffset = static_cast<size_t>(elem) *
+                state.op.dstStrideBytes;
+            const float value = std::fma(loadFloat32(src0Bytes, srcOffset),
+                                         loadFloat32(src1Bytes, srcOffset),
+                                         loadFloat32(src2Bytes, srcOffset));
+            storeFloat32(dstBytes, dstOffset, value);
+        }
+
+        writeResultBytes(state, dstPort, dstBytes);
+    }
+}
+
+void
+VpuUnit::executeReduce(const VpuMacroState &state) const
+{
+    for (size_t dstIndex = 0; dstIndex < state.writePorts.size(); ++dstIndex) {
+        const PortID dstPort = state.writePorts[dstIndex];
+        const PortID srcPort = state.readPorts[dstIndex];
+        const auto &srcBytes = sourceBytes(state, 0, srcPort);
+        std::vector<uint8_t> dstBytes(sizeof(uint32_t), 0);
+
+        if (state.op.dataType == DataType::Int32) {
+            int32_t accum = 0;
+            int32_t currentMax = std::numeric_limits<int32_t>::min();
+            for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+                const size_t srcOffset = static_cast<size_t>(elem) *
+                    state.op.srcStrideBytes;
+                const int32_t value = static_cast<int32_t>(
+                    loadUint32(srcBytes, srcOffset));
+                accum += value;
+                currentMax = std::max(currentMax, value);
+            }
+            const int32_t result =
+                state.op.opcode == Opcode::VReduceSum ? accum : currentMax;
+            storeUint32(dstBytes, 0, static_cast<uint32_t>(result));
+        } else {
+            float accum = 0.0f;
+            float currentMax = -std::numeric_limits<float>::infinity();
+            for (uint32_t elem = 0; elem < state.op.elemCount; ++elem) {
+                const size_t srcOffset = static_cast<size_t>(elem) *
+                    state.op.srcStrideBytes;
+                const float value = loadFloat32(srcBytes, srcOffset);
+                accum += value;
+                currentMax = std::max(currentMax, value);
+            }
+            const float result =
+                state.op.opcode == Opcode::VReduceSum ? accum : currentMax;
+            storeFloat32(dstBytes, 0, result);
+        }
+
+        writeResultBytes(state, dstPort, dstBytes);
+    }
+}
+
+void
+VpuUnit::executeLoadStoreBypass(const VpuMacroState &state) const
+{
+    (void)state;
+}
+
+void
+VpuUnit::executeVectorOp(VpuMacroState &state) const
+{
+    switch (state.op.opcode) {
+      case Opcode::Exec:
+        executeLegacy(state);
+        break;
+      case Opcode::VAdd:
+      case Opcode::VSub:
+      case Opcode::VMul:
+      case Opcode::VDiv:
+        executeBinary(state);
+        break;
+      case Opcode::VScale:
+      case Opcode::VCvtI2F:
+      case Opcode::VCvtF2I:
+      case Opcode::VSqrt:
+      case Opcode::VExp:
+      case Opcode::VSoftmax:
+        executeUnary(state);
+        break;
+      case Opcode::VFma:
+        executeFma(state);
+        break;
+      case Opcode::VReduceSum:
+      case Opcode::VReduceMax:
+        executeReduce(state);
+        break;
+      case Opcode::VLoad:
+      case Opcode::VStore:
+        executeLoadStoreBypass(state);
+        break;
+    }
+}
+
+SpecializedExecutionUnit::MacroCmdKind
+VpuUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
+{
+    switch (decodeOpcode(parseCmdFields(extractCmdWord(cmd)).opCode)) {
+      case Opcode::VLoad:
+        return MacroCmdKind::Load;
+      case Opcode::VStore:
+        return MacroCmdKind::Store;
+      default:
+        return MacroCmdKind::Exec;
+    }
+}
+
+uint32_t
+VpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                            MacroCmdKind kind) const
+{
+    if (kind == MacroCmdKind::Exec) {
+        return 0;
+    }
+
+    const uint32_t maskWord = kind == MacroCmdKind::Load ?
+        cmdWord(cmd, ReadMaskWord) : cmdWord(cmd, WriteMaskWord);
+    const auto ports = decodeMask(maskWord);
+    panic_if(ports.size() != 1,
+             "%s: mem-side VPU commands must target exactly one SPM port",
+             name());
+    return 1 + ports.front();
+}
+
+void
+VpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
+{
+    VpuMacroState state;
+    state.op = decodeVectorOp(macroCmd);
+    validateCommand(macroCmd, state);
+    macroStates.emplace(macroCmd.macroCmdId, std::move(state));
+}
+
+void
+VpuUnit::buildUops(MacroCmdContext &macroCmd)
+{
+    auto it = macroStates.find(macroCmd.macroCmdId);
+    panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
+    auto &state = it->second;
+
+    switch (state.op.opcode) {
+      case Opcode::VLoad: {
+        const PortID spmPort = state.readPorts.front();
+        appendLoadUop(macroCmd, slotAddr(spmPort), state.op.srcSpanBytes);
+        break;
+      }
+      case Opcode::VStore:
+        appendStoreWhenReady(macroCmd, state);
+        break;
+      default: {
+        if (!computeInputsReady(state)) {
+            appendExecUop(macroCmd, 1);
+            macroCmd.uopQueue.back().token =
+                static_cast<uint64_t>(ExecToken::WaitInputs);
+        } else {
+            const Tick latency = computeExecLatency(state);
+            appendExecUop(macroCmd, latency);
+            macroCmd.uopQueue.back().token =
+                static_cast<uint64_t>(ExecToken::RunCompute);
+        }
+        break;
+      }
+    }
+
+    if (macroCmd.uopQueue.empty()) {
+        markEpiloguePending(macroCmd);
+    }
+}
+
+void
+VpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
+                          const MemTxnContext &txn, PacketPtr pkt)
+{
+    auto it = macroStates.find(macroCmd.macroCmdId);
+    panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
+    auto &state = it->second;
+
+    if (state.op.opcode == Opcode::VLoad) {
+        LocalAddr dstAddr = decodeLocalAddr(state.dstAddr, BufferRole::Input,
+                                            state.op.srcSpanBytes);
+        dstAddr.portId = txn.portId;
+        auto &slot = bufferSlot(dstAddr);
+        slot.bytes.assign(pkt->getConstPtr<uint8_t>(),
+                          pkt->getConstPtr<uint8_t>() + pkt->getSize());
+        slot.valid = true;
+    }
+
+    markEpiloguePending(macroCmd);
+}
+
+void
+VpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
+                           const MicroOpContext &uop)
+{
+    (void)uop;
+    auto it = macroStates.find(macroCmd.macroCmdId);
+    panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
+    auto &state = it->second;
+
+    const ExecToken token = static_cast<ExecToken>(uop.token);
+    if (state.op.opcode == Opcode::VStore ||
+        token == ExecToken::WaitStoreData) {
+        appendStoreWhenReady(macroCmd, state);
+        if (macroCmd.uopQueue.empty()) {
+            markEpiloguePending(macroCmd);
+        }
+        return;
+    }
+
+    if (token == ExecToken::WaitInputs) {
+        if (!computeInputsReady(state)) {
+            appendExecUop(macroCmd, 1);
+            macroCmd.uopQueue.back().token =
+                static_cast<uint64_t>(ExecToken::WaitInputs);
             return;
         }
-
-        for (const PortID port : exec.writePorts) {
-            auto resultIt = exec.writeResults.find(port);
-            panic_if(resultIt == exec.writeResults.end(),
-                     "%s: missing vector write result for port=%d",
-                     name(), port);
-
-            MemRequestDesc req;
-            req.portId = port;
-            req.kind = MemTxnContext::Kind::Mvout;
-            req.addr = slotAddr(port);
-            req.size = (op.opcode == Opcode::VReduceSum ||
-                        op.opcode == Opcode::VReduceMax) ?
-                sizeof(uint32_t) : op.dstSpanBytes;
-            req.data = resultIt->second;
-            reqs.push_back(req);
-
-            DPRINTF(VPU,
-                    "%s iteration=%llu issue vector write port=%d addr=%#llx "
-                    "size=%u elemCount=%u\n",
-                    name(),
-                    static_cast<unsigned long long>(exec.iteration), port,
-                    static_cast<unsigned long long>(req.addr),
-                    static_cast<unsigned>(req.size),
-                    op.elemCount);
-        }
+        const Tick latency = computeExecLatency(state);
+        appendExecUop(macroCmd, latency);
+        macroCmd.uopQueue.back().token =
+            static_cast<uint64_t>(ExecToken::RunCompute);
         return;
     }
 
-    uint32_t signature = 0;
-    for (const PortID port : exec.readPorts) {
-        signature += unpackWord(exec.readResults[port]);
-    }
-
-    for (const PortID port : exec.writePorts) {
-        const uint32_t current = unpackWord(exec.readResults[port]);
-        const uint32_t value = current + signature +
-            ((static_cast<uint32_t>(exec.iteration) + 1U) * 0x10U) +
-            (static_cast<uint32_t>(port) + 1U);
-        exec.writeResults[port] = packWord(value);
-
-        MemRequestDesc req;
-        req.portId = port;
-        req.kind = MemTxnContext::Kind::Mvout;
-        req.addr = slotAddr(port);
-        req.size = sizeof(uint32_t);
-        req.data = exec.writeResults[port];
-        reqs.push_back(req);
-
-        DPRINTF(VPU,
-                "%s iteration=%llu issue write port=%d addr=%#llx value=%#x "
-                "signature=%#x\n",
-                name(),
-                static_cast<unsigned long long>(exec.iteration), port,
-                static_cast<unsigned long long>(req.addr), value, signature);
-    }
+    executeVectorOp(state);
+    state.completedExecUops++;
+    markEpiloguePending(macroCmd);
 }
 
 void
-VpuUnit::onMvoutResponse(ActiveExecution &exec, const MemTxnContext &txn,
-                         PacketPtr pkt)
+VpuUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 {
-    const uint32_t value = unpackWord(exec.writeResults[txn.portId]);
-    DPRINTF(VPU,
-            "%s iteration=%llu write response port=%d addr=%#llx value=%#x "
-            "size=%u\n",
-            name(),
-            static_cast<unsigned long long>(exec.iteration), txn.portId,
-            static_cast<unsigned long long>(txn.addr), value, pkt->getSize());
-}
-
-void
-VpuUnit::epilogue(ActiveExecution &exec)
-{
-    const Opcode opcode = decodeVectorOp(exec).opcode;
+    auto it = macroStates.find(macroCmd.macroCmdId);
+    panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
+    const Opcode opcode = it->second.op.opcode;
     if (isLutOpcode(opcode)) {
         lut->noteCompletion(lutOperation(opcode), curTick());
     } else if (isLinearOpcode(opcode)) {
         lastLinearCompletionTickValue = curTick();
     }
-
-    DPRINTF(VPU,
-            "%s iteration=%llu complete completedIterations=%llu "
-            "completedReads=%llu completedWrites=%llu\n",
-            name(), static_cast<unsigned long long>(exec.iteration),
-            static_cast<unsigned long long>(exec.completedIterations),
-            static_cast<unsigned long long>(exec.completedReadRespCount),
-            static_cast<unsigned long long>(exec.completedWriteRespCount));
+    macroStates.erase(it);
 }
 
 uint64_t

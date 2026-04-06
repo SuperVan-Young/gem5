@@ -263,6 +263,10 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         num_mem_side_ports=1,
+        num_input_ports=None,
+        num_output_ports=None,
+        input_buffer_count=2,
+        output_buffer_count=2,
         base_addr=None,
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
@@ -286,6 +290,18 @@ class NPUTestSystemBuilder:
             "macro_cmd_bytes": macro_cmd_bytes,
             "cmd_queue_depth": cmd_queue_depth,
             "num_mem_side_ports": num_mem_side_ports,
+            "num_input_ports": (
+                num_mem_side_ports
+                if num_input_ports is None
+                else num_input_ports
+            ),
+            "num_output_ports": (
+                num_mem_side_ports
+                if num_output_ports is None
+                else num_output_ports
+            ),
+            "input_buffer_count": input_buffer_count,
+            "output_buffer_count": output_buffer_count,
             "debug_process_latency": debug_process_latency,
             "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
         }

@@ -19,13 +19,13 @@ from npu_test_system import NPUTestSystemBuilder  # noqa: E402
 
 EXPECTED_EXIT_CAUSE = "exiting with last active thread context"
 EXPECTED_VPU0 = {
-    "completed_cmds": 2,
-    "prologues": 3,
+    "completed_cmds": 11,
+    "prologues": 11,
     "executes": 3,
-    "epilogues": 3,
+    "epilogues": 11,
     "read_resps": 5,
     "write_resps": 3,
-    "iterations": 3,
+    "iterations": 11,
 }
 EXPECTED_VPU1 = dict(EXPECTED_VPU0)
 

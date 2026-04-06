@@ -18,11 +18,11 @@ EXPECTED_EXIT_CODE = 0
 EXPECTED_SNAPSHOT = {
     "exit_cause": EXPECTED_EXIT_CAUSE,
     "exit_code": EXPECTED_EXIT_CODE,
-    "completed_cmds": 1,
-    "prologues": 1,
-    "executes": 1,
-    "epilogues": 1,
-    "iterations": 1,
+    "completed_cmds": 2,
+    "prologues": 2,
+    "executes": 0,
+    "epilogues": 2,
+    "iterations": 2,
     "read_resps": 2,
     "write_resps": 0,
 }

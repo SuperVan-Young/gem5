@@ -21,11 +21,11 @@ EXPECTED_EXIT_CAUSE = "exiting with last active thread context"
 EXPECTED_VPU = {
     "queue_occupancy": 0,
     "issue_busy": False,
-    "completed_cmds": 1,
-    "prologues": 1,
+    "completed_cmds": 4,
+    "prologues": 4,
     "executes": 1,
-    "epilogues": 1,
-    "iterations": 1,
+    "epilogues": 4,
+    "iterations": 4,
     "read_resps": 2,
     "write_resps": 1,
 }
