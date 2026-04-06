@@ -55,4 +55,3 @@ main(void)
     printf("VPU_UNARY_SQRT_PASS\n");
     return 0;
 }
-

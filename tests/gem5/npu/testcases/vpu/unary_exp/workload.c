@@ -55,4 +55,3 @@ main(void)
     printf("VPU_UNARY_EXP_PASS\n");
     return 0;
 }
-

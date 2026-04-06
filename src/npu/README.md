@@ -1,7 +1,7 @@
 # NPU Module Overview
 
 This directory contains the NPU-side simulator implementation currently under
-`src/npu/mega/`. The code is centered around a command-queue plus execution-unit
+`src/npu/`. The code is centered around a command-queue plus execution-unit
 model:
 
 - `MegaCmdQueue`: accepts macro commands from one or more CPU MMIO ports,
@@ -89,9 +89,9 @@ It stalls at the queue head until the corresponding sync indicator becomes `1`.
 
 Files:
 
-- `mega/MegaCmdQueue.hh`
-- `mega/MegaCmdQueue.cc`
-- `mega/MegaCmdQueue.py`
+- `MegaCmdQueue.hh`
+- `MegaCmdQueue.cc`
+- `MegaCmdQueue.py`
 
 Responsibilities:
 
@@ -122,9 +122,9 @@ Important details:
 
 Files:
 
-- `mega/SpecializedExecutionUnit.hh`
-- `mega/SpecializedExecutionUnit.cc`
-- `mega/SpecializedExecutionUnit.py`
+- `SpecializedExecutionUnit.hh`
+- `SpecializedExecutionUnit.cc`
+- `SpecializedExecutionUnit.py`
 
 This is the generic execution framework for command consumers. A command can be
 written directly to the SEU MMIO window or forwarded there by `MegaCmdQueue`.
@@ -185,9 +185,9 @@ The class also exports runtime counters used heavily by tests:
 
 Files:
 
-- `mega/VpuUnit.hh`
-- `mega/VpuUnit.cc`
-- `mega/VpuUnit.py`
+- `VpuUnit.hh`
+- `VpuUnit.cc`
+- `VpuUnit.py`
 
 `VpuUnit` is the concrete vector-style execution unit currently used in tests.
 It still relies on the common SEU phase machine, but its `execute()` path now
@@ -331,9 +331,9 @@ Recommended interpretation:
 
 Files:
 
-- `mega/DmaUnit.hh`
-- `mega/DmaUnit.cc`
-- `mega/DmaUnit.py`
+- `DmaUnit.hh`
+- `DmaUnit.cc`
+- `DmaUnit.py`
 
 `DmaUnit` is the most specialized component in this directory.
 
@@ -368,9 +368,9 @@ The DMA path is more custom than the VPU path:
 
 Files:
 
-- `mega/ScratchpadMemory.hh`
-- `mega/ScratchpadMemory.cc`
-- `mega/ScratchpadMemory.py`
+- `ScratchpadMemory.hh`
+- `ScratchpadMemory.cc`
+- `ScratchpadMemory.py`
 
 This is a timing-mode SRAM-style memory used as accelerator-local storage.
 
@@ -387,16 +387,13 @@ and VPU tests as well as DMA SPM transfers.
 
 ## Build Integration
 
-`src/npu/mega/SConscript` registers:
+`src/npu/SConscript` registers:
 
 - debug flags: `MegaCmdQueue`, `SpecializedExecutionUnit`,
   `ScratchpadMemory`, `VPU`, `DmaUnit`
 - SimObjects: `MegaCmdQueue`, `SpecializedExecutionUnit`,
   `ScratchpadMemory`, `VpuUnit`, `DmaUnit`, `LutUnit`
 - sources: matching `.cc` files
-
-`src/npu/SConscript` currently only imports the environment and does not add
-extra logic.
 
 ## Current Gaps / Caveats
 
@@ -446,10 +443,10 @@ system-level case from the list above.
 If another agent needs to understand this code quickly, read in this order:
 
 1. `tests/gem5/npu/utils/cmd/common.hh` for the macro-command bit layout.
-2. `src/npu/mega/MegaCmdQueue.cc` for queueing, sync-wait, and routing.
-3. `src/npu/mega/SpecializedExecutionUnit.hh/.cc` for the common execution
+2. `src/npu/MegaCmdQueue.cc` for queueing, sync-wait, and routing.
+3. `src/npu/SpecializedExecutionUnit.hh/.cc` for the common execution
    state machine.
-4. `src/npu/mega/VpuUnit.cc` for the current NPU execution semantics.
-5. `src/npu/mega/DmaUnit.cc` for the custom DMA data path.
+4. `src/npu/VpuUnit.cc` for the current NPU execution semantics.
+5. `src/npu/DmaUnit.cc` for the custom DMA data path.
 6. `tests/gem5/npu/configs/npu_test_system.py` for actual system wiring in
    tests.

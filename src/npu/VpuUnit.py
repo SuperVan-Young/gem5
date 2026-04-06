@@ -1,12 +1,12 @@
-from m5.objects.SpecializedExecutionUnit import SpecializedExecutionUnit
 from m5.objects.LutUnit import LutUnit
+from m5.objects.SpecializedExecutionUnit import SpecializedExecutionUnit
 from m5.params import *
 from m5.SimObject import *
 
 
 class VpuUnit(SpecializedExecutionUnit):
     type = "VpuUnit"
-    cxx_header = "npu/mega/VpuUnit.hh"
+    cxx_header = "npu/VpuUnit.hh"
     cxx_class = "gem5::VpuUnit"
 
     device_id = Param.Unsigned(

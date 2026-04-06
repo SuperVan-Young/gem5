@@ -17,4 +17,3 @@ workload 发送一条 `VREDUCE_SUM` 命令，对 4 个浮点元素做求和规�
 
 仿真结束时，目标槽位应与 golden 结果一致，VPU 队列应为空，`issue_busy` 应为 false，且基础计数都应为 1。
 测试通过时输出稳定的 `VPU_REDUCE_SUM_F32_PASS`。
-

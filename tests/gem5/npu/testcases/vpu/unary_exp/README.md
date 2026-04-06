@@ -17,4 +17,3 @@ workload 发送一条 `VEXP` 命令，对 4 个浮点元素计算指数并写到
 
 仿真结束时，目标槽位应与 golden 结果一致，VPU 队列应为空，`issue_busy` 应为 false，基础计数应为 1，且 LUT 请求和命令计数应符合单条 `VEXP` 的行为。
 测试通过时输出稳定的 `VPU_UNARY_EXP_PASS`。
-

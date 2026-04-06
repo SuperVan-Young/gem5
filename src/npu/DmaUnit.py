@@ -4,7 +4,7 @@ from m5.params import *
 
 class DmaUnit(SpecializedExecutionUnit):
     type = "DmaUnit"
-    cxx_header = "npu/mega/DmaUnit.hh"
+    cxx_header = "npu/DmaUnit.hh"
     cxx_class = "gem5::DmaUnit"
 
     num_banks = Param.Unsigned(2, "Number of DMA internal workspace banks")

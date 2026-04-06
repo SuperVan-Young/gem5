@@ -26,7 +26,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "npu/mega/LutUnit.hh"
+#include "npu/LutUnit.hh"
 
 #include <algorithm>
 #include <cmath>

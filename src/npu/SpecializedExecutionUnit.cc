@@ -26,7 +26,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "npu/mega/SpecializedExecutionUnit.hh"
+#include "npu/SpecializedExecutionUnit.hh"
 
 #include <algorithm>
 #include <cstring>

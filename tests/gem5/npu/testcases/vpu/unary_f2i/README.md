@@ -17,4 +17,3 @@ workload 发送一条 `VCVT_F2I` 命令，把 4 个浮点元素转换成整数�
 
 仿真结束时，目标槽位应与 golden 结果一致，VPU 队列应为空，`issue_busy` 应为 false，且基础计数都应为 1。
 测试通过时输出稳定的 `VPU_UNARY_F2I_PASS`。
-

@@ -19,10 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gem5.fixture import MakeFixture, MakeTarget
-from gem5 import verifier
-from gem5.suite import gem5_verify_config
 from testlib.configuration import constants
+
+from gem5 import verifier
+from gem5.fixture import (
+    MakeFixture,
+    MakeTarget,
+)
+from gem5.suite import gem5_verify_config
 
 
 def resolve_testcase_root(reference_file):

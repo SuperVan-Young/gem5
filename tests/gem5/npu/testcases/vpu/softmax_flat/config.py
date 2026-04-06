@@ -98,4 +98,3 @@ for key, value in result.items():
 
 if verify_simulation_result(result):
     print("VPU_SOFTMAX_FLAT_PASS")
-

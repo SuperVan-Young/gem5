@@ -4,7 +4,7 @@ from m5.SimObject import *
 
 class LutUnit(SimObject):
     type = "LutUnit"
-    cxx_header = "npu/mega/LutUnit.hh"
+    cxx_header = "npu/LutUnit.hh"
     cxx_class = "gem5::LutUnit"
 
     range_reduction_latency = Param.Latency(
