@@ -58,7 +58,7 @@ DmaUnit::DmaUnit(const DmaUnitParams &params)
       numBanks(params.num_banks),
       bankSize(params.bank_size),
       transposeUnitLatency(params.transpose_unit_latency),
-      parsedCmdValid(false)
+      dmaBanks(params.num_banks, std::vector<uint8_t>(params.bank_size, 0))
 {
     fatal_if(macroCmdBytes != CacheLineBytes,
              "%s: DmaUnit requires 64-byte commands", name());
@@ -97,6 +97,7 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
     const uint32_t header = extractWord(cmd, 0);
     const uint8_t opCode = (header >> 16) & 0xff;
 
+    parsed.stage = static_cast<CommandStage>(opCode & 0x3U);
     parsed.deviceId = (header >> 24) & 0xf;
     parsed.dataType = (opCode >> 5) & 0x7;
     parsed.mode = (opCode >> 2) & 0x7;
@@ -120,6 +121,8 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
     parsed.bankCfg = extractWord(cmd, 14);
     parsed.word15 = extractWord(cmd, 15);
     parsed.fillValue = parsed.word15 & 0xffU;
+    parsed.srcBankId = parsed.bankCfg & 0xf;
+    parsed.dstBankId = (parsed.bankCfg >> 4) & 0xf;
 
     if (parsed.mode <= static_cast<uint8_t>(Mode::Fill)) {
         switch (static_cast<Mode>(parsed.mode)) {
@@ -138,8 +141,6 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
                 (parsed.modeCfg & 0x2U) ? MemorySpace::Spm : MemorySpace::Dram;
             parsed.transposeDimA = (parsed.modeCfg >> 2) & 0x3;
             parsed.transposeDimB = (parsed.modeCfg >> 4) & 0x3;
-            parsed.srcBankId = parsed.bankCfg & 0xf;
-            parsed.dstBankId = (parsed.bankCfg >> 4) & 0xf;
             break;
           case Mode::Fill:
             switch (parsed.modeCfg & FillModeCfgMask) {
@@ -156,7 +157,6 @@ DmaUnit::parseCommand(const std::vector<uint8_t> &cmd) const
                 parsed.dstMemSpace = MemorySpace::Invalid;
                 break;
             }
-            parsed.dstBankId = parsed.bankCfg & 0xf;
             break;
         }
     }
@@ -174,6 +174,9 @@ DmaUnit::validateParsedCommand(const ParsedCmd &cmd) const
              "DmaUnit: unsupported data_type=%u", cmd.dataType);
     panic_if(cmd.mode > static_cast<uint8_t>(Mode::Fill),
              "DmaUnit: unsupported mode=%u", cmd.mode);
+    panic_if(cmd.stage > CommandStage::Store,
+             "DmaUnit: unsupported command stage=%u",
+             static_cast<unsigned>(cmd.stage));
 
     switch (static_cast<Mode>(cmd.mode)) {
       case Mode::MoveLayout:
@@ -203,8 +206,14 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
              "DmaUnit: reserved src_cut_dim=%u", cmd.srcCutDim);
     panic_if(cmd.dstCutDim > static_cast<uint8_t>(CutDim::C),
              "DmaUnit: reserved dst_cut_dim=%u", cmd.dstCutDim);
-    panic_if(cmd.bankCfg != 0,
-             "DmaUnit: move_layout requires bank_cfg == 0");
+    if (cmd.stage == CommandStage::Legacy) {
+        panic_if(cmd.bankCfg != 0,
+                 "DmaUnit: move_layout requires bank_cfg == 0");
+    } else {
+        panic_if(cmd.srcBankId >= numBanks || cmd.dstBankId >= numBanks,
+                 "DmaUnit: move_layout bank id exceeds num_banks=%u",
+                 static_cast<unsigned>(numBanks));
+    }
 
     validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
     validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
@@ -216,23 +225,26 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
         }
 
         switch (static_cast<CutDim>(cutDim)) {
-          case CutDim::H: {
-            const bool invalidBlockedK = (cmd.shapeH % k) != 0;
-            panic_if(invalidBlockedK,
+          case CutDim::H:
+          {
+            const bool invalid = (cmd.shapeH % k) != 0;
+            panic_if(invalid,
                      "DmaUnit: %s blocked layout requires H %% k == 0",
                      label);
             return;
           }
-          case CutDim::W: {
-            const bool invalidBlockedK = (cmd.shapeW % k) != 0;
-            panic_if(invalidBlockedK,
+          case CutDim::W:
+          {
+            const bool invalid = (cmd.shapeW % k) != 0;
+            panic_if(invalid,
                      "DmaUnit: %s blocked layout requires W %% k == 0",
                      label);
             return;
           }
-          case CutDim::C: {
-            const bool invalidBlockedK = (cmd.shapeC % k) != 0;
-            panic_if(invalidBlockedK,
+          case CutDim::C:
+          {
+            const bool invalid = (cmd.shapeC % k) != 0;
+            panic_if(invalid,
                      "DmaUnit: %s blocked layout requires C %% k == 0",
                      label);
             return;
@@ -412,12 +424,12 @@ DmaUnit::externalFillLineAddrs(const ParsedCmd &cmd) const
 }
 
 DmaUnit::MemorySpace
-DmaUnit::sourceSpace() const
+DmaUnit::sourceSpace(const ParsedCmd &cmd) const
 {
-    switch (static_cast<Mode>(parsedCmd.mode)) {
+    switch (static_cast<Mode>(cmd.mode)) {
       case Mode::MoveLayout:
       case Mode::Transpose:
-        return parsedCmd.srcMemSpace;
+        return cmd.srcMemSpace;
       case Mode::Fill:
         panic("DmaUnit: fill mode has no external source space");
     }
@@ -426,12 +438,12 @@ DmaUnit::sourceSpace() const
 }
 
 DmaUnit::MemorySpace
-DmaUnit::destSpace() const
+DmaUnit::destSpace(const ParsedCmd &cmd) const
 {
-    switch (static_cast<Mode>(parsedCmd.mode)) {
+    switch (static_cast<Mode>(cmd.mode)) {
       case Mode::MoveLayout:
       case Mode::Transpose:
-        return parsedCmd.dstMemSpace;
+        return cmd.dstMemSpace;
       case Mode::Fill:
         panic("DmaUnit: fill mode has no external destination space");
     }
@@ -519,101 +531,96 @@ DmaUnit::computeTensorAddr(Addr base, uint32_t strideH, uint32_t strideW,
     panic("DmaUnit: unreachable tensor cut dimension");
 }
 
-void
-DmaUnit::resetCommandState()
+DmaUnit::DmaMacroState &
+DmaUnit::macroState(uint64_t macroCmdId)
 {
-    parsedCmd = ParsedCmd();
-    parsedCmdValid = false;
-    iterationPlans.clear();
-    pendingMvinTxns.clear();
+    auto it = macroStates.find(macroCmdId);
+    panic_if(it == macroStates.end(),
+             "%s: missing DMA macro state for macro %llu", name(),
+             static_cast<unsigned long long>(macroCmdId));
+    return it->second;
+}
+
+const DmaUnit::DmaMacroState &
+DmaUnit::macroState(uint64_t macroCmdId) const
+{
+    auto it = macroStates.find(macroCmdId);
+    panic_if(it == macroStates.end(),
+             "%s: missing DMA macro state for macro %llu", name(),
+             static_cast<unsigned long long>(macroCmdId));
+    return it->second;
 }
 
 DmaUnit::IterationPlan &
-DmaUnit::iterationPlan(uint64_t iteration)
+DmaUnit::iterationPlan(DmaMacroState &state, size_t iteration)
 {
-    panic_if(iteration >= iterationPlans.size(),
+    panic_if(iteration >= state.iterationPlans.size(),
              "%s: iteration %llu out of range (num plans=%llu)", name(),
              static_cast<unsigned long long>(iteration),
-             static_cast<unsigned long long>(iterationPlans.size()));
-    return iterationPlans.at(iteration);
+             static_cast<unsigned long long>(state.iterationPlans.size()));
+    return state.iterationPlans.at(iteration);
 }
 
 const DmaUnit::IterationPlan *
-DmaUnit::findIterationPlan(uint64_t iteration) const
+DmaUnit::findIterationPlan(const DmaMacroState &state, size_t iteration) const
 {
-    if (iteration >= iterationPlans.size()) {
+    if (iteration >= state.iterationPlans.size()) {
         return nullptr;
     }
 
-    return &iterationPlans.at(iteration);
+    return &state.iterationPlans.at(iteration);
 }
 
 void
-DmaUnit::buildIterationPlans(ActiveExecution &exec)
+DmaUnit::buildIterationPlans(DmaMacroState &state) const
 {
-    iterationPlans.clear();
+    state.iterationPlans.clear();
 
-    switch (static_cast<Mode>(parsedCmd.mode)) {
+    switch (static_cast<Mode>(state.parsedCmd.mode)) {
       case Mode::MoveLayout:
-        buildMoveLayoutPlans();
+        buildMoveLayoutPlans(state);
         break;
       case Mode::Transpose:
-        buildTransposePlans();
+        buildTransposePlans(state);
         break;
       case Mode::Fill:
-        buildFillPlans();
+        buildFillPlans(state);
         break;
     }
-
-    const PortID readPort = 0;
-    const PortID writePort = memSidePorts.size() > 1 ? 1 : 0;
-    const bool hasPlans = !iterationPlans.empty();
-    switch (static_cast<Mode>(parsedCmd.mode)) {
-      case Mode::MoveLayout:
-      case Mode::Transpose:
-        exec.readMask = hasPlans ? (1U << readPort) : 0;
-        exec.writeMask = hasPlans ? (1U << writePort) : 0;
-        break;
-      case Mode::Fill:
-        exec.readMask = 0;
-        exec.writeMask =
-            (hasPlans && parsedCmd.dstMemSpace != MemorySpace::DmaBank) ?
-            (1U << writePort) : 0;
-        break;
-    }
-    exec.repetition = std::max<uint64_t>(1, iterationPlans.size());
 }
 
 void
-DmaUnit::buildMoveLayoutPlans()
+DmaUnit::buildMoveLayoutPlans(DmaMacroState &state) const
 {
-    if (parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
-        parsedCmd.shapeC == 0) {
+    const auto &cmd = state.parsedCmd;
+    if (cmd.shapeH == 0 || cmd.shapeW == 0 || cmd.shapeC == 0) {
         return;
     }
 
-    const size_t channels = parsedCmd.shapeC;
+    const size_t channels = cmd.shapeC;
     panic_if(channels > bankSize,
              "DmaUnit: bank_size=%zu is too small for a (1,1,C) tile",
              bankSize);
 
+    size_t nextBankOffset = 0;
     uint32_t currentY = 0;
     uint32_t currentX = 0;
-    while (currentY < parsedCmd.shapeH) {
+    while (currentY < cmd.shapeH) {
         IterationPlan plan;
+        plan.bankOffset = nextBankOffset;
         plan.startY = currentY;
         plan.startX = currentX;
 
-        const uint32_t remainingH = parsedCmd.shapeH - currentY;
-        const uint32_t remainingW = parsedCmd.shapeW - currentX;
+        const uint32_t remainingH = cmd.shapeH - currentY;
+        const uint32_t remainingW = cmd.shapeW - currentX;
 
         if (currentX == 0) {
             const size_t hSliceBytes =
-                static_cast<size_t>(parsedCmd.shapeW) * parsedCmd.shapeC;
+                static_cast<size_t>(cmd.shapeW) * cmd.shapeC;
             if (hSliceBytes <= bankSize) {
                 plan.height = std::max<uint32_t>(
                     1, std::min<uint32_t>(remainingH, bankSize / hSliceBytes));
-                plan.width = parsedCmd.shapeW;
+                plan.width = cmd.shapeW;
             } else {
                 plan.height = 1;
                 plan.width = std::max<uint32_t>(
@@ -629,30 +636,33 @@ DmaUnit::buildMoveLayoutPlans()
                  "DmaUnit: failed to plan a non-empty batch");
 
         const size_t batchBytes = static_cast<size_t>(plan.height) *
-                                  plan.width * parsedCmd.shapeC;
+                                  plan.width * cmd.shapeC;
         panic_if(batchBytes > bankSize,
                  "DmaUnit: planned move_layout batch requires %zu bytes, "
                  "exceeds bank_size=%zu",
                  batchBytes, bankSize);
 
         plan.sourceBuffer.assign(batchBytes, 0);
-        buildBatchLines(plan);
+        buildBatchLines(cmd, plan);
+        state.iterationPlans.push_back(std::move(plan));
+        nextBankOffset += batchBytes;
+
+        const auto &finished = state.iterationPlans.back();
         DPRINTF(DmaUnit,
                 "Planned batch iter=%llu y=%u x=%u h=%u w=%u "
                 "src_lines=%u dst_lines=%u\n",
-                static_cast<unsigned long long>(iterationPlans.size()),
-                plan.startY, plan.startX, plan.height, plan.width,
-                static_cast<unsigned>(plan.sourceLines.size()),
-                static_cast<unsigned>(plan.destLines.size()));
-        iterationPlans.push_back(std::move(plan));
+                static_cast<unsigned long long>(state.iterationPlans.size() - 1),
+                finished.startY, finished.startX, finished.height,
+                finished.width,
+                static_cast<unsigned>(finished.sourceLines.size()),
+                static_cast<unsigned>(finished.destLines.size()));
 
-        if (iterationPlans.back().width == parsedCmd.shapeW &&
-            iterationPlans.back().startX == 0) {
-            currentY += iterationPlans.back().height;
+        if (finished.width == cmd.shapeW && finished.startX == 0) {
+            currentY += finished.height;
             currentX = 0;
         } else {
-            currentX += iterationPlans.back().width;
-            if (currentX >= parsedCmd.shapeW) {
+            currentX += finished.width;
+            if (currentX >= cmd.shapeW) {
                 currentX = 0;
                 currentY += 1;
             }
@@ -661,21 +671,21 @@ DmaUnit::buildMoveLayoutPlans()
 }
 
 void
-DmaUnit::buildTransposePlans()
+DmaUnit::buildTransposePlans(DmaMacroState &state) const
 {
-    if (parsedCmd.shapeH == 0 || parsedCmd.shapeW == 0 ||
-        parsedCmd.shapeC == 0) {
+    const auto &cmd = state.parsedCmd;
+    if (cmd.shapeH == 0 || cmd.shapeW == 0 || cmd.shapeC == 0) {
         return;
     }
 
     const uint8_t remainingDim =
-        3 - parsedCmd.transposeDimA - parsedCmd.transposeDimB;
+        3 - cmd.transposeDimA - cmd.transposeDimB;
     const Tick extentA =
-        static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimA));
+        static_cast<Tick>(axisExtent(cmd, cmd.transposeDimA));
     const Tick extentB =
-        static_cast<Tick>(axisExtent(parsedCmd, parsedCmd.transposeDimB));
+        static_cast<Tick>(axisExtent(cmd, cmd.transposeDimB));
     const Tick extentRest =
-        static_cast<Tick>(axisExtent(parsedCmd, remainingDim));
+        static_cast<Tick>(axisExtent(cmd, remainingDim));
     const Tick totalLatency =
         transposeUnitLatency * extentA * extentB * extentRest;
 
@@ -683,8 +693,8 @@ DmaUnit::buildTransposePlans()
             "DMA_TRANSPOSE_LATENCY dim_a=%u dim_b=%u extent_a=%llu "
             "extent_b=%llu extent_rest=%llu transpose_unit_latency=%llu "
             "computed_total_latency=%llu\n",
-            static_cast<unsigned>(parsedCmd.transposeDimA),
-            static_cast<unsigned>(parsedCmd.transposeDimB),
+            static_cast<unsigned>(cmd.transposeDimA),
+            static_cast<unsigned>(cmd.transposeDimB),
             static_cast<unsigned long long>(extentA),
             static_cast<unsigned long long>(extentB),
             static_cast<unsigned long long>(extentRest),
@@ -695,132 +705,74 @@ DmaUnit::buildTransposePlans()
         static_cast<size_t>(extentA) * static_cast<size_t>(extentB);
     for (uint32_t rest = 0; rest < extentRest; ++rest) {
         IterationPlan plan;
+        plan.bankOffset = static_cast<size_t>(rest) * planeBytes;
         plan.transposeRemainingDim = remainingDim;
         plan.transposeRemainingIndex = rest;
         plan.execLatency = transposeUnitLatency * extentA * extentB;
         plan.sourceBuffer.assign(planeBytes, 0);
         plan.buffer.assign(planeBytes, 0);
-        buildTransposeLines(plan);
-        iterationPlans.push_back(std::move(plan));
+        buildTransposeLines(cmd, plan);
+        state.iterationPlans.push_back(std::move(plan));
     }
 }
 
 void
-DmaUnit::buildFillPlans()
+DmaUnit::buildFillPlans(DmaMacroState &state) const
 {
+    const auto &cmd = state.parsedCmd;
     IterationPlan plan;
-    if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
-        iterationPlans.push_back(std::move(plan));
+    if (cmd.dstMemSpace == MemorySpace::DmaBank) {
+        state.iterationPlans.push_back(std::move(plan));
         return;
     }
 
-    for (Addr lineAddr : externalFillLineAddrs(parsedCmd)) {
+    for (Addr lineAddr : externalFillLineAddrs(cmd)) {
         DestLine line;
         line.lineAddr = lineAddr;
-        line.lineData.fill(parsedCmd.fillValue);
+        line.lineData.fill(cmd.fillValue);
         plan.destLines.push_back(line);
     }
 
     if (!plan.destLines.empty()) {
-        iterationPlans.push_back(std::move(plan));
+        state.iterationPlans.push_back(std::move(plan));
     }
 }
 
 void
-DmaUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
-{
-    const uint64_t totalPrologues = activeExecution.prologueCount;
-    const uint64_t totalExecutes = activeExecution.executeCount;
-    const uint64_t totalEpilogues = activeExecution.epilogueCount;
-    const uint64_t totalReads = activeExecution.completedReadRespCount;
-    const uint64_t totalWrites = activeExecution.completedWriteRespCount;
-    const uint64_t totalIterations = activeExecution.completedIterations;
-
-    activeExecution = ActiveExecution{};
-    activeExecution.cmd = cmd;
-    activeExecution.fields = parseCmdFields(extractCmdWord(cmd));
-    activeExecution.phase = Phase::Prologue;
-    activeExecution.prologueCount = totalPrologues;
-    activeExecution.executeCount = totalExecutes;
-    activeExecution.epilogueCount = totalEpilogues;
-    activeExecution.completedReadRespCount = totalReads;
-    activeExecution.completedWriteRespCount = totalWrites;
-    activeExecution.completedIterations = totalIterations;
-    activeExecution.readMask = 0;
-    activeExecution.writeMask = 0;
-    activeExecution.repetition = 1;
-    activeExecution.reserved = 0;
-    activeExecution.nextIterationToPrepare = 0;
-    activeExecution.nextIterationToRetire = 0;
-    activeExecution.completionIssued = false;
-    activeExecution.finalizePending = false;
-
-    for (PortID port = 0; port < static_cast<PortID>(memSidePorts.size());
-         ++port) {
-        loadQueues[port].clear();
-        storeQueues[port].clear();
-        memPortBusy[port] = false;
-    }
-    execQueue.clear();
-    activeExecOp.reset();
-    iterationStates.clear();
-    maxConcurrentMicroOps = 0;
-
-    onCommandBegin(activeExecution);
-    prepareIteration(activeExecution, 0);
-}
-
-void
-DmaUnit::onCommandBegin(ActiveExecution &exec)
-{
-    resetCommandState();
-    parsedCmd = parseCommand(exec.cmd);
-    parsedCmdValid = true;
-    validateParsedCommand(parsedCmd);
-    buildIterationPlans(exec);
-}
-
-void
-DmaUnit::prologue(ActiveExecution &exec)
-{
-    (void)exec;
-}
-
-void
-DmaUnit::buildBatchLines(IterationPlan &plan) const
+DmaUnit::buildBatchLines(const ParsedCmd &cmd, IterationPlan &plan) const
 {
     std::map<Addr, std::vector<SourceCopy>> sourceMap;
     std::map<Addr, std::vector<DestCopy>> destMap;
 
     for (uint32_t localY = 0; localY < plan.height; ++localY) {
         for (uint32_t localX = 0; localX < plan.width; ++localX) {
-            for (uint32_t z = 0; z < parsedCmd.shapeC; ++z) {
+            for (uint32_t z = 0; z < cmd.shapeC; ++z) {
                 const uint32_t globalY = plan.startY + localY;
                 const uint32_t globalX = plan.startX + localX;
                 const size_t bufferOffset =
                     (static_cast<size_t>(localY) * plan.width + localX) *
-                        parsedCmd.shapeC +
+                        cmd.shapeC +
                     z;
 
                 const Addr srcAddr = computeTensorAddr(
-                    parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
-                    parsedCmd.srcStrideW, parsedCmd.srcStrideC, parsedCmd.srcK,
-                    parsedCmd.shapeW, parsedCmd.shapeC, parsedCmd.srcCutDim,
+                    cmd.srcBaseAddr, cmd.srcStrideH,
+                    cmd.srcStrideW, cmd.srcStrideC, cmd.srcK,
+                    cmd.shapeW, cmd.shapeC, cmd.srcCutDim,
                     globalY, globalX, z);
                 const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
-                validateBurstLine(srcLineAddr, sourceSpace(), "source");
+                validateBurstLine(srcLineAddr, sourceSpace(cmd), "source");
                 sourceMap[srcLineAddr].push_back({
                     bufferOffset,
                     static_cast<uint8_t>(srcAddr - srcLineAddr),
                 });
 
                 const Addr dstAddr = computeTensorAddr(
-                    parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
-                    parsedCmd.dstStrideW, parsedCmd.dstStrideC, parsedCmd.dstK,
-                    parsedCmd.shapeW, parsedCmd.shapeC, parsedCmd.dstCutDim,
+                    cmd.dstBaseAddr, cmd.dstStrideH,
+                    cmd.dstStrideW, cmd.dstStrideC, cmd.dstK,
+                    cmd.shapeW, cmd.shapeC, cmd.dstCutDim,
                     globalY, globalX, z);
                 const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
-                validateBurstLine(dstLineAddr, destSpace(), "destination");
+                validateBurstLine(dstLineAddr, destSpace(cmd), "destination");
                 destMap[dstLineAddr].push_back({
                     static_cast<uint8_t>(dstAddr - dstLineAddr),
                     bufferOffset,
@@ -838,54 +790,53 @@ DmaUnit::buildBatchLines(IterationPlan &plan) const
 }
 
 void
-DmaUnit::buildTransposeLines(IterationPlan &plan) const
+DmaUnit::buildTransposeLines(const ParsedCmd &cmd, IterationPlan &plan) const
 {
     std::map<Addr, std::vector<SourceCopy>> sourceMap;
     std::map<Addr, std::vector<DestCopy>> destMap;
 
-    const uint32_t extentA = axisExtent(parsedCmd, parsedCmd.transposeDimA);
-    const uint32_t extentB = axisExtent(parsedCmd, parsedCmd.transposeDimB);
+    const uint32_t extentA = axisExtent(cmd, cmd.transposeDimA);
+    const uint32_t extentB = axisExtent(cmd, cmd.transposeDimB);
     const uint8_t remainingDim = plan.transposeRemainingDim;
 
     for (uint32_t a = 0; a < extentA; ++a) {
         for (uint32_t b = 0; b < extentB; ++b) {
             std::array<uint32_t, 3> srcCoords = {0, 0, 0};
-            srcCoords[parsedCmd.transposeDimA] = a;
-            srcCoords[parsedCmd.transposeDimB] = b;
+            srcCoords[cmd.transposeDimA] = a;
+            srcCoords[cmd.transposeDimB] = b;
             srcCoords[remainingDim] = plan.transposeRemainingIndex;
 
             auto dstCoords = srcCoords;
-            std::swap(dstCoords[parsedCmd.transposeDimA],
-                      dstCoords[parsedCmd.transposeDimB]);
+            std::swap(dstCoords[cmd.transposeDimA],
+                      dstCoords[cmd.transposeDimB]);
 
             const size_t srcOffset =
                 static_cast<size_t>(a) * extentB + b;
             const size_t dstOffset =
-                static_cast<size_t>(dstCoords[parsedCmd.transposeDimA]) *
-                    extentA +
-                dstCoords[parsedCmd.transposeDimB];
+                static_cast<size_t>(dstCoords[cmd.transposeDimA]) * extentA +
+                dstCoords[cmd.transposeDimB];
 
             const Addr srcAddr = computeTensorAddr(
-                parsedCmd.srcBaseAddr, parsedCmd.srcStrideH,
-                parsedCmd.srcStrideW, parsedCmd.srcStrideC, 0,
-                parsedCmd.shapeW, parsedCmd.shapeC,
+                cmd.srcBaseAddr, cmd.srcStrideH,
+                cmd.srcStrideW, cmd.srcStrideC, 0,
+                cmd.shapeW, cmd.shapeC,
                 static_cast<uint8_t>(CutDim::W),
                 srcCoords[0], srcCoords[1], srcCoords[2]);
             const Addr srcLineAddr = srcAddr & ~(CacheLineBytes - 1);
-            validateBurstLine(srcLineAddr, sourceSpace(), "source");
+            validateBurstLine(srcLineAddr, sourceSpace(cmd), "source");
             sourceMap[srcLineAddr].push_back({
                 srcOffset,
                 static_cast<uint8_t>(srcAddr - srcLineAddr),
             });
 
             const Addr dstAddr = computeTensorAddr(
-                parsedCmd.dstBaseAddr, parsedCmd.dstStrideH,
-                parsedCmd.dstStrideW, parsedCmd.dstStrideC, 0,
-                parsedCmd.shapeW, parsedCmd.shapeC,
+                cmd.dstBaseAddr, cmd.dstStrideH,
+                cmd.dstStrideW, cmd.dstStrideC, 0,
+                cmd.shapeW, cmd.shapeC,
                 static_cast<uint8_t>(CutDim::W),
                 dstCoords[0], dstCoords[1], dstCoords[2]);
             const Addr dstLineAddr = dstAddr & ~(CacheLineBytes - 1);
-            validateBurstLine(dstLineAddr, destSpace(), "destination");
+            validateBurstLine(dstLineAddr, destSpace(cmd), "destination");
             destMap[dstLineAddr].push_back({
                 static_cast<uint8_t>(dstAddr - dstLineAddr),
                 dstOffset,
@@ -901,108 +852,191 @@ DmaUnit::buildTransposeLines(IterationPlan &plan) const
     }
 }
 
-void
-DmaUnit::buildMvinRequests(ActiveExecution &exec,
-                           std::vector<MemRequestDesc> &reqs)
+PortID
+DmaUnit::readPortId() const
 {
-    const IterationPlan *plan = findIterationPlan(exec.iteration);
-    if (plan == nullptr) {
-        return;
-    }
+    return 0;
+}
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
-        return;
-    }
+PortID
+DmaUnit::writePortId() const
+{
+    return memSidePorts.size() > 1 ? 1 : 0;
+}
 
-    const PortID readPort = 0;
-    uint64_t token = nextMemTxnToken;
-    for (size_t i = 0; i < plan->sourceLines.size(); ++i) {
-        const auto &line = plan->sourceLines[i];
-        MemRequestDesc req;
-        req.portId = readPort;
-        req.kind = MemTxnContext::Kind::Mvin;
-        req.addr = line.lineAddr;
-        req.size = CacheLineBytes;
-        reqs.push_back(req);
-        pendingMvinTxns.emplace(token++, PendingMvinTxn{
-            exec.iteration,
-            PendingMvinKind::SourceLine, i});
-    }
+bool
+DmaUnit::needsSourceLoads(const ParsedCmd &cmd) const
+{
+    return static_cast<Mode>(cmd.mode) != Mode::Fill;
+}
 
-    for (size_t i = 0; i < plan->destLines.size(); ++i) {
-        const auto &line = plan->destLines[i];
-        MemRequestDesc req;
-        req.portId = readPort;
-        req.kind = MemTxnContext::Kind::Mvin;
-        req.addr = line.lineAddr;
-        req.size = CacheLineBytes;
-        reqs.push_back(req);
-        pendingMvinTxns.emplace(token++, PendingMvinTxn{
-            exec.iteration,
-            PendingMvinKind::DestLine, i});
+bool
+DmaUnit::needsDestLoads(const ParsedCmd &cmd) const
+{
+    return static_cast<Mode>(cmd.mode) != Mode::Fill;
+}
+
+bool
+DmaUnit::needsStores(const ParsedCmd &cmd) const
+{
+    return !(static_cast<Mode>(cmd.mode) == Mode::Fill &&
+             cmd.dstMemSpace == MemorySpace::DmaBank);
+}
+
+DmaUnit::DmaMacroState::RuntimeStage
+DmaUnit::initialRuntimeStage(const ParsedCmd &cmd) const
+{
+    if (needsSourceLoads(cmd)) {
+        return DmaMacroState::RuntimeStage::SourceLoads;
+    }
+    if (needsDestLoads(cmd)) {
+        return DmaMacroState::RuntimeStage::DestLoads;
+    }
+    return DmaMacroState::RuntimeStage::Compute;
+}
+
+void
+DmaUnit::appendReadUop(MacroCmdContext &macroCmd, DmaMacroState &state,
+                       size_t iteration, PendingMvinKind kind, size_t index,
+                       Addr addr, size_t size)
+{
+    MicroOpContext uop;
+    uop.kind = MicroOpContext::Kind::Load;
+    uop.macroCmdId = macroCmd.macroCmdId;
+    uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    uop.portId = readPortId();
+    uop.token = nextMicroOpToken++;
+    uop.addr = addr;
+    uop.size = size;
+    macroCmd.uopQueue.push_back(std::move(uop));
+    auto &queued = macroCmd.uopQueue.back();
+    state.pendingMvinTxns.emplace(queued.token, PendingMvinTxn{
+        iteration,
+        kind,
+        index,
+    });
+}
+
+void
+DmaUnit::appendWriteUop(MacroCmdContext &macroCmd, Addr addr, size_t size,
+                        const std::vector<uint8_t> &data)
+{
+    MicroOpContext uop;
+    uop.kind = MicroOpContext::Kind::Store;
+    uop.macroCmdId = macroCmd.macroCmdId;
+    uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
+    uop.portId = writePortId();
+    uop.token = nextMicroOpToken++;
+    uop.addr = addr;
+    uop.size = size;
+    uop.data = data;
+    macroCmd.uopQueue.push_back(std::move(uop));
+}
+
+void
+DmaUnit::finishStoreStage(MacroCmdContext &macroCmd, DmaMacroState &state)
+{
+    (void)macroCmd;
+    state.currentIteration++;
+    state.runtimeStage = initialRuntimeStage(state.parsedCmd);
+}
+
+void
+DmaUnit::queueNextStage(MacroCmdContext &macroCmd, DmaMacroState &state)
+{
+    while (macroCmd.uopQueue.empty()) {
+        const IterationPlan *plan_ptr =
+            findIterationPlan(state, state.currentIteration);
+        if (plan_ptr == nullptr) {
+            markEpiloguePending(macroCmd);
+            return;
+        }
+        const auto &cmd = state.parsedCmd;
+        const auto &plan = *plan_ptr;
+
+        switch (state.runtimeStage) {
+          case DmaMacroState::RuntimeStage::SourceLoads:
+            if (!needsSourceLoads(cmd) || plan.sourceLines.empty()) {
+                state.runtimeStage = needsDestLoads(cmd) ?
+                    DmaMacroState::RuntimeStage::DestLoads :
+                    DmaMacroState::RuntimeStage::Compute;
+                continue;
+            }
+            for (size_t i = 0; i < plan.sourceLines.size(); ++i) {
+                appendReadUop(macroCmd, state, state.currentIteration,
+                              PendingMvinKind::SourceLine, i,
+                              plan.sourceLines[i].lineAddr, CacheLineBytes);
+            }
+            return;
+
+          case DmaMacroState::RuntimeStage::DestLoads:
+            if (!needsDestLoads(cmd) || plan.destLines.empty()) {
+                state.runtimeStage = DmaMacroState::RuntimeStage::Compute;
+                continue;
+            }
+            for (size_t i = 0; i < plan.destLines.size(); ++i) {
+                appendReadUop(macroCmd, state, state.currentIteration,
+                              PendingMvinKind::DestLine, i,
+                              plan.destLines[i].lineAddr, CacheLineBytes);
+            }
+            return;
+
+          case DmaMacroState::RuntimeStage::Compute:
+            appendExecUop(macroCmd, std::max<Tick>(1, plan.execLatency));
+            macroCmd.uopQueue.back().token = state.currentIteration;
+            return;
+
+          case DmaMacroState::RuntimeStage::Stores:
+            if (!needsStores(cmd) || plan.destLines.empty()) {
+                finishStoreStage(macroCmd, state);
+                continue;
+            }
+            for (const auto &line : plan.destLines) {
+                appendWriteUop(macroCmd, line.lineAddr, CacheLineBytes,
+                               std::vector<uint8_t>(line.lineData.begin(),
+                                                    line.lineData.end()));
+            }
+            return;
+        }
     }
 }
 
 void
-DmaUnit::onMvinResponse(ActiveExecution &exec,
-                        const MemTxnContext &txn,
-                        PacketPtr pkt)
+DmaUnit::materializeBankFill(const ParsedCmd &cmd)
 {
-    auto it = pendingMvinTxns.find(txn.token);
-    panic_if(it == pendingMvinTxns.end(),
-             "%s: unexpected DMA mvin token=%llu", name(),
-             static_cast<unsigned long long>(txn.token));
+    auto &bank = dmaBanks.at(cmd.dstBankId);
+    const size_t requiredBytes = fillRequiredBytes(cmd);
+    std::fill(bank.begin(), bank.end(), 0);
+    std::fill_n(bank.begin(), requiredBytes, cmd.fillValue);
 
-    const PendingMvinTxn pending = it->second;
-    pendingMvinTxns.erase(it);
-    IterationPlan &plan = iterationPlan(pending.iteration);
-
-    switch (pending.kind) {
-      case PendingMvinKind::SourceLine: {
-        const auto &line = plan.sourceLines.at(pending.index);
-        const uint8_t *data = pkt->getConstPtr<uint8_t>();
-        for (const auto &copy : line.copies) {
-            plan.sourceBuffer[copy.bufferOffset] = data[copy.lineOffset];
-        }
-        break;
-      }
-      case PendingMvinKind::DestLine: {
-        auto &line = plan.destLines.at(pending.index);
-        std::memcpy(line.lineData.data(), pkt->getConstPtr<uint8_t>(),
-                    CacheLineBytes);
-        break;
-      }
-    }
+    const unsigned long long checksum =
+        static_cast<unsigned long long>(requiredBytes) * cmd.fillValue;
+    DPRINTF(DmaUnit,
+            "DMA_BANK_FILL_OBSERVE bank=%u value=%u required=%llu "
+            "checksum=%llu\n",
+            cmd.dstBankId, cmd.fillValue,
+            static_cast<unsigned long long>(requiredBytes), checksum);
 }
 
-Tick
-DmaUnit::execute(ActiveExecution &exec)
+void
+DmaUnit::executeIteration(DmaMacroState &state, IterationPlan &plan)
 {
-    const IterationPlan *plan_ptr = findIterationPlan(exec.iteration);
-    if (plan_ptr == nullptr) {
-        return 0;
-    }
-    IterationPlan &plan = iterationPlan(exec.iteration);
+    const auto &cmd = state.parsedCmd;
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill) {
-        if (parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
-            const size_t requiredBytes = fillRequiredBytes(parsedCmd);
-            const unsigned long long checksum =
-                static_cast<unsigned long long>(requiredBytes) *
-                parsedCmd.fillValue;
-
-            DPRINTF(DmaUnit,
-                    "DMA_BANK_FILL_OBSERVE bank=%u value=%u required=%llu "
-                    "checksum=%llu\n",
-                    parsedCmd.dstBankId, parsedCmd.fillValue,
-                    static_cast<unsigned long long>(requiredBytes), checksum);
+    if (static_cast<Mode>(cmd.mode) == Mode::Fill) {
+        if (cmd.dstMemSpace == MemorySpace::DmaBank) {
+            materializeBankFill(cmd);
+        } else {
+            for (auto &line : plan.destLines) {
+                line.lineData.fill(cmd.fillValue);
+            }
         }
-        return plan.execLatency;
+        return;
     }
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Transpose) {
-        const uint32_t extentA = axisExtent(parsedCmd, parsedCmd.transposeDimA);
-        const uint32_t extentB = axisExtent(parsedCmd, parsedCmd.transposeDimB);
+    if (static_cast<Mode>(cmd.mode) == Mode::Transpose) {
+        const uint32_t extentA = axisExtent(cmd, cmd.transposeDimA);
+        const uint32_t extentB = axisExtent(cmd, cmd.transposeDimB);
         for (uint32_t a = 0; a < extentA; ++a) {
             for (uint32_t b = 0; b < extentB; ++b) {
                 const size_t srcIndex = static_cast<size_t>(a) * extentB + b;
@@ -1017,7 +1051,7 @@ DmaUnit::execute(ActiveExecution &exec)
                     plan.buffer[copy.bufferOffset];
             }
         }
-        return plan.execLatency;
+        return;
     }
 
     for (auto &line : plan.destLines) {
@@ -1025,34 +1059,131 @@ DmaUnit::execute(ActiveExecution &exec)
             line.lineData[copy.lineOffset] = plan.sourceBuffer[copy.bufferOffset];
         }
     }
+}
 
-    return plan.execLatency;
+SpecializedExecutionUnit::MacroCmdKind
+DmaUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
+{
+    switch (parseCommand(cmd).stage) {
+      case CommandStage::Legacy:
+      case CommandStage::Compute:
+        return MacroCmdKind::Exec;
+      case CommandStage::Load:
+        return MacroCmdKind::Load;
+      case CommandStage::Store:
+        return MacroCmdKind::Store;
+    }
+
+    panic("%s: unreachable DMA command stage classification", name());
+}
+
+uint32_t
+DmaUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                            MacroCmdKind kind) const
+{
+    (void)cmd;
+    switch (kind) {
+      case MacroCmdKind::Exec:
+        return 0;
+      case MacroCmdKind::Load:
+        return 1 + readPortId();
+      case MacroCmdKind::Store:
+        return 1 + writePortId();
+    }
+
+    panic("%s: unreachable DMA issue-queue classification", name());
 }
 
 void
-DmaUnit::buildMvoutRequests(ActiveExecution &exec,
-                            std::vector<MemRequestDesc> &reqs)
+DmaUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
-    const IterationPlan *plan = findIterationPlan(exec.iteration);
-    if (plan == nullptr) {
+    DmaMacroState state;
+    state.parsedCmd = parseCommand(macroCmd.cmd);
+    validateParsedCommand(state.parsedCmd);
+    state.runtimeStage = initialRuntimeStage(state.parsedCmd);
+    buildIterationPlans(state);
+    macroStates.emplace(macroCmd.macroCmdId, std::move(state));
+}
+
+void
+DmaUnit::buildUops(MacroCmdContext &macroCmd)
+{
+    auto &state = macroState(macroCmd.macroCmdId);
+    queueNextStage(macroCmd, state);
+}
+
+void
+DmaUnit::onMemUopComplete(MacroCmdContext &macroCmd,
+                          const MemTxnContext &txn, PacketPtr pkt)
+{
+    auto &state = macroState(macroCmd.macroCmdId);
+    auto pending_it = state.pendingMvinTxns.find(txn.token);
+    if (pending_it != state.pendingMvinTxns.end()) {
+        const PendingMvinTxn pending = pending_it->second;
+        state.pendingMvinTxns.erase(pending_it);
+        auto &plan = iterationPlan(state, pending.iteration);
+
+        switch (pending.kind) {
+          case PendingMvinKind::SourceLine: {
+            const auto &line = plan.sourceLines.at(pending.index);
+            const uint8_t *data = pkt->getConstPtr<uint8_t>();
+            for (const auto &copy : line.copies) {
+                plan.sourceBuffer[copy.bufferOffset] = data[copy.lineOffset];
+            }
+            break;
+          }
+          case PendingMvinKind::DestLine: {
+            auto &line = plan.destLines.at(pending.index);
+            std::memcpy(line.lineData.data(), pkt->getConstPtr<uint8_t>(),
+                        CacheLineBytes);
+            break;
+          }
+        }
+    }
+
+    if (!macroCmd.uopQueue.empty()) {
         return;
     }
 
-    if (static_cast<Mode>(parsedCmd.mode) == Mode::Fill &&
-        parsedCmd.dstMemSpace == MemorySpace::DmaBank) {
+    switch (state.runtimeStage) {
+      case DmaMacroState::RuntimeStage::SourceLoads:
+        state.runtimeStage = needsDestLoads(state.parsedCmd) ?
+            DmaMacroState::RuntimeStage::DestLoads :
+            DmaMacroState::RuntimeStage::Compute;
+        break;
+      case DmaMacroState::RuntimeStage::DestLoads:
+        state.runtimeStage = DmaMacroState::RuntimeStage::Compute;
+        break;
+      case DmaMacroState::RuntimeStage::Stores:
+        finishStoreStage(macroCmd, state);
+        break;
+      case DmaMacroState::RuntimeStage::Compute:
         return;
     }
 
-    const PortID writePort = memSidePorts.size() > 1 ? 1 : 0;
-    for (const auto &line : plan->destLines) {
-        MemRequestDesc req;
-        req.portId = writePort;
-        req.kind = MemTxnContext::Kind::Mvout;
-        req.addr = line.lineAddr;
-        req.size = CacheLineBytes;
-        req.data.assign(line.lineData.begin(), line.lineData.end());
-        reqs.push_back(req);
+    queueNextStage(macroCmd, state);
+}
+
+void
+DmaUnit::onExecUopComplete(MacroCmdContext &macroCmd,
+                           const MicroOpContext &uop)
+{
+    (void)uop;
+    auto &state = macroState(macroCmd.macroCmdId);
+    auto &plan = iterationPlan(state, state.currentIteration);
+    executeIteration(state, plan);
+
+    state.runtimeStage = DmaMacroState::RuntimeStage::Stores;
+    if (!needsStores(state.parsedCmd)) {
+        finishStoreStage(macroCmd, state);
     }
+    queueNextStage(macroCmd, state);
+}
+
+void
+DmaUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
+{
+    macroStates.erase(macroCmd.macroCmdId);
 }
 
 } // namespace gem5

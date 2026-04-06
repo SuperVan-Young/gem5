@@ -32,6 +32,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,14 @@ class DmaUnit : public SpecializedExecutionUnit
         MoveLayout = 0,
         Transpose = 1,
         Fill = 2,
+    };
+
+    enum class CommandStage : uint8_t
+    {
+        Legacy = 0,
+        Load = 1,
+        Compute = 2,
+        Store = 3,
     };
 
     enum class CutDim : uint8_t
@@ -76,6 +85,7 @@ class DmaUnit : public SpecializedExecutionUnit
 
     struct ParsedCmd
     {
+        CommandStage stage = CommandStage::Legacy;
         uint8_t deviceId = 0;
         uint8_t dataType = 0;
         uint8_t mode = 0;
@@ -134,6 +144,7 @@ class DmaUnit : public SpecializedExecutionUnit
 
     struct IterationPlan
     {
+        size_t bankOffset = 0;
         uint32_t startY = 0;
         uint32_t startX = 0;
         uint32_t height = 0;
@@ -149,9 +160,26 @@ class DmaUnit : public SpecializedExecutionUnit
 
     struct PendingMvinTxn
     {
-        uint64_t iteration = 0;
+        size_t iteration = 0;
         PendingMvinKind kind = PendingMvinKind::SourceLine;
         size_t index = 0;
+    };
+
+    struct DmaMacroState
+    {
+        enum class RuntimeStage : uint8_t
+        {
+            SourceLoads = 0,
+            DestLoads = 1,
+            Compute = 2,
+            Stores = 3,
+        };
+
+        ParsedCmd parsedCmd;
+        std::vector<IterationPlan> iterationPlans;
+        std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
+        size_t currentIteration = 0;
+        RuntimeStage runtimeStage = RuntimeStage::SourceLoads;
     };
 
     static constexpr size_t CacheLineBytes = 64;
@@ -163,10 +191,8 @@ class DmaUnit : public SpecializedExecutionUnit
     const size_t bankSize;
     const Tick transposeUnitLatency;
 
-    ParsedCmd parsedCmd;
-    bool parsedCmdValid;
-    std::vector<IterationPlan> iterationPlans;
-    std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
+    std::vector<std::vector<uint8_t>> dmaBanks;
+    std::unordered_map<uint64_t, DmaMacroState> macroStates;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
@@ -179,8 +205,8 @@ class DmaUnit : public SpecializedExecutionUnit
     uint32_t axisExtent(const ParsedCmd &cmd, uint8_t dim) const;
     bool isExternalSpace(MemorySpace space) const;
     std::vector<Addr> externalFillLineAddrs(const ParsedCmd &cmd) const;
-    MemorySpace sourceSpace() const;
-    MemorySpace destSpace() const;
+    MemorySpace sourceSpace(const ParsedCmd &cmd) const;
+    MemorySpace destSpace(const ParsedCmd &cmd) const;
     bool spaceContains(MemorySpace space, Addr addr, size_t size) const;
     void validateBaseAddress(Addr addr, MemorySpace space,
                              const char *label) const;
@@ -190,28 +216,46 @@ class DmaUnit : public SpecializedExecutionUnit
                            uint32_t strideC, uint16_t k, uint32_t width,
                            uint32_t channels, uint8_t cutDim,
                            uint32_t y, uint32_t x, uint32_t z) const;
-    void resetCommandState();
-    IterationPlan &iterationPlan(uint64_t iteration);
-    const IterationPlan *findIterationPlan(uint64_t iteration) const;
-    void buildIterationPlans(ActiveExecution &exec);
-    void buildMoveLayoutPlans();
-    void buildTransposePlans();
-    void buildFillPlans();
-    void buildBatchLines(IterationPlan &plan) const;
-    void buildTransposeLines(IterationPlan &plan) const;
+    DmaMacroState &macroState(uint64_t macroCmdId);
+    const DmaMacroState &macroState(uint64_t macroCmdId) const;
+    IterationPlan &iterationPlan(DmaMacroState &state, size_t iteration);
+    const IterationPlan *findIterationPlan(const DmaMacroState &state,
+                                           size_t iteration) const;
+    void buildIterationPlans(DmaMacroState &state) const;
+    void buildMoveLayoutPlans(DmaMacroState &state) const;
+    void buildTransposePlans(DmaMacroState &state) const;
+    void buildFillPlans(DmaMacroState &state) const;
+    void buildBatchLines(const ParsedCmd &cmd, IterationPlan &plan) const;
+    void buildTransposeLines(const ParsedCmd &cmd, IterationPlan &plan) const;
+    PortID readPortId() const;
+    PortID writePortId() const;
+    bool needsSourceLoads(const ParsedCmd &cmd) const;
+    bool needsDestLoads(const ParsedCmd &cmd) const;
+    bool needsStores(const ParsedCmd &cmd) const;
+    DmaMacroState::RuntimeStage initialRuntimeStage(
+        const ParsedCmd &cmd) const;
+    void appendReadUop(MacroCmdContext &macroCmd, DmaMacroState &state,
+                       size_t iteration, PendingMvinKind kind, size_t index,
+                       Addr addr, size_t size);
+    void appendWriteUop(MacroCmdContext &macroCmd, Addr addr, size_t size,
+                        const std::vector<uint8_t> &data);
+    void queueNextStage(MacroCmdContext &macroCmd, DmaMacroState &state);
+    void finishStoreStage(MacroCmdContext &macroCmd, DmaMacroState &state);
+    void executeIteration(DmaMacroState &state, IterationPlan &plan);
+    void materializeBankFill(const ParsedCmd &cmd);
 
   protected:
-    void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
-    void onCommandBegin(ActiveExecution &exec) override;
-    void prologue(ActiveExecution &exec) override;
-    void buildMvinRequests(ActiveExecution &exec,
-                           std::vector<MemRequestDesc> &reqs) override;
-    void onMvinResponse(ActiveExecution &exec,
-                        const MemTxnContext &txn,
-                        PacketPtr pkt) override;
-    Tick execute(ActiveExecution &exec) override;
-    void buildMvoutRequests(ActiveExecution &exec,
-                            std::vector<MemRequestDesc> &reqs) override;
+    MacroCmdKind classifyMacroCmd(
+        const std::vector<uint8_t> &cmd) const override;
+    uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                                MacroCmdKind kind) const override;
+    void onMacroCmdBegin(MacroCmdContext &macroCmd) override;
+    void buildUops(MacroCmdContext &macroCmd) override;
+    void onMemUopComplete(MacroCmdContext &macroCmd,
+                          const MemTxnContext &txn, PacketPtr pkt) override;
+    void onExecUopComplete(MacroCmdContext &macroCmd,
+                           const MicroOpContext &uop) override;
+    void onMacroCmdEnd(MacroCmdContext &macroCmd) override;
 
   public:
     DmaUnit(const DmaUnitParams &params);

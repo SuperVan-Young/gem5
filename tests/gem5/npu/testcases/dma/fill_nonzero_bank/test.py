@@ -54,7 +54,7 @@ TRANSPOSE_WC_LATENCY_REGEX = (
 
 VERIFIER_SPECS = {
     "fill_zero_bank": (
-        r".*DMA_BANK_FILL_OBSERVE bank=1 value=0 required=64 checksum=0",
+        r".*DMA_BANK_FILL_OBSERVE bank=0 value=0 required=64 checksum=0",
         r"DMA_SUMMARY scenario=fill_zero_bank cmds=1 reads=0 writes=0 .*",
         r"DMA_SCENARIO_PASS=fill_zero_bank",
     ),
@@ -67,7 +67,7 @@ VERIFIER_SPECS = {
         r"DMA_SCENARIO_PASS=fill_zero_spm",
     ),
     "fill_nonzero_bank": (
-        r".*DMA_BANK_FILL_OBSERVE bank=1 value=90 required=64 checksum=5760",
+        r".*DMA_BANK_FILL_OBSERVE bank=0 value=90 required=64 checksum=5760",
         r"DMA_SUMMARY scenario=fill_nonzero_bank cmds=1 reads=0 writes=0 .*",
         r"DMA_SCENARIO_PASS=fill_nonzero_bank",
     ),

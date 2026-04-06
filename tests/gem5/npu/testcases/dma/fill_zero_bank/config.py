@@ -8,6 +8,7 @@ from pathlib import Path
 
 import m5
 from m5.objects import *
+from m5.objects import DmaUnit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
 

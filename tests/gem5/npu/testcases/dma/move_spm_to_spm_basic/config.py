@@ -7,11 +7,17 @@ import sys
 from pathlib import Path
 
 import m5
-from m5.objects import AddrRange, DmaUnit
+from m5.objects import (
+    AddrRange,
+    DmaUnit,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
 
-from npu_test_common import emit_summary, verify_snapshot  # noqa: E402
+from npu_test_common import (  # noqa: E402
+    emit_summary,
+    verify_snapshot,
+)
 from npu_test_system import NPUTestSystemBuilder  # noqa: E402
 
 EXPECTED_EXIT_CAUSE = "exiting with last active thread context"
