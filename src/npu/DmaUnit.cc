@@ -896,6 +896,72 @@ DmaUnit::initialRuntimeStage(const ParsedCmd &cmd) const
     return DmaMacroState::RuntimeStage::Compute;
 }
 
+const char *
+DmaUnit::stageName(CommandStage stage) const
+{
+    switch (stage) {
+      case CommandStage::Legacy:
+        return "Legacy";
+      case CommandStage::Load:
+        return "Load";
+      case CommandStage::Compute:
+        return "Compute";
+      case CommandStage::Store:
+        return "Store";
+    }
+
+    panic("%s: unreachable DMA stage name", name());
+}
+
+const char *
+DmaUnit::modeName(Mode mode) const
+{
+    switch (mode) {
+      case Mode::MoveLayout:
+        return "MoveLayout";
+      case Mode::Transpose:
+        return "Transpose";
+      case Mode::Fill:
+        return "Fill";
+    }
+
+    panic("%s: unreachable DMA mode name", name());
+}
+
+const char *
+DmaUnit::memorySpaceName(MemorySpace space) const
+{
+    switch (space) {
+      case MemorySpace::Dram:
+        return "Dram";
+      case MemorySpace::Spm:
+        return "Spm";
+      case MemorySpace::DmaBank:
+        return "DmaBank";
+      case MemorySpace::Invalid:
+        return "Invalid";
+    }
+
+    panic("%s: unreachable DMA memory-space name", name());
+}
+
+const char *
+DmaUnit::cutDimName(uint8_t dim) const
+{
+    switch (static_cast<CutDim>(dim)) {
+      case CutDim::H:
+        return "H";
+      case CutDim::W:
+        return "W";
+      case CutDim::C:
+        return "C";
+      case CutDim::Reserved:
+        return "Reserved";
+    }
+
+    panic("%s: unreachable DMA cut-dim name", name());
+}
+
 void
 DmaUnit::appendReadUop(MacroCmdContext &macroCmd, DmaMacroState &state,
                        size_t iteration, PendingMvinKind kind, size_t index,
@@ -1185,6 +1251,59 @@ void
 DmaUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 {
     macroStates.erase(macroCmd.macroCmdId);
+}
+
+const char *
+DmaUnit::profileSeuType() const
+{
+    return "DMA";
+}
+
+void
+DmaUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
+                                  std::ostream &os) const
+{
+    const auto &state = macroState(macroCmd.macroCmdId);
+    const auto &cmd = state.parsedCmd;
+
+    os << "\"stage\":";
+    appendJsonString(os, stageName(cmd.stage));
+    os << ",\"mode\":";
+    appendJsonString(os, modeName(static_cast<Mode>(cmd.mode)));
+    os << ",\"src_mem_space\":";
+    appendJsonString(os, memorySpaceName(cmd.srcMemSpace));
+    os << ",\"dst_mem_space\":";
+    appendJsonString(os, memorySpaceName(cmd.dstMemSpace));
+    os << ",\"src_cut_dim\":";
+    appendJsonString(os, cutDimName(cmd.srcCutDim));
+    os << ",\"dst_cut_dim\":";
+    appendJsonString(os, cutDimName(cmd.dstCutDim));
+    os << ",\"transpose_dim_a\":";
+    appendJsonString(os, cutDimName(cmd.transposeDimA));
+    os << ",\"transpose_dim_b\":";
+    appendJsonString(os, cutDimName(cmd.transposeDimB));
+    os << ",\"src_base_addr\":" << cmd.srcBaseAddr;
+    os << ",\"dst_base_addr\":" << cmd.dstBaseAddr;
+    os << ",\"shape_h\":" << cmd.shapeH;
+    os << ",\"shape_w\":" << cmd.shapeW;
+    os << ",\"shape_c\":" << cmd.shapeC;
+    os << ",\"src_stride_h\":" << cmd.srcStrideH;
+    os << ",\"src_stride_w\":" << cmd.srcStrideW;
+    os << ",\"src_stride_c\":" << cmd.srcStrideC;
+    os << ",\"dst_stride_h\":" << cmd.dstStrideH;
+    os << ",\"dst_stride_w\":" << cmd.dstStrideW;
+    os << ",\"dst_stride_c\":" << cmd.dstStrideC;
+    os << ",\"src_k\":" << cmd.srcK;
+    os << ",\"dst_k\":" << cmd.dstK;
+    os << ",\"src_bank_id\":" << static_cast<unsigned>(cmd.srcBankId);
+    os << ",\"dst_bank_id\":" << static_cast<unsigned>(cmd.dstBankId);
+    os << ",\"mode_cfg\":" << cmd.modeCfg;
+    os << ",\"bank_cfg\":" << cmd.bankCfg;
+    os << ",\"word15\":" << cmd.word15;
+    os << ",\"fill_value\":" << static_cast<unsigned>(cmd.fillValue);
+    os << ",\"iteration_plans\":" << state.iterationPlans.size();
+    os << ",\"current_iteration\":" << state.currentIteration;
+    os << ",\"pending_mvin_txns\":" << state.pendingMvinTxns.size();
 }
 
 } // namespace gem5

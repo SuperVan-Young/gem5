@@ -98,18 +98,42 @@ class NPUTestSystemBuilder:
         self.system.system_port = self.system.membus.cpu_side_ports
         return self.system
 
-    def add_default_physmem(self, mem_range=None, attr_name="physmem"):
+    def add_default_physmem(
+        self,
+        mem_range=None,
+        latency="30ns",
+        latency_var="0ns",
+        bandwidth="12.8GiB/s",
+        attr_name="physmem",
+    ):
         self._require_system()
         mem_range = mem_range or self.system.mem_ranges[0]
-        memory = SimpleMemory(range=mem_range)
+        memory = SimpleMemory(
+            range=mem_range,
+            latency=latency,
+            latency_var=latency_var,
+            bandwidth=bandwidth,
+        )
         memory.port = self.system.membus.mem_side_ports
         setattr(self.system, attr_name, memory)
         self.components[attr_name] = memory
         return memory
 
-    def add_lowmem(self, mem_range, attr_name="lowmem"):
+    def add_lowmem(
+        self,
+        mem_range,
+        latency="30ns",
+        latency_var="0ns",
+        bandwidth="12.8GiB/s",
+        attr_name="lowmem",
+    ):
         self._require_system()
-        memory = SimpleMemory(range=mem_range)
+        memory = SimpleMemory(
+            range=mem_range,
+            latency=latency,
+            latency_var=latency_var,
+            bandwidth=bandwidth,
+        )
         memory.port = self.system.membus.mem_side_ports
         setattr(self.system, attr_name, memory)
         self.components[attr_name] = memory
@@ -267,6 +291,7 @@ class NPUTestSystemBuilder:
         num_output_ports=None,
         input_buffer_count=2,
         output_buffer_count=2,
+        local_buffer_stride=0x40,
         base_addr=None,
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
@@ -302,6 +327,7 @@ class NPUTestSystemBuilder:
             ),
             "input_buffer_count": input_buffer_count,
             "output_buffer_count": output_buffer_count,
+            "local_buffer_stride": local_buffer_stride,
             "debug_process_latency": debug_process_latency,
             "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
         }

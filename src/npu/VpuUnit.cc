@@ -148,6 +148,60 @@ VpuUnit::decodeOpcode(uint8_t opCode) const
     }
 }
 
+const char *
+VpuUnit::opcodeName(Opcode opcode) const
+{
+    switch (opcode) {
+      case Opcode::Exec:
+        return "Exec";
+      case Opcode::VAdd:
+        return "VAdd";
+      case Opcode::VSub:
+        return "VSub";
+      case Opcode::VMul:
+        return "VMul";
+      case Opcode::VDiv:
+        return "VDiv";
+      case Opcode::VScale:
+        return "VScale";
+      case Opcode::VCvtI2F:
+        return "VCvtI2F";
+      case Opcode::VCvtF2I:
+        return "VCvtF2I";
+      case Opcode::VSqrt:
+        return "VSqrt";
+      case Opcode::VFma:
+        return "VFma";
+      case Opcode::VReduceSum:
+        return "VReduceSum";
+      case Opcode::VReduceMax:
+        return "VReduceMax";
+      case Opcode::VLoad:
+        return "VLoad";
+      case Opcode::VStore:
+        return "VStore";
+      case Opcode::VExp:
+        return "VExp";
+      case Opcode::VSoftmax:
+        return "VSoftmax";
+    }
+
+    panic("%s: unreachable VPU opcode name", name());
+}
+
+const char *
+VpuUnit::dataTypeName(DataType dataType) const
+{
+    switch (dataType) {
+      case DataType::Int32:
+        return "Int32";
+      case DataType::Float32:
+        return "Float32";
+    }
+
+    panic("%s: unreachable VPU data type name", name());
+}
+
 VpuUnit::DecodedVectorOp
 VpuUnit::decodeVectorOp(const MacroCmdContext &macroCmd) const
 {
@@ -1068,6 +1122,56 @@ VpuUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
         lastLinearCompletionTickValue = curTick();
     }
     macroStates.erase(it);
+}
+
+const char *
+VpuUnit::profileSeuType() const
+{
+    return "VPU";
+}
+
+void
+VpuUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
+                                  std::ostream &os) const
+{
+    const auto it = macroStates.find(macroCmd.macroCmdId);
+    panic_if(it == macroStates.end(),
+             "%s: missing VPU macro state for profiling", name());
+    const auto &state = it->second;
+
+    os << "\"opcode\":";
+    appendJsonString(os, opcodeName(state.op.opcode));
+    os << ",\"data_type\":";
+    appendJsonString(os, dataTypeName(state.op.dataType));
+    os << ",\"legacy_exec\":" << (state.op.legacyExec ? "true" : "false");
+    os << ",\"read_mask\":" << state.readMask;
+    os << ",\"write_mask\":" << state.writeMask;
+    os << ",\"repetition\":" << state.op.repetition;
+    os << ",\"flags\":" << state.op.flags;
+    os << ",\"elem_count\":" << state.op.elemCount;
+    os << ",\"src_stride_bytes\":" << state.op.srcStrideBytes;
+    os << ",\"dst_stride_bytes\":" << state.op.dstStrideBytes;
+    os << ",\"scalar_bits\":" << state.op.scalarBits;
+    os << ",\"src0_addr\":" << state.src0Addr;
+    os << ",\"src1_addr\":" << state.src1Addr;
+    os << ",\"src2_addr\":" << state.src2Addr;
+    os << ",\"dst_addr\":" << state.dstAddr;
+    os << ",\"completed_exec_uops\":" << state.completedExecUops;
+    os << ",\"read_ports\":[";
+    for (size_t i = 0; i < state.readPorts.size(); ++i) {
+        if (i != 0) {
+            os << ',';
+        }
+        os << state.readPorts[i];
+    }
+    os << "],\"write_ports\":[";
+    for (size_t i = 0; i < state.writePorts.size(); ++i) {
+        if (i != 0) {
+            os << ',';
+        }
+        os << state.writePorts[i];
+    }
+    os << ']';
 }
 
 uint64_t

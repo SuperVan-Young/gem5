@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <map>
 #include <unordered_map>
 #include <vector>
@@ -234,6 +235,10 @@ class DmaUnit : public SpecializedExecutionUnit
     bool needsStores(const ParsedCmd &cmd) const;
     DmaMacroState::RuntimeStage initialRuntimeStage(
         const ParsedCmd &cmd) const;
+    const char *stageName(CommandStage stage) const;
+    const char *modeName(Mode mode) const;
+    const char *memorySpaceName(MemorySpace space) const;
+    const char *cutDimName(uint8_t dim) const;
     void appendReadUop(MacroCmdContext &macroCmd, DmaMacroState &state,
                        size_t iteration, PendingMvinKind kind, size_t index,
                        Addr addr, size_t size);
@@ -256,6 +261,9 @@ class DmaUnit : public SpecializedExecutionUnit
     void onExecUopComplete(MacroCmdContext &macroCmd,
                            const MicroOpContext &uop) override;
     void onMacroCmdEnd(MacroCmdContext &macroCmd) override;
+    const char *profileSeuType() const override;
+    void appendProfileDetailsJson(const MacroCmdContext &macroCmd,
+                                  std::ostream &os) const override;
 
   public:
     DmaUnit(const DmaUnitParams &params);

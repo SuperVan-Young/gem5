@@ -31,6 +31,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <unordered_map>
 #include <vector>
 
@@ -227,6 +228,8 @@ class VpuUnit : public SpecializedExecutionUnit
                           const std::vector<uint8_t> &bytes) const;
     void appendStoreWhenReady(MacroCmdContext &macroCmd,
                               const VpuMacroState &state);
+    const char *opcodeName(Opcode opcode) const;
+    const char *dataTypeName(DataType dataType) const;
     void executeLegacy(VpuMacroState &state) const;
     void executeBinary(const VpuMacroState &state) const;
     void executeUnary(const VpuMacroState &state) const;
@@ -247,6 +250,9 @@ class VpuUnit : public SpecializedExecutionUnit
     void onExecUopComplete(MacroCmdContext &macroCmd,
                            const MicroOpContext &uop) override;
     void onMacroCmdEnd(MacroCmdContext &macroCmd) override;
+    const char *profileSeuType() const override;
+    void appendProfileDetailsJson(const MacroCmdContext &macroCmd,
+                                  std::ostream &os) const override;
 
   public:
     VpuUnit(const VpuUnitParams &params);
