@@ -124,10 +124,20 @@ class NpuCmd
 
     void clearCommonReservedBits() { setBits(0U, 6U, 0U); }
 
-    void launchCmdWordsAt(unsigned word_count, uint64_t port_base) const
+    void writeCmdWordsAt(unsigned word_count, uint64_t port_base) const
     {
         npu_mmio_write32(port_base, words, word_count);
+    }
+
+    void ringDoorbellAt(uint64_t port_base) const
+    {
         npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_PUSH);
+    }
+
+    void launchCmdWordsAt(unsigned word_count, uint64_t port_base) const
+    {
+        writeCmdWordsAt(word_count, port_base);
+        ringDoorbellAt(port_base);
     }
 
     void launchCmdAt(uint64_t port_base) const

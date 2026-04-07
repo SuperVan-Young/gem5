@@ -2,10 +2,13 @@
 # All rights reserved.
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from m5.objects import (
     AddrRange,
+    Cache,
+    IOXBar,
+    L2XBar,
     MegaCmdQueue,
     Process,
     RiscvTimingSimpleCPU,
@@ -41,6 +44,13 @@ DEFAULT_MACRO_CMD_BYTES = DEFAULT_MEGA_CMD_WIDTH_BITS // 8
 DEFAULT_CMD_QUEUE_DEPTH = 8
 DEFAULT_NUM_SYNC_INDICATOR = 256
 DEFAULT_SPM_SIZE = 64 * 1024
+DEFAULT_NPU_MMIO_BUS_KWARGS = {
+    "width": 64,
+    "frontend_latency": 0,
+    "forward_latency": 0,
+    "response_latency": 0,
+    "header_latency": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,78 @@ class NPUAddressMap:
     sync_size: int = 4
 
 
+@dataclass(frozen=True)
+class CacheSpec:
+    size: str
+    assoc: int
+    tag_latency: int
+    data_latency: int
+    response_latency: int
+    mshrs: int
+    tgts_per_mshr: int
+    is_read_only: bool = False
+    writeback_clean: bool = False
+    write_buffers: int | None = None
+
+    def as_kwargs(self):
+        kwargs = {
+            "size": self.size,
+            "assoc": self.assoc,
+            "tag_latency": self.tag_latency,
+            "data_latency": self.data_latency,
+            "response_latency": self.response_latency,
+            "mshrs": self.mshrs,
+            "tgts_per_mshr": self.tgts_per_mshr,
+            "is_read_only": self.is_read_only,
+            "writeback_clean": self.writeback_clean,
+        }
+        if self.write_buffers is not None:
+            kwargs["write_buffers"] = self.write_buffers
+        return kwargs
+
+
+@dataclass(frozen=True)
+class CacheHierarchyConfig:
+    enable_l1: bool = True
+    enable_l2: bool = False
+    l1i: CacheSpec = field(
+        default_factory=lambda: CacheSpec(
+            size="32KiB",
+            assoc=2,
+            tag_latency=2,
+            data_latency=2,
+            response_latency=2,
+            mshrs=4,
+            tgts_per_mshr=20,
+            is_read_only=True,
+            writeback_clean=True,
+        )
+    )
+    l1d: CacheSpec = field(
+        default_factory=lambda: CacheSpec(
+            size="32KiB",
+            assoc=2,
+            tag_latency=2,
+            data_latency=2,
+            response_latency=2,
+            mshrs=4,
+            tgts_per_mshr=20,
+        )
+    )
+    l2: CacheSpec = field(
+        default_factory=lambda: CacheSpec(
+            size="256KiB",
+            assoc=8,
+            tag_latency=20,
+            data_latency=20,
+            response_latency=20,
+            mshrs=20,
+            tgts_per_mshr=12,
+            write_buffers=8,
+        )
+    )
+
+
 class NPUTestSystemBuilder:
     def __init__(
         self,
@@ -64,17 +146,28 @@ class NPUTestSystemBuilder:
         mem_mode="timing",
         mem_ranges=None,
         addr_map=None,
+        cache_config=None,
+        enable_npu_mmio_bypass=True,
     ):
         self.clock = clock
         self.mem_mode = mem_mode
         self.mem_ranges = mem_ranges or [AddrRange("512MiB")]
         self.addr_map = addr_map or NPUAddressMap()
+        self.cache_config = (
+            CacheHierarchyConfig() if cache_config is None else cache_config
+        )
+        self.enable_npu_mmio_bypass = enable_npu_mmio_bypass
 
         self.system = None
         self.root = None
         self.cpus = []
         self.processes = []
         self.components = {}
+        self.npu_mmio_bus = None
+        self.cpu_npu_mmio_bus_kwargs = None
+        self.l2cache = None
+        self.tol2bus = None
+        self._l2_config = None
 
     def _attach_component(self, component, attr_name, parent=None, keys=None):
         self._require_system()
@@ -86,17 +179,58 @@ class NPUTestSystemBuilder:
             self.components[key] = component
         return component
 
-    def build_base_system(self):
+    def build_base_system(
+        self,
+        membus_kwargs=None,
+        npu_mmio_bus_kwargs=None,
+        cpu_npu_mmio_bus_kwargs=None,
+        connect_npu_mmio_bus_to_membus=True,
+        enable_npu_mmio_bypass=None,
+    ):
+        if membus_kwargs is None:
+            membus_kwargs = {}
+        if enable_npu_mmio_bypass is None:
+            enable_npu_mmio_bypass = self.enable_npu_mmio_bypass
         self.system = System(
             mem_mode=self.mem_mode,
             mem_ranges=self.mem_ranges,
-            membus=SystemXBar(),
+            membus=SystemXBar(**membus_kwargs),
             clk_domain=SrcClockDomain(
                 clock=self.clock, voltage_domain=VoltageDomain()
             ),
         )
         self.system.system_port = self.system.membus.cpu_side_ports
+        if enable_npu_mmio_bypass:
+            if npu_mmio_bus_kwargs is None:
+                npu_mmio_bus_kwargs = DEFAULT_NPU_MMIO_BUS_KWARGS
+            if cpu_npu_mmio_bus_kwargs is None:
+                cpu_npu_mmio_bus_kwargs = npu_mmio_bus_kwargs
+            self.cpu_npu_mmio_bus_kwargs = dict(cpu_npu_mmio_bus_kwargs)
+            self.npu_mmio_bus = IOXBar(**npu_mmio_bus_kwargs)
+            self.system.npu_mmio_bus = self.npu_mmio_bus
+            if connect_npu_mmio_bus_to_membus:
+                self.npu_mmio_bus.mem_side_ports = (
+                    self.system.membus.cpu_side_ports
+                )
+        else:
+            self.npu_mmio_bus = None
+            self.cpu_npu_mmio_bus_kwargs = None
         return self.system
+
+    def _cpu_dcache_target_port(self):
+        if self.npu_mmio_bus is not None:
+            return self.npu_mmio_bus.cpu_side_ports
+        return self.system.membus.cpu_side_ports
+
+    def _npu_mmio_target_port(self):
+        if self.npu_mmio_bus is not None:
+            return self.npu_mmio_bus.mem_side_ports
+        return self.system.membus.mem_side_ports
+
+    def _npu_mmio_request_port(self):
+        if self.npu_mmio_bus is not None:
+            return self.npu_mmio_bus.cpu_side_ports
+        return self.system.membus.cpu_side_ports
 
     def add_default_physmem(
         self,
@@ -159,11 +293,56 @@ class NPUTestSystemBuilder:
         self.components[attr_name] = spm
         return spm
 
-    def add_cpu(self, cpu_id=0):
+    def _create_cache(self, spec):
+        return Cache(**spec.as_kwargs())
+
+    def _ensure_shared_l2(self, config):
+        if not config.enable_l2:
+            return self.system.membus.cpu_side_ports
+        if self.l2cache is None:
+            self.tol2bus = L2XBar()
+            self.l2cache = self._create_cache(config.l2)
+            self.system.tol2bus = self.tol2bus
+            self.system.l2cache = self.l2cache
+            self.l2cache.cpu_side = self.tol2bus.mem_side_ports
+            self.l2cache.mem_side = self.system.membus.cpu_side_ports
+            self._l2_config = config.l2
+        elif self._l2_config != config.l2:
+            raise ValueError("All CPUs must share the same L2 cache config.")
+        return self.tol2bus.cpu_side_ports
+
+    def _attach_cpu_memory_hierarchy(self, cpu, cpu_id, config):
+        if config.enable_l2 and not config.enable_l1:
+            raise ValueError("L2 cache requires L1 caches to be enabled.")
+        if not config.enable_l1:
+            cpu.icache_port = self.system.membus.cpu_side_ports
+            cpu.dcache_port = self._cpu_dcache_target_port()
+            return
+
+        downstream = self._ensure_shared_l2(config)
+        cpu.icache = self._create_cache(config.l1i)
+        cpu.dcache = self._create_cache(config.l1d)
+        cpu.icache_port = cpu.icache.cpu_side
+        cpu.icache.mem_side = downstream
+        cpu.dcache.mem_side = downstream
+
+        if self.npu_mmio_bus is not None:
+            frontend = IOXBar(**self.cpu_npu_mmio_bus_kwargs)
+            frontend.mem_side_ports = self.npu_mmio_bus.cpu_side_ports
+            frontend.default = cpu.dcache.cpu_side
+            attr_name = f"cpu{cpu_id}_npu_mmio_bus"
+            setattr(self.system, attr_name, frontend)
+            self.components[attr_name] = frontend
+            cpu.dcache_port = frontend.cpu_side_ports
+        else:
+            cpu.dcache_port = cpu.dcache.cpu_side
+
+    def add_cpu(self, cpu_id=0, cache_config=None, connect_cached_ports=True):
         self._require_system()
         cpu = RiscvTimingSimpleCPU(cpu_id=cpu_id)
-        cpu.icache_port = self.system.membus.cpu_side_ports
-        cpu.dcache_port = self.system.membus.cpu_side_ports
+        if connect_cached_ports:
+            config = self.cache_config if cache_config is None else cache_config
+            self._attach_cpu_memory_hierarchy(cpu, cpu_id, config)
         cpu.createInterruptController()
         self.cpus.append(cpu)
         if cpu_id == 0 and not hasattr(self.system, "cpu"):
@@ -237,10 +416,10 @@ class NPUTestSystemBuilder:
 
         cmdq = MegaCmdQueue(**kwargs)
         for _ in range(num_input_port):
-            cmdq.cpu_side = self.system.membus.mem_side_ports
+            cmdq.cpu_side = self._npu_mmio_target_port()
         if num_sync_indicator is not None:
-            cmdq.sync_indicator_side = self.system.membus.mem_side_ports
-            cmdq.mem_side = self.system.membus.cpu_side_ports
+            cmdq.sync_indicator_side = self._npu_mmio_target_port()
+            cmdq.mem_side = self._npu_mmio_request_port()
         return self._attach_component(
             cmdq,
             attr_name,
@@ -271,9 +450,9 @@ class NPUTestSystemBuilder:
             debug_process_latency=debug_process_latency,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
         )
-        seu.cpu_side = self.system.membus.mem_side_ports
+        seu.cpu_side = self._npu_mmio_target_port()
         for _ in range(num_mem_side_ports):
-            seu.mem_side = self.system.membus.cpu_side_ports
+            seu.mem_side = self._npu_mmio_request_port()
         return self._attach_component(
             seu,
             attr_name,
@@ -336,9 +515,9 @@ class NPUTestSystemBuilder:
         vpu = VpuUnit(
             **kwargs,
         )
-        vpu.cpu_side = self.system.membus.mem_side_ports
+        vpu.cpu_side = self._npu_mmio_target_port()
         for _ in range(num_mem_side_ports):
-            vpu.mem_side = self.system.membus.cpu_side_ports
+            vpu.mem_side = self._npu_mmio_request_port()
         return self._attach_component(
             vpu,
             attr_name,
@@ -399,8 +578,8 @@ class NPUTestSystemBuilder:
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
             bank_size=bank_size,
         )
-        dma.cpu_side = self.system.membus.mem_side_ports
-        dma.mem_side = self.system.membus.cpu_side_ports
+        dma.cpu_side = self._npu_mmio_target_port()
+        dma.mem_side = self._npu_mmio_request_port()
         return self._attach_component(
             dma,
             attr_name,
