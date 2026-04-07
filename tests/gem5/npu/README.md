@@ -78,6 +78,12 @@
 - `workload.c`
 - `README.md`
 
+例外说明：
+
+- 面向 profiling 产物生成和人工验收的 testcase 可以采用独立 Makefile runner。
+- 这类 testcase 可以不以 `gem5_verify_config(...)` 作为主入口，而是直接串联 workload 编译、gem5 运行、日志解析和 HTML 渲染。
+- 当前对应示例为 `testcases/tile/profiling_tile/`。
+
 ## 命名约定
 
 ### 模块目录

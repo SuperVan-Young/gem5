@@ -2,11 +2,15 @@
 
 Import('*')
 
+if env['CONF'].get('NPU_PROFILE', False):
+    env.Append(CPPDEFINES=['NPU_PROFILE_ENABLE'])
+
 DebugFlag('MegaCmdQueue')
 DebugFlag('SpecializedExecutionUnit')
 DebugFlag('DmaUnit')
 DebugFlag('ScratchpadMemory')
 DebugFlag('VPU')
+DebugFlag('NPUProfile')
 
 SimObject('LutUnit.py', sim_objects=['LutUnit'])
 SimObject('DmaUnit.py', sim_objects=['DmaUnit'])

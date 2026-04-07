@@ -30,8 +30,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 
 #include "base/trace.hh"
+#include "debug/NPUProfile.hh"
 #include "debug/SpecializedExecutionUnit.hh"
 
 namespace gem5
@@ -459,6 +461,7 @@ SpecializedExecutionUnit::runMacroCmdPrologue(MacroCmdContext &macroCmd)
     macroCmd.phase = Phase::Prologue;
     prologueCountValue++;
     onMacroCmdBegin(macroCmd);
+    emitProfileBegin(macroCmd);
     buildUops(macroCmd);
 
     if (macroCmd.phase == Phase::EpiloguePending) {
@@ -520,6 +523,12 @@ void
 SpecializedExecutionUnit::issueMemUop(MacroCmdContext &macroCmd,
                                       MicroOpContext uop)
 {
+    if (uop.kind == MicroOpContext::Kind::Load) {
+        macroCmd.issuedLoadUops++;
+    } else {
+        macroCmd.issuedStoreUops++;
+    }
+
     const PortID port_id =
         uop.portId == InvalidPortID ? mappedMemPort(macroCmd) : uop.portId;
 
@@ -547,6 +556,7 @@ SpecializedExecutionUnit::issueExecUop(MacroCmdContext &macroCmd,
              name(), queue_id);
 
     executeCountValue++;
+    macroCmd.issuedExecUops++;
     activeExecUops.emplace(queue_id, uop);
     auto event = std::make_unique<EventFunctionWrapper>(
         [this, queue_id] { finishExecution(queue_id); },
@@ -613,6 +623,7 @@ SpecializedExecutionUnit::runMacroCmdEpilogue(MacroCmdContext &macroCmd)
 
     macroCmd.phase = Phase::Epilogue;
     epilogueCountValue++;
+    emitProfileEnd(macroCmd);
     onMacroCmdEnd(macroCmd);
     finishMacroCmd(macroCmd);
 }
@@ -690,8 +701,10 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
     macro_cmd.waitingCallback = false;
     if (txn.kind == MemTxnContext::Kind::Load) {
         completedReadCount++;
+        macro_cmd.completedLoadUops++;
     } else {
         completedWriteCount++;
+        macro_cmd.completedStoreUops++;
     }
     onMemUopComplete(macro_cmd, txn, pkt);
 
@@ -858,6 +871,153 @@ void
 SpecializedExecutionUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 {
     (void)macroCmd;
+}
+
+const char *
+SpecializedExecutionUnit::profileSeuType() const
+{
+    return "SEU";
+}
+
+void
+SpecializedExecutionUnit::appendProfileDetailsJson(
+    const MacroCmdContext &macroCmd, std::ostream &os) const
+{
+    os << "\"uop_count_hint\":" <<
+        std::max<uint32_t>(1, readCmdWord(macroCmd.cmd, UopCountWord)) <<
+        ",\"queue_select\":" << readCmdWord(macroCmd.cmd, QueueSelectWord) <<
+        ",\"aux0\":" << readCmdWord(macroCmd.cmd, Aux0Word) <<
+        ",\"aux1\":" << readCmdWord(macroCmd.cmd, Aux1Word);
+}
+
+void
+SpecializedExecutionUnit::emitProfileBegin(MacroCmdContext &macroCmd) const
+{
+#ifdef NPU_PROFILE_ENABLE
+    std::ostringstream os;
+    macroCmd.profileBeginTick = curTick();
+    appendProfileEventJson(os, "begin", macroCmd, macroCmd.profileBeginTick);
+    const std::string payload = os.str();
+    DPRINTF(NPUProfile, "NPU_PROFILE %s\n", payload.c_str());
+#else
+    (void)macroCmd;
+#endif
+}
+
+void
+SpecializedExecutionUnit::emitProfileEnd(const MacroCmdContext &macroCmd) const
+{
+#ifdef NPU_PROFILE_ENABLE
+    std::ostringstream os;
+    appendProfileEventJson(os, "end", macroCmd, curTick());
+    const std::string payload = os.str();
+    DPRINTF(NPUProfile, "NPU_PROFILE %s\n", payload.c_str());
+#else
+    (void)macroCmd;
+#endif
+}
+
+void
+SpecializedExecutionUnit::appendProfileEventJson(
+    std::ostream &os, const char *phase, const MacroCmdContext &macroCmd,
+    Tick eventTick) const
+{
+    os << '{';
+    os << "\"event\":";
+    appendJsonString(os, phase);
+    os << ",\"tick\":" << eventTick;
+    os << ",\"seu_name\":";
+    appendJsonString(os, name());
+    os << ",\"seu_type\":";
+    appendJsonString(os, profileSeuType());
+    os << ",\"macro_id\":" << macroCmd.macroCmdId;
+    os << ",\"issue_queue\":" << macroCmd.targetIssueQueueId;
+    os << ",\"macro_kind\":";
+    appendJsonString(os, macroCmdKindName(macroCmd.kind));
+    os << ",\"device_type\":" <<
+        static_cast<unsigned>(macroCmd.fields.deviceType);
+    os << ",\"device_id\":" << static_cast<unsigned>(macroCmd.fields.deviceId);
+    os << ",\"opcode\":" << static_cast<unsigned>(macroCmd.fields.opCode);
+    os << ",\"sync_indicator\":" <<
+        static_cast<unsigned>(macroCmd.fields.syncIndicator);
+    os << ",\"set_indicator_sns\":" <<
+        (macroCmd.fields.setIndicatorSns ? "true" : "false");
+    os << ",\"set_indicator_snd\":" <<
+        (macroCmd.fields.setIndicatorSnd ? "true" : "false");
+    os << ",\"issued_load_uops\":" << macroCmd.issuedLoadUops;
+    os << ",\"issued_store_uops\":" << macroCmd.issuedStoreUops;
+    os << ",\"issued_exec_uops\":" << macroCmd.issuedExecUops;
+    os << ",\"completed_load_uops\":" << macroCmd.completedLoadUops;
+    os << ",\"completed_store_uops\":" << macroCmd.completedStoreUops;
+    if (macroCmd.profileBeginTick != 0 &&
+        eventTick >= macroCmd.profileBeginTick) {
+        os << ",\"duration\":" << (eventTick - macroCmd.profileBeginTick);
+    }
+    os << ",\"raw_words\":";
+    appendCmdWordsJson(os, macroCmd.cmd);
+    os << ",\"details\":{";
+    appendProfileDetailsJson(macroCmd, os);
+    os << "}}";
+}
+
+void
+SpecializedExecutionUnit::appendJsonString(std::ostream &os,
+                                           const std::string &value) const
+{
+    os << '"';
+    for (const char ch : value) {
+        switch (ch) {
+          case '\\':
+            os << "\\\\";
+            break;
+          case '"':
+            os << "\\\"";
+            break;
+          case '\n':
+            os << "\\n";
+            break;
+          case '\r':
+            os << "\\r";
+            break;
+          case '\t':
+            os << "\\t";
+            break;
+          default:
+            os << ch;
+            break;
+        }
+    }
+    os << '"';
+}
+
+void
+SpecializedExecutionUnit::appendCmdWordsJson(
+    std::ostream &os, const std::vector<uint8_t> &cmd) const
+{
+    os << '[';
+    const size_t word_count = cmd.size() / sizeof(uint32_t);
+    for (size_t i = 0; i < word_count; ++i) {
+        if (i != 0) {
+            os << ',';
+        }
+        os << readCmdWord(cmd, i);
+    }
+    os << ']';
+}
+
+const char *
+SpecializedExecutionUnit::macroCmdKindName(MacroCmdKind kind) const
+{
+    switch (kind) {
+      case MacroCmdKind::Load:
+        return "Load";
+      case MacroCmdKind::Exec:
+        return "Exec";
+      case MacroCmdKind::Store:
+        return "Store";
+    }
+
+    panic("%s: unreachable macro command kind", name());
 }
 
 bool

@@ -31,8 +31,10 @@
 
 #include <cstdint>
 #include <deque>
+#include <iosfwd>
 #include <memory>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -172,6 +174,12 @@ class SpecializedExecutionUnit : public ClockedObject
         bool epilogueQueued = false;
         std::optional<PortID> boundMemPortId;
         std::deque<MicroOpContext> uopQueue;
+        Tick profileBeginTick = 0;
+        uint64_t issuedLoadUops = 0;
+        uint64_t issuedStoreUops = 0;
+        uint64_t issuedExecUops = 0;
+        uint64_t completedLoadUops = 0;
+        uint64_t completedStoreUops = 0;
     };
 
     /*
@@ -272,6 +280,9 @@ class SpecializedExecutionUnit : public ClockedObject
     virtual void onExecUopComplete(MacroCmdContext &macroCmd,
                                    const MicroOpContext &uop);
     virtual void onMacroCmdEnd(MacroCmdContext &macroCmd);
+    virtual const char *profileSeuType() const;
+    virtual void appendProfileDetailsJson(
+        const MacroCmdContext &macroCmd, std::ostream &os) const;
 
     virtual bool buildCompletionSyncWord(const std::vector<uint8_t> &cmd,
                                          uint32_t &word) const;
@@ -321,6 +332,15 @@ class SpecializedExecutionUnit : public ClockedObject
                            const std::vector<uint8_t> *data = nullptr);
     void updateConcurrentMicroOps();
     bool hasSchedulableWork() const;
+    void emitProfileBegin(MacroCmdContext &macroCmd) const;
+    void emitProfileEnd(const MacroCmdContext &macroCmd) const;
+    void appendProfileEventJson(std::ostream &os, const char *phase,
+                                const MacroCmdContext &macroCmd,
+                                Tick eventTick) const;
+    void appendJsonString(std::ostream &os, const std::string &value) const;
+    void appendCmdWordsJson(std::ostream &os,
+                            const std::vector<uint8_t> &cmd) const;
+    const char *macroCmdKindName(MacroCmdKind kind) const;
 
     CPUSidePort cpuSidePort;
     StagingBuffer stagingBuffer;
