@@ -11,13 +11,15 @@ HEADERS := $(wildcard ../../../utils/*.hh) \
 	$(wildcard ../../../utils/cmd/*.hh) \
 	$(wildcard ../../../utils/golden/*.hh)
 
+WORKLOAD_OPT ?= -O2
+
 .PHONY: all clean
 
 all: $(OUT)
 
 $(OUT): $(CXXSRC) $(HEADERS)
 	mkdir -p $(OUTDIR)
-	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $(CXXSRC) $(LDFLAGS)
+	$(CXX) $(CPPFLAGS) $(WORKLOAD_OPT) -static -o $@ $(CXXSRC) $(LDFLAGS)
 
 clean:
 	rm -f $(OUT)
