@@ -61,10 +61,12 @@ namespace gem5
  *
  * Current modeling rule:
  * - load/store commands may access SPM
- * - compute commands must use local buffer addresses only
- * - compute commands only schedule exec uops in this revision
- * - helper code may decompose one software-level VPU operation into several
- *   load/compute/store macro commands
+ * - compute commands normally consume/produce local-buffer addresses
+ * - if a compute command names SPM in any input/output field, the SEU drains
+ *   outstanding issue activity first and the VPU auto-inserts batched
+ *   load/compute/store uops behind the same macro command
+ * - helper code may still decompose one software-level VPU operation into
+ *   several load/compute/store macro commands; that path remains supported
  */
 class VpuUnit : public SpecializedExecutionUnit
 {
@@ -151,6 +153,26 @@ class VpuUnit : public SpecializedExecutionUnit
 
     struct VpuMacroState
     {
+        enum class RuntimeStage : uint8_t
+        {
+            SourceLoads,
+            Compute,
+            Stores,
+        };
+
+        struct PendingMemOp
+        {
+            enum class Kind : uint8_t
+            {
+                SourceLoad,
+                ResultStore,
+            };
+
+            Kind kind = Kind::SourceLoad;
+            size_t sourceIndex = 0;
+            PortID logicalPort = InvalidPortID;
+        };
+
         DecodedVectorOp op;
         uint32_t readMask = 0;
         uint32_t writeMask = 0;
@@ -160,6 +182,9 @@ class VpuUnit : public SpecializedExecutionUnit
         Addr dstAddr = 0;
         std::vector<PortID> readPorts;
         std::vector<PortID> writePorts;
+        bool usesSpmPipeline = false;
+        RuntimeStage runtimeStage = RuntimeStage::Compute;
+        std::unordered_map<uint64_t, PendingMemOp> pendingMemOps;
         size_t completedExecUops = 0;
     };
 
@@ -198,12 +223,22 @@ class VpuUnit : public SpecializedExecutionUnit
     void validatePortLayout(const VpuMacroState &state) const;
     void validateCommand(const MacroCmdContext &macroCmd,
                          VpuMacroState &state) const;
+    bool isComputeOpcode(Opcode opcode) const;
     bool isSpmAddr(Addr addr) const;
     bool isInputLocalAddr(Addr addr) const;
     bool isOutputLocalAddr(Addr addr) const;
     LocalAddr decodeLocalAddr(Addr addr, BufferRole expected,
                               size_t accessSize) const;
     PortID decodeSpmPort(Addr addr, size_t accessSize) const;
+    size_t resultSpanBytes(const VpuMacroState &state) const;
+    Addr sourceAddr(const VpuMacroState &state, size_t sourceIndex) const;
+    bool sourceAddrIsSpm(const VpuMacroState &state, size_t sourceIndex) const;
+    bool destAddrIsSpm(const VpuMacroState &state) const;
+    LocalAddr inputSlotAddr(const VpuMacroState &state, size_t sourceIndex,
+                            PortID logicalPort) const;
+    LocalAddr outputSlotAddr(const VpuMacroState &state, PortID logicalPort)
+        const;
+    bool computeTouchesSpm(const std::vector<uint8_t> &cmd) const;
     Tick computeExecLatency(const VpuMacroState &state);
     uint32_t loadUint32(
         const std::vector<uint8_t> &bytes, size_t offset) const;
@@ -226,6 +261,12 @@ class VpuUnit : public SpecializedExecutionUnit
     bool storeSourceReady(const VpuMacroState &state) const;
     void writeResultBytes(const VpuMacroState &state, PortID dstPort,
                           const std::vector<uint8_t> &bytes) const;
+    void appendComputeWhenReady(MacroCmdContext &macroCmd,
+                                VpuMacroState &state);
+    void appendHwPipelineSourceLoads(MacroCmdContext &macroCmd,
+                                     VpuMacroState &state);
+    void appendHwPipelineStores(MacroCmdContext &macroCmd,
+                                VpuMacroState &state);
     void appendStoreWhenReady(MacroCmdContext &macroCmd,
                               const VpuMacroState &state);
     const char *opcodeName(Opcode opcode) const;
@@ -243,6 +284,7 @@ class VpuUnit : public SpecializedExecutionUnit
         const std::vector<uint8_t> &cmd) const override;
     uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
                                 MacroCmdKind kind) const override;
+    bool canActivateMacroCmd(const MacroCmdContext &macroCmd) const override;
     void onMacroCmdBegin(MacroCmdContext &macroCmd) override;
     void buildUops(MacroCmdContext &macroCmd) override;
     void onMemUopComplete(MacroCmdContext &macroCmd,

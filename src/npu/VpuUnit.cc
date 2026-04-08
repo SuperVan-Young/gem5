@@ -316,6 +316,12 @@ VpuUnit::validatePortLayout(const VpuMacroState &state) const
 }
 
 bool
+VpuUnit::isComputeOpcode(Opcode opcode) const
+{
+    return opcode != Opcode::VLoad && opcode != Opcode::VStore;
+}
+
+bool
 VpuUnit::isSpmAddr(Addr addr) const
 {
     return addr >= SpmBase && addr < (SpmBase + (numMemPorts * SpmSlotStride));
@@ -373,6 +379,103 @@ VpuUnit::decodeSpmPort(Addr addr, size_t accessSize) const
     return port;
 }
 
+size_t
+VpuUnit::resultSpanBytes(const VpuMacroState &state) const
+{
+    switch (state.op.opcode) {
+      case Opcode::VReduceSum:
+      case Opcode::VReduceMax:
+        return sizeof(uint32_t);
+      default:
+        return state.op.dstSpanBytes;
+    }
+}
+
+Addr
+VpuUnit::sourceAddr(const VpuMacroState &state, size_t sourceIndex) const
+{
+    switch (sourceIndex) {
+      case 0:
+        return state.src0Addr;
+      case 1:
+        return state.src1Addr;
+      case 2:
+        return state.src2Addr;
+      default:
+        panic("%s: invalid source index %zu", name(), sourceIndex);
+    }
+}
+
+bool
+VpuUnit::sourceAddrIsSpm(const VpuMacroState &state, size_t sourceIndex) const
+{
+    return isSpmAddr(sourceAddr(state, sourceIndex));
+}
+
+bool
+VpuUnit::destAddrIsSpm(const VpuMacroState &state) const
+{
+    return isSpmAddr(state.dstAddr);
+}
+
+VpuUnit::LocalAddr
+VpuUnit::inputSlotAddr(const VpuMacroState &state, size_t sourceIndex,
+                       PortID logicalPort) const
+{
+    if (sourceAddrIsSpm(state, sourceIndex)) {
+        return {BufferRole::Input, logicalPort, 0, 0};
+    }
+
+    LocalAddr addr = decodeLocalAddr(sourceAddr(state, sourceIndex),
+                                     BufferRole::Input, state.op.srcSpanBytes);
+    addr.portId = logicalPort;
+    return addr;
+}
+
+VpuUnit::LocalAddr
+VpuUnit::outputSlotAddr(const VpuMacroState &state, PortID logicalPort) const
+{
+    if (destAddrIsSpm(state)) {
+        return {BufferRole::Output, logicalPort, 0, 0};
+    }
+
+    LocalAddr addr = decodeLocalAddr(state.dstAddr, BufferRole::Output,
+                                     resultSpanBytes(state));
+    addr.portId = logicalPort;
+    return addr;
+}
+
+bool
+VpuUnit::computeTouchesSpm(const std::vector<uint8_t> &cmd) const
+{
+    const Opcode opcode =
+        decodeOpcode(parseCmdFields(extractCmdWord(cmd)).opCode);
+    if (!isComputeOpcode(opcode)) {
+        return false;
+    }
+
+    if (isSpmAddr(cmdWord(cmd, DstAddrWord))) {
+        return true;
+    }
+
+    if (isSpmAddr(cmdWord(cmd, Src0AddrWord))) {
+        return true;
+    }
+
+    switch (opcode) {
+      case Opcode::VAdd:
+      case Opcode::VSub:
+      case Opcode::VMul:
+      case Opcode::VDiv:
+        return isSpmAddr(cmdWord(cmd, Src1AddrWord));
+      case Opcode::VFma:
+        return isSpmAddr(cmdWord(cmd, Src1AddrWord)) ||
+               isSpmAddr(cmdWord(cmd, Src2AddrWord));
+      default:
+        return false;
+    }
+}
+
 void
 VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
                          VpuMacroState &state) const
@@ -395,6 +498,36 @@ VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
 
     validatePortLayout(state);
 
+    state.usesSpmPipeline = isComputeOpcode(state.op.opcode) &&
+        (destAddrIsSpm(state) || sourceAddrIsSpm(state, 0) ||
+         sourceAddrIsSpm(state, 1) || sourceAddrIsSpm(state, 2));
+
+    auto validateComputeSource = [&](Addr addr, size_t accessSize,
+                                     PortID logicalPort, const char *label) {
+        if (isInputLocalAddr(addr)) {
+            return;
+        }
+        panic_if(!isSpmAddr(addr),
+                 "%s: %s must be input local-buffer or SPM", name(), label);
+        panic_if(decodeSpmPort(addr, accessSize) != logicalPort,
+                 "%s: %s SPM address %#llx does not match logical port %d",
+                 name(), label, static_cast<unsigned long long>(addr),
+                 logicalPort);
+    };
+
+    auto validateComputeDest = [&](Addr addr, size_t accessSize, PortID port) {
+        if (isOutputLocalAddr(addr)) {
+            return;
+        }
+        panic_if(!isSpmAddr(addr),
+                 "%s: compute destination must be output local-buffer or SPM",
+                 name());
+        panic_if(decodeSpmPort(addr, accessSize) != port,
+                 "%s: compute destination SPM address %#llx does not match "
+                 "logical port %d",
+                 name(), static_cast<unsigned long long>(addr), port);
+    };
+
     if (state.op.opcode == Opcode::VLoad) {
         panic_if(!isSpmAddr(state.src0Addr),
                  "%s: VLOAD source must be in SPM", name());
@@ -407,20 +540,72 @@ VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
         panic_if(!isSpmAddr(state.dstAddr),
                  "%s: VSTORE destination must be in SPM", name());
     } else {
-        panic_if(!isInputLocalAddr(state.src0Addr),
-                 "%s: compute src0 must be input local-buffer", name());
-        if (!state.readPorts.empty()) {
-            panic_if(!isInputLocalAddr(state.src1Addr) &&
-                         state.readPorts.size() > 1,
-                     "%s: compute src1 must be input local-buffer", name());
+        switch (state.op.opcode) {
+          case Opcode::Exec:
+            for (const PortID port : state.readPorts) {
+                validateComputeSource(state.src0Addr, state.op.srcSpanBytes,
+                                      port, "compute src0");
+            }
+            for (const PortID port : state.writePorts) {
+                validateComputeSource(state.src0Addr, state.op.srcSpanBytes,
+                                      port, "compute src0");
+            }
+            break;
+          case Opcode::VAdd:
+          case Opcode::VSub:
+          case Opcode::VMul:
+          case Opcode::VDiv:
+            for (size_t dstIndex = 0;
+                 dstIndex < state.writePorts.size(); ++dstIndex) {
+                validateComputeSource(state.src0Addr, state.op.srcSpanBytes,
+                                      state.readPorts[dstIndex * 2],
+                                      "compute src0");
+                validateComputeSource(state.src1Addr, state.op.srcSpanBytes,
+                                      state.readPorts[(dstIndex * 2) + 1],
+                                      "compute src1");
+            }
+            break;
+          case Opcode::VFma:
+            for (size_t dstIndex = 0;
+                 dstIndex < state.writePorts.size(); ++dstIndex) {
+                validateComputeSource(state.src0Addr, state.op.srcSpanBytes,
+                                      state.readPorts[dstIndex * 3],
+                                      "compute src0");
+                validateComputeSource(state.src1Addr, state.op.srcSpanBytes,
+                                      state.readPorts[(dstIndex * 3) + 1],
+                                      "compute src1");
+                validateComputeSource(state.src2Addr, state.op.srcSpanBytes,
+                                      state.readPorts[(dstIndex * 3) + 2],
+                                      "compute src2");
+            }
+            break;
+          case Opcode::VReduceSum:
+          case Opcode::VReduceMax:
+          case Opcode::VScale:
+          case Opcode::VCvtI2F:
+          case Opcode::VCvtF2I:
+          case Opcode::VSqrt:
+          case Opcode::VExp:
+          case Opcode::VSoftmax:
+            for (const PortID port : state.readPorts) {
+                validateComputeSource(state.src0Addr, state.op.srcSpanBytes,
+                                      port, "compute src0");
+            }
+            break;
+          case Opcode::VLoad:
+          case Opcode::VStore:
+            break;
         }
-        if (state.op.opcode == Opcode::VFma) {
-            panic_if(!isInputLocalAddr(state.src2Addr),
-                     "%s: compute src2 must be input local-buffer", name());
+
+        if (state.usesSpmPipeline) {
+            panic_if(state.writePorts.size() != 1,
+                     "%s: SPM-backed compute currently supports one output "
+                     "port per macro command",
+                     name());
         }
-        panic_if(
-            !isOutputLocalAddr(state.dstAddr),
-            "%s: compute destination must be output local-buffer", name());
+        for (const PortID port : state.writePorts) {
+            validateComputeDest(state.dstAddr, resultSpanBytes(state), port);
+        }
     }
 
     if (state.op.opcode == Opcode::VCvtI2F) {
@@ -548,12 +733,7 @@ const std::vector<uint8_t> &
 VpuUnit::sourceBytes(const VpuMacroState &state, size_t sourceIndex,
                      PortID logicalPort) const
 {
-    const Addr base =
-        sourceIndex == 0 ? state.src0Addr :
-        sourceIndex == 1 ? state.src1Addr : state.src2Addr;
-    LocalAddr addr = decodeLocalAddr(
-        base, BufferRole::Input, state.op.srcSpanBytes);
-    addr.portId = logicalPort;
+    const LocalAddr addr = inputSlotAddr(state, sourceIndex, logicalPort);
     const auto &slot = bufferSlot(addr);
     panic_if(!slot.valid || slot.bytes.size() < state.op.srcSpanBytes,
              "%s: missing input buffer data for port=%d buffer=%u",
@@ -565,12 +745,7 @@ bool
 VpuUnit::sourceReady(const VpuMacroState &state, size_t sourceIndex,
                      PortID logicalPort) const
 {
-    const Addr base =
-        sourceIndex == 0 ? state.src0Addr :
-        sourceIndex == 1 ? state.src1Addr : state.src2Addr;
-    LocalAddr addr = decodeLocalAddr(
-        base, BufferRole::Input, state.op.srcSpanBytes);
-    addr.portId = logicalPort;
+    const LocalAddr addr = inputSlotAddr(state, sourceIndex, logicalPort);
     const auto &slot = bufferSlot(addr);
     return slot.valid && slot.bytes.size() >= state.op.srcSpanBytes;
 }
@@ -641,23 +816,131 @@ VpuUnit::storeSourceReady(const VpuMacroState &state) const
     const BufferRole srcRole = isOutputLocalAddr(state.src0Addr) ?
         BufferRole::Output : BufferRole::Input;
     const LocalAddr srcAddr = decodeLocalAddr(
-        state.src0Addr, srcRole, state.op.dstSpanBytes);
+        state.src0Addr, srcRole, resultSpanBytes(state));
     auto actualSrc = srcAddr;
     actualSrc.portId = state.writePorts.front();
     const auto &slot = bufferSlot(actualSrc);
-    return slot.valid && slot.bytes.size() >= state.op.dstSpanBytes;
+    return slot.valid && slot.bytes.size() >= resultSpanBytes(state);
 }
 
 void
 VpuUnit::writeResultBytes(const VpuMacroState &state, PortID dstPort,
                           const std::vector<uint8_t> &bytes) const
 {
-    LocalAddr addr = decodeLocalAddr(state.dstAddr, BufferRole::Output,
-                                     state.op.dstSpanBytes);
-    addr.portId = dstPort;
+    const LocalAddr addr = outputSlotAddr(state, dstPort);
     auto &slot = const_cast<VpuUnit *>(this)->bufferSlot(addr);
     slot.bytes = bytes;
     slot.valid = true;
+}
+
+void
+VpuUnit::appendComputeWhenReady(MacroCmdContext &macroCmd,
+                                VpuMacroState &state)
+{
+    state.runtimeStage = VpuMacroState::RuntimeStage::Compute;
+    if (!computeInputsReady(state)) {
+        appendExecUop(macroCmd, 1);
+        macroCmd.uopQueue.back().token =
+            static_cast<uint64_t>(ExecToken::WaitInputs);
+        return;
+    }
+
+    const Tick latency = computeExecLatency(state);
+    appendExecUop(macroCmd, latency);
+    macroCmd.uopQueue.back().token =
+        static_cast<uint64_t>(ExecToken::RunCompute);
+}
+
+void
+VpuUnit::appendHwPipelineSourceLoads(MacroCmdContext &macroCmd,
+                                     VpuMacroState &state)
+{
+    auto queueLoad = [&](size_t sourceIndex, PortID logicalPort) {
+        if (!sourceAddrIsSpm(state, sourceIndex)) {
+            return;
+        }
+
+        appendLoadUop(macroCmd, sourceAddr(state, sourceIndex),
+                      state.op.srcSpanBytes);
+        macroCmd.uopQueue.back().portId = logicalPort;
+        const uint64_t token = macroCmd.uopQueue.back().token;
+        state.pendingMemOps.emplace(
+            token, VpuMacroState::PendingMemOp{
+                       VpuMacroState::PendingMemOp::Kind::SourceLoad,
+                       sourceIndex,
+                       logicalPort,
+                   });
+    };
+
+    state.runtimeStage = VpuMacroState::RuntimeStage::SourceLoads;
+    switch (state.op.opcode) {
+      case Opcode::Exec:
+        for (const PortID port : state.readPorts) {
+            queueLoad(0, port);
+        }
+        for (const PortID port : state.writePorts) {
+            queueLoad(0, port);
+        }
+        break;
+      case Opcode::VAdd:
+      case Opcode::VSub:
+      case Opcode::VMul:
+      case Opcode::VDiv:
+        for (size_t dstIndex = 0;
+             dstIndex < state.writePorts.size(); ++dstIndex) {
+            queueLoad(0, state.readPorts[dstIndex * 2]);
+            queueLoad(1, state.readPorts[(dstIndex * 2) + 1]);
+        }
+        break;
+      case Opcode::VFma:
+        for (size_t dstIndex = 0;
+             dstIndex < state.writePorts.size(); ++dstIndex) {
+            queueLoad(0, state.readPorts[dstIndex * 3]);
+            queueLoad(1, state.readPorts[(dstIndex * 3) + 1]);
+            queueLoad(2, state.readPorts[(dstIndex * 3) + 2]);
+        }
+        break;
+      case Opcode::VReduceSum:
+      case Opcode::VReduceMax:
+      case Opcode::VScale:
+      case Opcode::VCvtI2F:
+      case Opcode::VCvtF2I:
+      case Opcode::VSqrt:
+      case Opcode::VExp:
+      case Opcode::VSoftmax:
+        for (const PortID port : state.readPorts) {
+            queueLoad(0, port);
+        }
+        break;
+      case Opcode::VLoad:
+      case Opcode::VStore:
+        break;
+    }
+}
+
+void
+VpuUnit::appendHwPipelineStores(MacroCmdContext &macroCmd,
+                                VpuMacroState &state)
+{
+    panic_if(!destAddrIsSpm(state),
+             "%s: hardware-pipeline stores require SPM destination", name());
+    state.runtimeStage = VpuMacroState::RuntimeStage::Stores;
+    for (const PortID port : state.writePorts) {
+        const LocalAddr addr = outputSlotAddr(state, port);
+        const auto &slot = bufferSlot(addr);
+        appendStoreUop(macroCmd, state.dstAddr, resultSpanBytes(state),
+                       std::vector<uint8_t>(slot.bytes.begin(),
+                                            slot.bytes.begin() +
+                                                resultSpanBytes(state)));
+        macroCmd.uopQueue.back().portId = port;
+        const uint64_t token = macroCmd.uopQueue.back().token;
+        state.pendingMemOps.emplace(
+            token, VpuMacroState::PendingMemOp{
+                       VpuMacroState::PendingMemOp::Kind::ResultStore,
+                       0,
+                       port,
+                   });
+    }
 }
 
 void
@@ -679,10 +962,10 @@ VpuUnit::appendStoreWhenReady(MacroCmdContext &macroCmd,
     actualSrc.portId = state.writePorts.front();
     const auto &slot = bufferSlot(actualSrc);
     appendStoreUop(macroCmd, slotAddr(state.writePorts.front()),
-                   state.op.dstSpanBytes,
+                   resultSpanBytes(state),
                    std::vector<uint8_t>(slot.bytes.begin(),
                                         slot.bytes.begin() +
-                                            state.op.dstSpanBytes));
+                                            resultSpanBytes(state)));
 }
 
 void
@@ -1006,12 +1289,82 @@ VpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
     return 1 + ports.front();
 }
 
+bool
+VpuUnit::canActivateMacroCmd(const MacroCmdContext &macroCmd) const
+{
+    if (!computeTouchesSpm(macroCmd.cmd)) {
+        return true;
+    }
+
+    return canActivateExclusively(macroCmd);
+}
+
 void
 VpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
     VpuMacroState state;
     state.op = decodeVectorOp(macroCmd);
     validateCommand(macroCmd, state);
+    if (state.usesSpmPipeline) {
+        auto invalidateInput = [&](size_t sourceIndex, PortID port) {
+            if (!sourceAddrIsSpm(state, sourceIndex)) {
+                return;
+            }
+            auto &slot = bufferSlot(inputSlotAddr(state, sourceIndex, port));
+            slot.bytes.clear();
+            slot.valid = false;
+        };
+        switch (state.op.opcode) {
+          case Opcode::Exec:
+            for (const PortID port : state.readPorts) {
+                invalidateInput(0, port);
+            }
+            for (const PortID port : state.writePorts) {
+                invalidateInput(0, port);
+            }
+            break;
+          case Opcode::VAdd:
+          case Opcode::VSub:
+          case Opcode::VMul:
+          case Opcode::VDiv:
+            for (size_t dstIndex = 0;
+                 dstIndex < state.writePorts.size(); ++dstIndex) {
+                invalidateInput(0, state.readPorts[dstIndex * 2]);
+                invalidateInput(1, state.readPorts[(dstIndex * 2) + 1]);
+            }
+            break;
+          case Opcode::VFma:
+            for (size_t dstIndex = 0;
+                 dstIndex < state.writePorts.size(); ++dstIndex) {
+                invalidateInput(0, state.readPorts[dstIndex * 3]);
+                invalidateInput(1, state.readPorts[(dstIndex * 3) + 1]);
+                invalidateInput(2, state.readPorts[(dstIndex * 3) + 2]);
+            }
+            break;
+          case Opcode::VReduceSum:
+          case Opcode::VReduceMax:
+          case Opcode::VScale:
+          case Opcode::VCvtI2F:
+          case Opcode::VCvtF2I:
+          case Opcode::VSqrt:
+          case Opcode::VExp:
+          case Opcode::VSoftmax:
+            for (const PortID port : state.readPorts) {
+                invalidateInput(0, port);
+            }
+            break;
+          case Opcode::VLoad:
+          case Opcode::VStore:
+            break;
+        }
+        if (destAddrIsSpm(state)) {
+            for (const PortID port : state.writePorts) {
+                auto &slot = bufferSlot(outputSlotAddr(state, port));
+                slot.bytes.clear();
+                slot.valid = false;
+            }
+        }
+    }
     macroStates.emplace(macroCmd.macroCmdId, std::move(state));
 }
 
@@ -1032,15 +1385,13 @@ VpuUnit::buildUops(MacroCmdContext &macroCmd)
         appendStoreWhenReady(macroCmd, state);
         break;
       default: {
-        if (!computeInputsReady(state)) {
-            appendExecUop(macroCmd, 1);
-            macroCmd.uopQueue.back().token =
-                static_cast<uint64_t>(ExecToken::WaitInputs);
+        if (state.usesSpmPipeline) {
+            appendHwPipelineSourceLoads(macroCmd, state);
+            if (macroCmd.uopQueue.empty()) {
+                appendComputeWhenReady(macroCmd, state);
+            }
         } else {
-            const Tick latency = computeExecLatency(state);
-            appendExecUop(macroCmd, latency);
-            macroCmd.uopQueue.back().token =
-                static_cast<uint64_t>(ExecToken::RunCompute);
+            appendComputeWhenReady(macroCmd, state);
         }
         break;
       }
@@ -1059,7 +1410,18 @@ VpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
     panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
     auto &state = it->second;
 
-    if (state.op.opcode == Opcode::VLoad) {
+    auto pending_it = state.pendingMemOps.find(txn.token);
+    if (pending_it != state.pendingMemOps.end()) {
+        const auto pending = pending_it->second;
+        state.pendingMemOps.erase(pending_it);
+        if (pending.kind == VpuMacroState::PendingMemOp::Kind::SourceLoad) {
+            auto &slot = bufferSlot(inputSlotAddr(state, pending.sourceIndex,
+                                                  pending.logicalPort));
+            slot.bytes.assign(pkt->getConstPtr<uint8_t>(),
+                              pkt->getConstPtr<uint8_t>() + pkt->getSize());
+            slot.valid = true;
+        }
+    } else if (state.op.opcode == Opcode::VLoad) {
         LocalAddr dstAddr = decodeLocalAddr(state.dstAddr, BufferRole::Input,
                                             state.op.srcSpanBytes);
         dstAddr.portId = txn.portId;
@@ -1067,6 +1429,22 @@ VpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
         slot.bytes.assign(pkt->getConstPtr<uint8_t>(),
                           pkt->getConstPtr<uint8_t>() + pkt->getSize());
         slot.valid = true;
+    }
+
+    if (state.usesSpmPipeline) {
+        if (!macroCmd.uopQueue.empty()) {
+            return;
+        }
+        switch (state.runtimeStage) {
+          case VpuMacroState::RuntimeStage::SourceLoads:
+            appendComputeWhenReady(macroCmd, state);
+            return;
+          case VpuMacroState::RuntimeStage::Stores:
+            markEpiloguePending(macroCmd);
+            return;
+          case VpuMacroState::RuntimeStage::Compute:
+            return;
+        }
     }
 
     markEpiloguePending(macroCmd);
@@ -1107,6 +1485,13 @@ VpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
 
     executeVectorOp(state);
     state.completedExecUops++;
+    if (state.usesSpmPipeline && destAddrIsSpm(state)) {
+        appendHwPipelineStores(macroCmd, state);
+        if (macroCmd.uopQueue.empty()) {
+            markEpiloguePending(macroCmd);
+        }
+        return;
+    }
     markEpiloguePending(macroCmd);
 }
 

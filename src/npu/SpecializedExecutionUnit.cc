@@ -440,13 +440,16 @@ SpecializedExecutionUnit::activateIssueQueues()
         }
 
         const uint64_t macro_id = queue.waitingMacroCmdIds.front();
-        queue.waitingMacroCmdIds.pop_front();
-        queue.activeMacroCmdId = macro_id;
-
         auto it = macroCmdContexts.find(macro_id);
         panic_if(it == macroCmdContexts.end(),
                  "%s: missing macro command %llu during activation",
                  name(), static_cast<unsigned long long>(macro_id));
+        if (!canActivateMacroCmd(it->second)) {
+            continue;
+        }
+
+        queue.waitingMacroCmdIds.pop_front();
+        queue.activeMacroCmdId = macro_id;
         runMacroCmdPrologue(it->second);
     }
 }
@@ -792,6 +795,14 @@ SpecializedExecutionUnit::buildIssueQueues() const
     return queues;
 }
 
+bool
+SpecializedExecutionUnit::canActivateMacroCmd(
+    const MacroCmdContext &macroCmd) const
+{
+    (void)macroCmd;
+    return true;
+}
+
 void
 SpecializedExecutionUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
@@ -1062,7 +1073,8 @@ SpecializedExecutionUnit::appendLoadUop(MacroCmdContext &macroCmd,
     uop.kind = MicroOpContext::Kind::Load;
     uop.macroCmdId = macroCmd.macroCmdId;
     uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
-    uop.portId = mappedMemPort(macroCmd);
+    uop.portId = macroCmd.boundMemPortId.has_value() ?
+        *macroCmd.boundMemPortId : InvalidPortID;
     uop.token = nextMicroOpToken++;
     uop.addr = addr;
     uop.size = size;
@@ -1078,7 +1090,8 @@ SpecializedExecutionUnit::appendStoreUop(MacroCmdContext &macroCmd,
     uop.kind = MicroOpContext::Kind::Store;
     uop.macroCmdId = macroCmd.macroCmdId;
     uop.ownerIssueQueueId = macroCmd.targetIssueQueueId;
-    uop.portId = mappedMemPort(macroCmd);
+    uop.portId = macroCmd.boundMemPortId.has_value() ?
+        *macroCmd.boundMemPortId : InvalidPortID;
     uop.token = nextMicroOpToken++;
     uop.addr = addr;
     uop.size = size;
@@ -1162,6 +1175,36 @@ SpecializedExecutionUnit::mappedMemPort(const MacroCmdContext &macroCmd) const
              "%s: macro command %llu has no mapped mem port",
              name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
     return *macroCmd.boundMemPortId;
+}
+
+bool
+SpecializedExecutionUnit::canActivateExclusively(
+    const MacroCmdContext &macroCmd) const
+{
+    if (!activeMemTxns.empty() || !activeExecUops.empty() ||
+        !pendingEpilogueCmdIds.empty()) {
+        return false;
+    }
+
+    for (const auto &queue : issueQueues) {
+        if (queue.issueQueueId == macroCmd.targetIssueQueueId) {
+            if (queue.activeMacroCmdId.has_value()) {
+                return false;
+            }
+            if (!queue.waitingMacroCmdIds.empty() &&
+                queue.waitingMacroCmdIds.front() != macroCmd.macroCmdId) {
+                return false;
+            }
+            continue;
+        }
+
+        if (queue.activeMacroCmdId.has_value() ||
+            !queue.waitingMacroCmdIds.empty()) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 uint32_t

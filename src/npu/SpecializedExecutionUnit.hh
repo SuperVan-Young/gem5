@@ -272,6 +272,7 @@ class SpecializedExecutionUnit : public ClockedObject
     virtual uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
                                         MacroCmdKind kind) const;
     virtual std::vector<IssueQueueState> buildIssueQueues() const;
+    virtual bool canActivateMacroCmd(const MacroCmdContext &macroCmd) const;
 
     virtual void onMacroCmdBegin(MacroCmdContext &macroCmd);
     virtual void buildUops(MacroCmdContext &macroCmd);
@@ -315,6 +316,7 @@ class SpecializedExecutionUnit : public ClockedObject
     const IssueQueueState &getIssueQueue(uint32_t issueQueueId) const;
     bool issueQueueExists(uint32_t issueQueueId) const;
     PortID mappedMemPort(const MacroCmdContext &macroCmd) const;
+    bool canActivateExclusively(const MacroCmdContext &macroCmd) const;
 
     void dispatchCommands();
     void activateIssueQueues();
