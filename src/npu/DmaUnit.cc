@@ -1161,6 +1161,35 @@ DmaUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
     panic("%s: unreachable DMA issue-queue classification", name());
 }
 
+bool
+DmaUnit::canActivateMacroCmd(const MacroCmdContext &macroCmd) const
+{
+    const ParsedCmd cmd = parseCommand(macroCmd.cmd);
+    if (cmd.stage != CommandStage::Legacy &&
+        cmd.stage != CommandStage::Compute) {
+        return true;
+    }
+
+    bool touchesExternalMem = false;
+    switch (static_cast<Mode>(cmd.mode)) {
+      case Mode::MoveLayout:
+      case Mode::Transpose:
+        touchesExternalMem =
+            isExternalSpace(cmd.srcMemSpace) ||
+            isExternalSpace(cmd.dstMemSpace);
+        break;
+      case Mode::Fill:
+        touchesExternalMem = isExternalSpace(cmd.dstMemSpace);
+        break;
+    }
+
+    if (!touchesExternalMem) {
+        return true;
+    }
+
+    return canActivateExclusively(macroCmd);
+}
+
 void
 DmaUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
