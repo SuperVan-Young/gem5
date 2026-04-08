@@ -22,7 +22,7 @@ launch_mega_cmd(uint32_t tag)
     cmd.setWord(1U, tag | 0x1U);
     cmd.setWord(2U, tag | 0x2U);
     cmd.setWord(3U, tag | 0x3U);
-    cmd.launchCmd();
+    cmd.launchCmdViaMmio();
 }
 
 int

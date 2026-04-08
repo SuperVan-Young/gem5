@@ -565,6 +565,7 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         bank_size=4096,
+        num_mem_side_ports=1,
         base_addr=None,
         sync_enqueue_on_data_write=True,
         attr_name="dma",
@@ -582,9 +583,11 @@ class NPUTestSystemBuilder:
             cmd_queue_depth=cmd_queue_depth,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
             bank_size=bank_size,
+            num_mem_side_ports=num_mem_side_ports,
         )
         dma.cpu_side = self._npu_mmio_target_port()
-        dma.mem_side = self._npu_mmio_request_port()
+        for _ in range(num_mem_side_ports):
+            dma.mem_side = self._npu_mmio_request_port()
         return self._attach_component(
             dma,
             attr_name,
