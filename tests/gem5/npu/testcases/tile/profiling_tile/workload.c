@@ -377,7 +377,7 @@ print_vector(const char *prefix, const uint32_t *values)
 static void
 issue_profiled_dma_move(uint32_t sync_idx, uint32_t src_base, uint32_t dst_base)
 {
-    static NpuCmd cmd;
+    NpuCmd cmd;
     static const DmaLayout layout = {
         1U,
         1U,
@@ -392,33 +392,30 @@ issue_profiled_dma_move(uint32_t sync_idx, uint32_t src_base, uint32_t dst_base)
     dma_cmd_init_move_layout(
         &cmd, PROFILE_TILE_DMA_DEVICE_ID, src_base, dst_base, &layout, &layout,
         sync_idx, 1U);
-    cmd.stageCmdWords();
-    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    cmd.launchCmdAt(NPU_CMD_PORT_BASE);
 }
 
 static void
 issue_profiled_sync_wait(uint32_t device_id, uint32_t sync_indicator)
 {
-    static NpuCmd cmd;
+    NpuCmd cmd;
 
     npuBuildSyncWaitCmd(&cmd, device_id, sync_indicator, 0U, 0U, 0U);
-    cmd.stageCmdWords();
-    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    cmd.launchCmdAt(NPU_CMD_PORT_BASE);
 }
 
 static void
 issue_profiled_vpu_load(uint32_t device_id, uint32_t port, uint32_t elem_count,
                         uint32_t src_stride_bytes, uint32_t data_type)
 {
-    static NpuCmd cmd;
+    NpuCmd cmd;
 
     vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VLOAD, 0U);
     vpu_cmd_set_common_fields(
         &cmd, 1U << port, 0U, 1U, 0U, elem_count, src_stride_bytes, 0U,
         data_type, 0U, 0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE), 0U, 0U,
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER));
-    cmd.stageCmdWords();
-    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    cmd.launchCmdAt(NPU_CMD_PORT_BASE);
 }
 
 static void
@@ -429,7 +426,7 @@ issue_profiled_vpu_compute(uint32_t device_id, uint32_t op_code,
                            uint32_t dst_stride_bytes, uint32_t data_type,
                            uint32_t scalar_bits)
 {
-    static NpuCmd cmd;
+    NpuCmd cmd;
 
     vpu_cmd_init_raw(&cmd, device_id, op_code, 0U);
     vpu_cmd_set_common_fields(
@@ -439,8 +436,7 @@ issue_profiled_vpu_compute(uint32_t device_id, uint32_t op_code,
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
         vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER));
-    cmd.stageCmdWords();
-    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    cmd.launchCmdAt(NPU_CMD_PORT_BASE);
 }
 
 static void
@@ -449,7 +445,7 @@ issue_profiled_vpu_store(uint32_t device_id, uint32_t sync_indicator,
                          uint32_t elem_count, uint32_t dst_stride_bytes,
                          uint32_t data_type)
 {
-    static NpuCmd cmd;
+    NpuCmd cmd;
 
     vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VSTORE, sync_indicator);
     vpu_cmd_set_common_fields(
@@ -457,8 +453,7 @@ issue_profiled_vpu_store(uint32_t device_id, uint32_t sync_indicator,
         data_type, 0U,
         vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER),
         0U, 0U, 0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE));
-    cmd.stageCmdWords();
-    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    cmd.launchCmdAt(NPU_CMD_PORT_BASE);
 }
 
 static void
@@ -486,7 +481,7 @@ int
 main(void)
 {
 #ifdef PROFILE_TILE_ENABLE_BREAKDOWN_PROBES
-    const DmaLayout dma_layout = {
+    static const DmaLayout dma_layout = {
         1U,
         1U,
         PROFILE_TILE_VECTOR_BYTES,
@@ -497,10 +492,10 @@ main(void)
         DMA_CUT_DIM_W,
     };
 #endif
-    uint32_t src[PROFILE_TILE_ELEM_COUNT];
-    uint32_t linear_expected[PROFILE_TILE_ELEM_COUNT];
-    uint32_t softmax_expected[PROFILE_TILE_ELEM_COUNT];
-    uint32_t actual[PROFILE_TILE_ELEM_COUNT];
+    static uint32_t src[PROFILE_TILE_ELEM_COUNT];
+    static uint32_t linear_expected[PROFILE_TILE_ELEM_COUNT];
+    static uint32_t softmax_expected[PROFILE_TILE_ELEM_COUNT];
+    static uint32_t actual[PROFILE_TILE_ELEM_COUNT];
 #ifdef PROFILE_TILE_ENABLE_BREAKDOWN_PROBES
     NpuCmd dma_probe_cmd;
     NpuCmd sync_probe_cmd;

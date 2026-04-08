@@ -1,8 +1,6 @@
 #ifndef TESTS_GEM5_NPU_UTILS_CMD_DMA_H_
 #define TESTS_GEM5_NPU_UTILS_CMD_DMA_H_
 
-#include <stdint.h>
-
 #include "common.hh"
 
 enum DmaOpcodeMode {
@@ -41,6 +39,29 @@ enum DmaCmdWord {
     DMA_CMD_WORD_WORD15 = 15U,
 };
 
+struct DmaCmdInstr
+{
+    uint32_t header;
+    uint32_t src_base_addr;
+    uint32_t dst_base_addr;
+    uint32_t shape_h;
+    uint32_t shape_w;
+    uint32_t shape_c;
+    uint32_t src_stride_h;
+    uint32_t src_stride_w;
+    uint32_t src_stride_c;
+    uint32_t dst_stride_h;
+    uint32_t dst_stride_w;
+    uint32_t dst_stride_c;
+    uint32_t block_cfg;
+    uint32_t mode_cfg;
+    uint32_t bank_cfg;
+    uint32_t word15;
+};
+
+static_assert(sizeof(DmaCmdInstr) == NPU_CMD_BUFFER_BYTES,
+              "DMA command struct must remain 64 bytes.");
+
 struct DmaLayout
 {
     uint32_t h;
@@ -77,33 +98,32 @@ dma_cmd_init_move_layout(NpuCmd *cmd, uint32_t device_id,
                          uint32_t sync_indicator,
                          uint32_t set_completion_sync)
 {
-    cmd->clear();
-    cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
-    cmd->setDeviceId(device_id);
-    cmd->setOpCode((0U << 5) | (DMA_MODE_MOVE_LAYOUT << 2));
-    cmd->setSyncIndicator(sync_indicator);
-    cmd->setSetIndicatorSns(set_completion_sync ? 1U : 0U);
-    cmd->setSetIndicatorSnd(0U);
-    cmd->clearCommonReservedBits();
-    cmd->setWord(DMA_CMD_WORD_SRC_BASE, (uint32_t)src_base);
-    cmd->setWord(DMA_CMD_WORD_DST_BASE, (uint32_t)dst_base);
-    cmd->setWord(DMA_CMD_WORD_SHAPE_H, src_layout->h);
-    cmd->setWord(DMA_CMD_WORD_SHAPE_W, src_layout->w);
-    cmd->setWord(DMA_CMD_WORD_SHAPE_C, src_layout->c);
-    cmd->setWord(DMA_CMD_WORD_SRC_STRIDE_H, src_layout->stride_h);
-    cmd->setWord(DMA_CMD_WORD_SRC_STRIDE_W, src_layout->stride_w);
-    cmd->setWord(DMA_CMD_WORD_SRC_STRIDE_C, src_layout->stride_c);
-    cmd->setWord(DMA_CMD_WORD_DST_STRIDE_H, dst_layout->stride_h);
-    cmd->setWord(DMA_CMD_WORD_DST_STRIDE_W, dst_layout->stride_w);
-    cmd->setWord(DMA_CMD_WORD_DST_STRIDE_C, dst_layout->stride_c);
-    cmd->setWord(DMA_CMD_WORD_BLOCK_CFG,
-                 ((uint32_t)dst_layout->k << 16) | src_layout->k);
-    cmd->setWord(
-        DMA_CMD_WORD_MODE_CFG,
-        dma_move_layout_mode_cfg(src_base, dst_base,
-                                 src_layout->cut_dim, dst_layout->cut_dim));
-    cmd->setWord(DMA_CMD_WORD_BANK_CFG, 0U);
-    cmd->setWord(DMA_CMD_WORD_WORD15, 0U);
+    DmaCmdInstr dma_cmd = {};
+    NpuCmdBinaryData binary = {};
+
+    dma_cmd.header = npuBuildHeaderWord(
+        NPU_DEVICE_TYPE_DMA, device_id,
+        (0U << 5) | (DMA_MODE_MOVE_LAYOUT << 2), sync_indicator,
+        set_completion_sync ? 1U : 0U, 0U);
+    dma_cmd.src_base_addr = (uint32_t)src_base;
+    dma_cmd.dst_base_addr = (uint32_t)dst_base;
+    dma_cmd.shape_h = src_layout->h;
+    dma_cmd.shape_w = src_layout->w;
+    dma_cmd.shape_c = src_layout->c;
+    dma_cmd.src_stride_h = src_layout->stride_h;
+    dma_cmd.src_stride_w = src_layout->stride_w;
+    dma_cmd.src_stride_c = src_layout->stride_c;
+    dma_cmd.dst_stride_h = dst_layout->stride_h;
+    dma_cmd.dst_stride_w = dst_layout->stride_w;
+    dma_cmd.dst_stride_c = dst_layout->stride_c;
+    dma_cmd.block_cfg =
+        ((uint32_t)dst_layout->k << 16) | src_layout->k;
+    dma_cmd.mode_cfg = dma_move_layout_mode_cfg(
+        src_base, dst_base, src_layout->cut_dim, dst_layout->cut_dim);
+    dma_cmd.bank_cfg = 0U;
+    dma_cmd.word15 = 0U;
+    npuBinaryDataFromObject(&binary, dma_cmd);
+    cmd->loadBinary(binary);
 }
 
 static inline void

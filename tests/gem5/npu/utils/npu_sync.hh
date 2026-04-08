@@ -13,6 +13,18 @@ enum NpuSyncOpcode {
     NPU_SYNC_OP_SET = 0x1U,
 };
 
+struct SyncCmdInstr
+{
+    uint32_t header;
+    uint32_t word1;
+    uint32_t word2;
+    uint32_t word3;
+    uint32_t reserved[12];
+};
+
+static_assert(sizeof(SyncCmdInstr) == NPU_CMD_BUFFER_BYTES,
+              "Sync command struct must remain 64 bytes.");
+
 static inline void
 npu_cmd_sync_done_at(uint64_t port_base)
 {
@@ -29,15 +41,17 @@ static inline void
 npuBuildSyncWaitCmd(NpuCmd *cmd, uint32_t device_id, uint32_t sync_indicator,
                     uint32_t w1, uint32_t w2, uint32_t w3)
 {
-    cmd->clear();
-    cmd->setDeviceType(NPU_DEVICE_TYPE_SYNC_INDICATOR_TABLE);
-    cmd->setDeviceId(device_id);
-    cmd->setOpCode(NPU_SYNC_OP_WAIT);
-    cmd->setSyncIndicator(sync_indicator);
-    cmd->clearCommonReservedBits();
-    cmd->setWord(1U, w1);
-    cmd->setWord(2U, w2);
-    cmd->setWord(3U, w3);
+    SyncCmdInstr sync_cmd = {};
+    NpuCmdBinaryData binary = {};
+
+    sync_cmd.header = npuBuildHeaderWord(
+        NPU_DEVICE_TYPE_SYNC_INDICATOR_TABLE, device_id, NPU_SYNC_OP_WAIT,
+        sync_indicator, 0U, 0U);
+    sync_cmd.word1 = w1;
+    sync_cmd.word2 = w2;
+    sync_cmd.word3 = w3;
+    npuBinaryDataFromObject(&binary, sync_cmd);
+    cmd->loadBinary(binary);
 }
 
 static inline void
@@ -62,15 +76,8 @@ npu_launch_sync_wait(uint32_t device_id, uint32_t sync_indicator,
 static inline uint32_t
 npuBuildSyncSetWord(uint32_t device_id, uint32_t sync_indicator)
 {
-    NpuCmd cmd;
-
-    cmd.clear();
-    cmd.setDeviceType(NPU_DEVICE_TYPE_SYNC_INDICATOR_TABLE);
-    cmd.setDeviceId(device_id);
-    cmd.setOpCode(NPU_SYNC_OP_SET);
-    cmd.setSyncIndicator(sync_indicator);
-    cmd.clearCommonReservedBits();
-    return cmd.getWord(0U);
+    return npuBuildHeaderWord(NPU_DEVICE_TYPE_SYNC_INDICATOR_TABLE, device_id,
+                              NPU_SYNC_OP_SET, sync_indicator, 0U, 0U);
 }
 
 static inline void

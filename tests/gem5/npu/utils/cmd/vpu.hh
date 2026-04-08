@@ -49,6 +49,29 @@ enum VpuCmdWord
     VPU_CMD_WORD_DST_ADDR = 13U,
 };
 
+struct VpuCmdInstr
+{
+    uint32_t header;
+    uint32_t read_mask;
+    uint32_t write_mask;
+    uint32_t repetition;
+    uint32_t flags;
+    uint32_t elem_count;
+    uint32_t src_stride_bytes;
+    uint32_t dst_stride_bytes;
+    uint32_t data_type;
+    uint32_t scalar_bits;
+    uint32_t src0_addr;
+    uint32_t src1_addr;
+    uint32_t src2_addr;
+    uint32_t dst_addr;
+    uint32_t reserved0;
+    uint32_t reserved1;
+};
+
+static_assert(sizeof(VpuCmdInstr) == NPU_CMD_BUFFER_BYTES,
+              "VPU command struct must remain 64 bytes.");
+
 enum VpuAddressLayout
 {
     VPU_LOCAL_INPUT_BASE = 0x80000000U,
@@ -78,15 +101,14 @@ static inline void
 vpu_cmd_init_raw(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
                  uint32_t sync_indicator)
 {
-    cmd->clear();
-    cmd->setDeviceType(NPU_DEVICE_TYPE_VPU);
-    cmd->setDeviceId(device_id);
-    cmd->setOpCode(op_code);
-    cmd->setSyncIndicator(sync_indicator);
-    if (sync_indicator != 0U) {
-        cmd->setSetIndicatorSns(1U);
-    }
-    cmd->clearCommonReservedBits();
+    VpuCmdInstr vpu_cmd = {};
+    NpuCmdBinaryData binary = {};
+
+    vpu_cmd.header = npuBuildHeaderWord(
+        NPU_DEVICE_TYPE_VPU, device_id, op_code, sync_indicator,
+        sync_indicator != 0U ? 1U : 0U, 0U);
+    npuBinaryDataFromObject(&binary, vpu_cmd);
+    cmd->loadBinary(binary);
 }
 
 static inline void
@@ -99,19 +121,26 @@ vpu_cmd_set_common_fields(NpuCmd *cmd, uint32_t read_mask,
                           uint32_t src1_addr, uint32_t src2_addr,
                           uint32_t dst_addr)
 {
-    cmd->setWord(VPU_CMD_WORD_READ_MASK, read_mask);
-    cmd->setWord(VPU_CMD_WORD_WRITE_MASK, write_mask);
-    cmd->setWord(VPU_CMD_WORD_REPETITION, repetition);
-    cmd->setWord(VPU_CMD_WORD_FLAGS, flags);
-    cmd->setWord(VPU_CMD_WORD_ELEM_COUNT, elem_count);
-    cmd->setWord(VPU_CMD_WORD_SRC_STRIDE, src_stride_bytes);
-    cmd->setWord(VPU_CMD_WORD_DST_STRIDE, dst_stride_bytes);
-    cmd->setWord(VPU_CMD_WORD_DATA_TYPE, data_type);
-    cmd->setWord(VPU_CMD_WORD_SCALAR_BITS, scalar_bits);
-    cmd->setWord(VPU_CMD_WORD_SRC0_ADDR, src0_addr);
-    cmd->setWord(VPU_CMD_WORD_SRC1_ADDR, src1_addr);
-    cmd->setWord(VPU_CMD_WORD_SRC2_ADDR, src2_addr);
-    cmd->setWord(VPU_CMD_WORD_DST_ADDR, dst_addr);
+    NpuCmdBinaryData binary = {};
+    VpuCmdInstr vpu_cmd = {};
+
+    cmd->copyBinaryData(&binary);
+    npuObjectFromBinaryData(&vpu_cmd, binary);
+    vpu_cmd.read_mask = read_mask;
+    vpu_cmd.write_mask = write_mask;
+    vpu_cmd.repetition = repetition;
+    vpu_cmd.flags = flags;
+    vpu_cmd.elem_count = elem_count;
+    vpu_cmd.src_stride_bytes = src_stride_bytes;
+    vpu_cmd.dst_stride_bytes = dst_stride_bytes;
+    vpu_cmd.data_type = data_type;
+    vpu_cmd.scalar_bits = scalar_bits;
+    vpu_cmd.src0_addr = src0_addr;
+    vpu_cmd.src1_addr = src1_addr;
+    vpu_cmd.src2_addr = src2_addr;
+    vpu_cmd.dst_addr = dst_addr;
+    npuBinaryDataFromObject(&binary, vpu_cmd);
+    cmd->loadBinary(binary);
 }
 
 static inline void

@@ -21,6 +21,8 @@ RENDERER := $(REPO_ROOT)/tests/gem5/npu/tools/render_npu_profile.py
 CXX := riscv64-linux-gnu-g++
 PYTHON := python3
 CPPFLAGS := -I../../../utils -I../../../utils/cmd -I../../../utils/golden
+WORKLOAD_OPT ?= -O2
+WORKLOAD_EXTRA_FLAGS ?=
 LDFLAGS := -lm
 GEM5_DEBUG_FLAGS := --debug-flags=NPUProfile --debug-file=$(notdir $(PROFILE_LOG))
 
@@ -35,7 +37,8 @@ workload: $(WORKLOAD_BIN)
 
 $(WORKLOAD_BIN): $(SRC)
 	mkdir -p $(BINDIR)
-	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $(SRC) $(LDFLAGS)
+	$(CXX) $(CPPFLAGS) $(WORKLOAD_OPT) $(WORKLOAD_EXTRA_FLAGS) -static -o $@ \
+		$(SRC) $(LDFLAGS)
 
 run: gem5 workload
 	rm -rf $(RUN_DIR)
