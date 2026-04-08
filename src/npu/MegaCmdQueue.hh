@@ -84,6 +84,39 @@ class MegaCmdQueue : public ClockedObject
         AddrRangeList getAddrRanges() const override;
     };
 
+    class LaunchSidePort : public ResponsePort
+    {
+      private:
+        MegaCmdQueue *owner;
+        PortID id;
+        bool needRetry;
+        PacketPtr blockedRespPacket;
+        EventFunctionWrapper sendResponseEvent;
+
+        void sendDeferredResponse();
+
+      public:
+        LaunchSidePort(const std::string &name, PortID id, MegaCmdQueue *owner);
+
+        void trySendRetry();
+
+      protected:
+        Tick recvAtomic(PacketPtr pkt) override
+        {
+            panic("MegaCmdQueue launch sideband does not support recvAtomic");
+        }
+
+        bool recvTimingReq(PacketPtr pkt) override;
+
+        void recvFunctional(PacketPtr pkt) override
+        {
+            panic("MegaCmdQueue launch sideband does not support recvFunctional");
+        }
+
+        void recvRespRetry() override;
+        AddrRangeList getAddrRanges() const override;
+    };
+
     class MemSidePort : public RequestPort
     {
       private:
@@ -116,6 +149,7 @@ class MegaCmdQueue : public ClockedObject
     };
 
     std::vector<CPUSidePort> cpuSidePorts;
+    std::vector<LaunchSidePort> launchSidePorts;
     CPUSidePort syncIndicatorSidePort;
     MemSidePort memSidePort;
     std::vector<StagingBuffer> stagingBuffers;
@@ -139,6 +173,8 @@ class MegaCmdQueue : public ClockedObject
 
     bool canPushMegaCmd() const;
     bool writeDataChunk(PortID port_id, Addr offset, PacketPtr pkt);
+    bool recvTimingLaunchReq(PortID port_id, PacketPtr pkt);
+    bool recvTimingLaunchSidebandReq(PortID port_id, PacketPtr pkt);
     bool recvTimingPushReq(PortID port_id);
     bool recvTimingPopReq();
     bool recvTimingSyncDoneReq(PortID port_id);
@@ -148,11 +184,14 @@ class MegaCmdQueue : public ClockedObject
 
     bool writeDataBytes(PortID port_id, Addr offset, const uint8_t *src,
                         size_t size);
+    bool enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source);
+    bool validLaunchOffset(Addr offset, size_t size) const;
     bool validMmioOffset(Addr offset, size_t size) const;
 
     Addr portBaseAddr(PortID port_id) const;
     AddrRangeList getCpuAddrRanges(PortID port_id) const;
     AddrRangeList getSyncIndicatorAddrRanges() const;
+    AddrRangeList getLaunchAddrRanges() const;
     void trySendRetries();
     void tryCompleteSyncDoneResponses();
     void popMegaCmd();

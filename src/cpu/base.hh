@@ -42,6 +42,7 @@
 #ifndef __CPU_BASE_HH__
 #define __CPU_BASE_HH__
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -54,6 +55,7 @@
 #include "mem/port_proxy.hh"
 #include "sim/clocked_object.hh"
 #include "sim/eventq.hh"
+#include "sim/faults.hh"
 #include "sim/full_system.hh"
 #include "sim/insttracer.hh"
 #include "sim/probe/pmu.hh"
@@ -208,6 +210,12 @@ class BaseCPU : public ClockedObject
      * @return a reference to the instruction port
      */
     virtual Port &getInstPort() = 0;
+
+    /**
+     * Initiate an NPU macro launch on a CPU-attached sideband path.
+     * Unsupported CPU models should override this if they expose the port.
+     */
+    virtual Fault initiateNpuLaunch(const uint8_t *data, unsigned size);
 
     /** Reads this CPU's ID. */
     int cpuId() const { return _cpuId; }
