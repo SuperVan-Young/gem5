@@ -162,10 +162,13 @@ class NpuCmd
 
     void stageCmdWords() const
     {
-        for (unsigned i = 0; i < (NPU_CMD_BUFFER_WORDS / 2U); ++i) {
-            const uint64_t packed =
-                ((uint64_t)words[(2U * i) + 1U] << 32) | words[2U * i];
-            writeStageCsr(i, packed);
+        for (unsigned i = 0; i < (NPU_CMD_BUFFER_WORDS / 4U); ++i) {
+            const unsigned base = 4U * i;
+            const uint64_t packed_lo =
+                ((uint64_t)words[base + 1U] << 32) | words[base];
+            const uint64_t packed_hi =
+                ((uint64_t)words[base + 3U] << 32) | words[base + 2U];
+            writeStagePair(i, packed_lo, packed_hi);
         }
     }
 
@@ -187,32 +190,27 @@ class NpuCmd
     }
 
   private:
-    static void writeStageCsr(unsigned stage_index, uint64_t value)
+    static void writeStagePair(unsigned pair_index, uint64_t low, uint64_t high)
     {
-        switch (stage_index) {
+        register uint64_t rs1 asm("a0") = low;
+        register uint64_t rs2 asm("a1") = high;
+
+        switch (pair_index) {
           case 0:
-            asm volatile("csrw 0x800, %0" : : "r"(value) : "memory");
+            asm volatile(".insn r 0x0b, 0, 1, x0, %0, %1"
+                         : : "r"(rs1), "r"(rs2) : "memory");
             break;
           case 1:
-            asm volatile("csrw 0x801, %0" : : "r"(value) : "memory");
+            asm volatile(".insn r 0x0b, 0, 2, x0, %0, %1"
+                         : : "r"(rs1), "r"(rs2) : "memory");
             break;
           case 2:
-            asm volatile("csrw 0x802, %0" : : "r"(value) : "memory");
+            asm volatile(".insn r 0x0b, 0, 3, x0, %0, %1"
+                         : : "r"(rs1), "r"(rs2) : "memory");
             break;
           case 3:
-            asm volatile("csrw 0x803, %0" : : "r"(value) : "memory");
-            break;
-          case 4:
-            asm volatile("csrw 0x804, %0" : : "r"(value) : "memory");
-            break;
-          case 5:
-            asm volatile("csrw 0x805, %0" : : "r"(value) : "memory");
-            break;
-          case 6:
-            asm volatile("csrw 0x806, %0" : : "r"(value) : "memory");
-            break;
-          case 7:
-            asm volatile("csrw 0x807, %0" : : "r"(value) : "memory");
+            asm volatile(".insn r 0x0b, 0, 4, x0, %0, %1"
+                         : : "r"(rs1), "r"(rs2) : "memory");
             break;
           default:
             break;
