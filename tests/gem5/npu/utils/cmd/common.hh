@@ -150,9 +150,19 @@ class NpuCmd
         ringDoorbellAt(port_base);
     }
 
-    void launchCmdAt(uint64_t port_base) const
+    void launchCmdViaMmioAt(uint64_t port_base) const
     {
         launchCmdWordsAt(NPU_CMD_LAUNCH_WORDS, port_base);
+    }
+
+    void launchCmdViaMmio() const
+    {
+        launchCmdViaMmioAt(NPU_CMD_PORT_BASE);
+    }
+
+    void launchCmdAt(uint64_t port_base) const
+    {
+        launchCmdViaStage2At(port_base);
     }
 
     void launchCmd() const

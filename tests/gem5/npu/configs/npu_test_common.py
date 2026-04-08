@@ -225,6 +225,80 @@ def map_multi_cpu_regions(
             builder.map_dram(process=process, cpu_id=cpu_id)
 
 
+def build_dma_functional_context(
+    binary,
+    *,
+    scenario,
+    builder_kwargs=None,
+    dma_kwargs=None,
+    instantiate_root=True,
+):
+    from m5.objects import AddrRange
+
+    merged_builder_kwargs = dict(builder_kwargs or {})
+    merged_builder_kwargs.setdefault(
+        "mem_ranges",
+        [
+            AddrRange(0, size=0x60000000),
+            AddrRange(0x60000000, size=64 * 1024),
+        ],
+    )
+
+    builder, process = build_dma_functional_system(
+        binary,
+        scenario=scenario,
+        builder_kwargs=merged_builder_kwargs,
+        dma_kwargs=dma_kwargs,
+    )
+    builder.map_cmdq(process=process)
+    builder.map_spm(process=process)
+    builder.map_dram(process=process)
+    root = builder.instantiate_root() if instantiate_root else None
+    return NPUTestBuildContext(
+        builder=builder,
+        binary=os.path.abspath(binary),
+        processes=builder.get_processes(),
+        root=root,
+    )
+
+
+def build_dma_functional_system(
+    binary,
+    *,
+    scenario,
+    builder_kwargs=None,
+    dma_kwargs=None,
+):
+    from m5.objects import AddrRange
+
+    merged_builder_kwargs = dict(builder_kwargs or {})
+    merged_builder_kwargs.setdefault(
+        "mem_ranges",
+        [
+            AddrRange(0, size=0x60000000),
+            AddrRange(0x60000000, size=64 * 1024),
+        ],
+    )
+
+    builder = make_builder(**merged_builder_kwargs)
+    builder.build_base_system()
+    builder.add_default_physmem()
+    builder.add_spm()
+    builder.add_cpu(cpu_id=0)
+    process = builder.set_workload(os.path.abspath(binary), argv=[scenario])
+    builder.add_megacmdqueue()
+    builder.add_dma(
+        **(
+            {
+                "bank_size": 4096,
+                "num_mem_side_ports": 2,
+            }
+            | dict(dma_kwargs or {})
+        )
+    )
+    return builder, process
+
+
 def collect_component_snapshot(component, field_specs):
     snapshot = {}
     for key, accessor in field_specs.items():
