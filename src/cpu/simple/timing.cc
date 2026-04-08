@@ -41,6 +41,8 @@
 
 #include "cpu/simple/timing.hh"
 
+#include <cstring>
+
 #include "arch/generic/decoder.hh"
 #include "base/compiler.hh"
 #include "cpu/exetrace.hh"
@@ -75,7 +77,8 @@ TimingSimpleCPU::TimingCPUPort::TickEvent::schedule(PacketPtr _pkt, Tick t)
 
 TimingSimpleCPU::TimingSimpleCPU(const BaseTimingSimpleCPUParams &p)
     : BaseSimpleCPU(p), fetchTranslation(this), icachePort(this),
-      dcachePort(this), ifetch_pkt(NULL), dcache_pkt(NULL), previousCycle(0),
+      dcachePort(this), npuLaunchPort(this), ifetch_pkt(NULL),
+      dcache_pkt(NULL), npu_launch_pkt(NULL), previousCycle(0),
       fetchEvent([this]{ fetch(); }, name())
 {
     _status = Idle;
@@ -85,6 +88,19 @@ TimingSimpleCPU::TimingSimpleCPU(const BaseTimingSimpleCPUParams &p)
 
 TimingSimpleCPU::~TimingSimpleCPU()
 {
+    if (npu_launch_pkt != nullptr) {
+        delete npu_launch_pkt;
+    }
+}
+
+Port &
+TimingSimpleCPU::getPort(const std::string &if_name, PortID idx)
+{
+    if (if_name == "npu_launch_port") {
+        return npuLaunchPort;
+    }
+
+    return BaseCPU::getPort(if_name, idx);
 }
 
 DrainState
@@ -584,6 +600,34 @@ TimingSimpleCPU::writeMem(uint8_t *data, unsigned size,
     }
 
     // Translation faults will be returned via finishTranslation()
+    return NoFault;
+}
+
+Fault
+TimingSimpleCPU::initiateNpuLaunch(const uint8_t *data, unsigned size)
+{
+    SimpleExecContext &t_info = *threadInfo[curThread];
+    SimpleThread *thread = t_info.thread;
+
+    auto *payload = new uint8_t[size];
+    std::memcpy(payload, data, size);
+
+    RequestPtr req = std::make_shared<Request>(
+        0, size, Request::Flags(), dataRequestorId(), thread->pcState().instAddr(),
+        thread->contextId());
+    req->taskId(taskId());
+
+    PacketPtr pkt = Packet::createWrite(req);
+    pkt->dataDynamic<uint8_t>(payload);
+
+    npu_launch_pkt = pkt;
+    if (!npuLaunchPort.sendTimingReq(pkt)) {
+        _status = DcacheRetry;
+        return NoFault;
+    }
+
+    _status = DcacheWaitResponse;
+    npu_launch_pkt = nullptr;
     return NoFault;
 }
 
@@ -1205,6 +1249,41 @@ TimingSimpleCPU::DcachePort::recvReqRetry()
         cpu->_status = DcacheWaitResponse;
         // memory system takes ownership of packet
         cpu->dcache_pkt = NULL;
+    }
+}
+
+bool
+TimingSimpleCPU::NpuLaunchPort::recvTimingResp(PacketPtr pkt)
+{
+    DPRINTF(SimpleCPU, "Received NPU launch response\n");
+
+    if (!tickEvent.scheduled()) {
+        tickEvent.schedule(pkt, cpu->clockEdge());
+        return true;
+    } else {
+        if (!retryRespEvent.scheduled()) {
+            cpu->schedule(retryRespEvent, cpu->clockEdge(Cycles(1)));
+        }
+        return false;
+    }
+}
+
+void
+TimingSimpleCPU::NpuLaunchPort::NTickEvent::process()
+{
+    cpu->completeDataAccess(pkt);
+}
+
+void
+TimingSimpleCPU::NpuLaunchPort::recvReqRetry()
+{
+    assert(cpu->npu_launch_pkt != nullptr);
+    assert(cpu->_status == DcacheRetry);
+
+    PacketPtr pkt = cpu->npu_launch_pkt;
+    if (sendTimingReq(pkt)) {
+        cpu->_status = DcacheWaitResponse;
+        cpu->npu_launch_pkt = nullptr;
     }
 }
 

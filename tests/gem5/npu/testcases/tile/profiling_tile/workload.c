@@ -178,30 +178,6 @@ print_vector(const char *prefix, const uint32_t *values)
     printf("\n");
 }
 
-static inline uint64_t
-read_cycle(void)
-{
-    uint64_t value = 0U;
-    asm volatile("rdcycle %0" : "=r"(value));
-    return value;
-}
-
-static void
-log_issue_breakdown(const char *label, uint64_t cycle_start,
-                    uint64_t cycle_assembled, uint64_t cycle_words_done,
-                    uint64_t cycle_doorbell_done, const NpuCmd *cmd)
-{
-    printf(
-        "PROFILE_TILE_CPU_ISSUE label=%s start_cycle=%llu assembled_cycle=%llu "
-        "words_done_cycle=%llu doorbell_done_cycle=%llu word0=%#x\n",
-        label,
-        (unsigned long long)cycle_start,
-        (unsigned long long)cycle_assembled,
-        (unsigned long long)cycle_words_done,
-        (unsigned long long)cycle_doorbell_done,
-        cmd->getWord(0U));
-}
-
 static void
 issue_profiled_dma_move(const char *label, uint32_t sync_idx,
                         uint32_t src_base, uint32_t dst_base)
@@ -218,17 +194,12 @@ issue_profiled_dma_move(const char *label, uint32_t sync_idx,
         DMA_CUT_DIM_W,
     };
 
-    const uint64_t cycle_start = read_cycle();
     dma_cmd_init_move_layout(
         &cmd, PROFILE_TILE_DMA_DEVICE_ID, src_base, dst_base, &layout, &layout,
         sync_idx, 1U);
-    const uint64_t cycle_assembled = read_cycle();
-    cmd.writeCmdWordsAt(NPU_CMD_LAUNCH_WORDS, NPU_CMD_PORT_BASE);
-    const uint64_t cycle_words_done = read_cycle();
-    cmd.ringDoorbellAt(NPU_CMD_PORT_BASE);
-    const uint64_t cycle_doorbell_done = read_cycle();
-    log_issue_breakdown(label, cycle_start, cycle_assembled, cycle_words_done,
-                        cycle_doorbell_done, &cmd);
+    cmd.stageCmdWords();
+    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    (void)label;
 }
 
 static void
@@ -237,15 +208,10 @@ issue_profiled_sync_wait(const char *label, uint32_t device_id,
 {
     NpuCmd cmd;
 
-    const uint64_t cycle_start = read_cycle();
     npuBuildSyncWaitCmd(&cmd, device_id, sync_indicator, 0U, 0U, 0U);
-    const uint64_t cycle_assembled = read_cycle();
-    cmd.writeCmdWordsAt(NPU_CMD_LAUNCH_WORDS, NPU_CMD_PORT_BASE);
-    const uint64_t cycle_words_done = read_cycle();
-    cmd.ringDoorbellAt(NPU_CMD_PORT_BASE);
-    const uint64_t cycle_doorbell_done = read_cycle();
-    log_issue_breakdown(label, cycle_start, cycle_assembled, cycle_words_done,
-                        cycle_doorbell_done, &cmd);
+    cmd.stageCmdWords();
+    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    (void)label;
 }
 
 static void
@@ -255,19 +221,14 @@ issue_profiled_vpu_load(const char *label, uint32_t device_id,
 {
     NpuCmd cmd;
 
-    const uint64_t cycle_start = read_cycle();
     vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VLOAD, 0U);
     vpu_cmd_set_common_fields(
         &cmd, 1U << port, 0U, 1U, 0U, elem_count, src_stride_bytes, 0U,
         data_type, 0U, 0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE), 0U, 0U,
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER));
-    const uint64_t cycle_assembled = read_cycle();
-    cmd.writeCmdWordsAt(NPU_CMD_LAUNCH_WORDS, NPU_CMD_PORT_BASE);
-    const uint64_t cycle_words_done = read_cycle();
-    cmd.ringDoorbellAt(NPU_CMD_PORT_BASE);
-    const uint64_t cycle_doorbell_done = read_cycle();
-    log_issue_breakdown(label, cycle_start, cycle_assembled, cycle_words_done,
-                        cycle_doorbell_done, &cmd);
+    cmd.stageCmdWords();
+    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    (void)label;
 }
 
 static void
@@ -280,7 +241,6 @@ issue_profiled_vpu_compute(const char *label, uint32_t device_id,
 {
     NpuCmd cmd;
 
-    const uint64_t cycle_start = read_cycle();
     vpu_cmd_init_raw(&cmd, device_id, op_code, 0U);
     vpu_cmd_set_common_fields(
         &cmd, read_mask, write_mask, repetition, 0U, elem_count,
@@ -289,13 +249,9 @@ issue_profiled_vpu_compute(const char *label, uint32_t device_id,
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT_BUFFER),
         vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER));
-    const uint64_t cycle_assembled = read_cycle();
-    cmd.writeCmdWordsAt(NPU_CMD_LAUNCH_WORDS, NPU_CMD_PORT_BASE);
-    const uint64_t cycle_words_done = read_cycle();
-    cmd.ringDoorbellAt(NPU_CMD_PORT_BASE);
-    const uint64_t cycle_doorbell_done = read_cycle();
-    log_issue_breakdown(label, cycle_start, cycle_assembled, cycle_words_done,
-                        cycle_doorbell_done, &cmd);
+    cmd.stageCmdWords();
+    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    (void)label;
 }
 
 static void
@@ -306,20 +262,15 @@ issue_profiled_vpu_store(const char *label, uint32_t device_id,
 {
     NpuCmd cmd;
 
-    const uint64_t cycle_start = read_cycle();
     vpu_cmd_init_raw(&cmd, device_id, VPU_OP_VSTORE, sync_indicator);
     vpu_cmd_set_common_fields(
         &cmd, 0U, 1U << port, 1U, 0U, elem_count, 0U, dst_stride_bytes,
         data_type, 0U,
         vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER),
         0U, 0U, 0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE));
-    const uint64_t cycle_assembled = read_cycle();
-    cmd.writeCmdWordsAt(NPU_CMD_LAUNCH_WORDS, NPU_CMD_PORT_BASE);
-    const uint64_t cycle_words_done = read_cycle();
-    cmd.ringDoorbellAt(NPU_CMD_PORT_BASE);
-    const uint64_t cycle_doorbell_done = read_cycle();
-    log_issue_breakdown(label, cycle_start, cycle_assembled, cycle_words_done,
-                        cycle_doorbell_done, &cmd);
+    cmd.stageCmdWords();
+    cmd.launchStagedCmdAt(NPU_CMD_PORT_BASE);
+    (void)label;
 }
 
 static void

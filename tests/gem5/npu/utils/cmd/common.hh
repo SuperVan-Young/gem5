@@ -15,8 +15,18 @@
 #define NPU_CMD_LAUNCH_WORDS NPU_CMD_BUFFER_WORDS
 #define NPU_CMD_LAUNCH_BYTES (NPU_CMD_LAUNCH_WORDS * sizeof(uint32_t))
 #define NPU_CMD_CTRL_ADDR(port_base) ((port_base) + NPU_CMD_LAUNCH_BYTES)
+#define NPU_CMD_FAST_LAUNCH_ADDR(port_base) NPU_CMD_CTRL_ADDR(port_base)
 #define NPU_CMD_CTRL_PUSH 0U
 #define NPU_CMD_CTRL_POP 1U
+
+#define NPU_CMD_STAGE_CSR0 0x800U
+#define NPU_CMD_STAGE_CSR1 0x801U
+#define NPU_CMD_STAGE_CSR2 0x802U
+#define NPU_CMD_STAGE_CSR3 0x803U
+#define NPU_CMD_STAGE_CSR4 0x804U
+#define NPU_CMD_STAGE_CSR5 0x805U
+#define NPU_CMD_STAGE_CSR6 0x806U
+#define NPU_CMD_STAGE_CSR7 0x807U
 
 enum NpuDeviceType {
     NPU_DEVICE_TYPE_MEGA_CMD_QUEUE = 0x0U,
@@ -150,7 +160,65 @@ class NpuCmd
         launchCmdAt(NPU_CMD_PORT_BASE);
     }
 
+    void stageCmdWords() const
+    {
+        for (unsigned i = 0; i < (NPU_CMD_BUFFER_WORDS / 2U); ++i) {
+            const uint64_t packed =
+                ((uint64_t)words[(2U * i) + 1U] << 32) | words[2U * i];
+            writeStageCsr(i, packed);
+        }
+    }
+
+    void launchStagedCmdAt(uint64_t port_base) const
+    {
+        (void)port_base;
+        asm volatile(".insn r 0x0b, 0, 0, x0, x0, x0" : : : "memory");
+    }
+
+    void launchCmdViaStage2At(uint64_t port_base) const
+    {
+        stageCmdWords();
+        launchStagedCmdAt(port_base);
+    }
+
+    void launchCmdViaStage2() const
+    {
+        launchCmdViaStage2At(NPU_CMD_PORT_BASE);
+    }
+
   private:
+    static void writeStageCsr(unsigned stage_index, uint64_t value)
+    {
+        switch (stage_index) {
+          case 0:
+            asm volatile("csrw 0x800, %0" : : "r"(value) : "memory");
+            break;
+          case 1:
+            asm volatile("csrw 0x801, %0" : : "r"(value) : "memory");
+            break;
+          case 2:
+            asm volatile("csrw 0x802, %0" : : "r"(value) : "memory");
+            break;
+          case 3:
+            asm volatile("csrw 0x803, %0" : : "r"(value) : "memory");
+            break;
+          case 4:
+            asm volatile("csrw 0x804, %0" : : "r"(value) : "memory");
+            break;
+          case 5:
+            asm volatile("csrw 0x805, %0" : : "r"(value) : "memory");
+            break;
+          case 6:
+            asm volatile("csrw 0x806, %0" : : "r"(value) : "memory");
+            break;
+          case 7:
+            asm volatile("csrw 0x807, %0" : : "r"(value) : "memory");
+            break;
+          default:
+            break;
+        }
+    }
+
     static unsigned cmdWordIndex(unsigned bit_index)
     {
         return bit_index / 32U;

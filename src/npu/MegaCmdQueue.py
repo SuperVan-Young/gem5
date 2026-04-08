@@ -12,6 +12,7 @@ class MegaCmdQueue(ClockedObject):
     cxx_class = "gem5::MegaCmdQueue"
 
     cpu_side = VectorResponsePort("CPU-side request input ports")
+    launch_side = VectorResponsePort("CPU launch sideband input ports")
     sync_indicator_side = ResponsePort("Sync-indicator request input port")
     mem_side = RequestPort("Memory-side request port")
 

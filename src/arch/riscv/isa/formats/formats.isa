@@ -36,6 +36,7 @@
 ##include "mem.isa"
 ##include "fp.isa"
 ##include "amo.isa"
+##include "npu.isa"
 ##include "bs.isa"
 ##include "vector_conf.isa"
 ##include "vector_arith.isa"

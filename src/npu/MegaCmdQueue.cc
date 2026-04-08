@@ -46,6 +46,7 @@ namespace
 
 constexpr Addr MmioBase = 0x70000000;
 constexpr Addr SyncIndicatorBase = 0x71000000;
+constexpr Addr FullLaunchOffsetScale = 1;
 constexpr uint64_t CtrlPush = 0;
 constexpr uint64_t CtrlPop = 1;
 constexpr uint64_t CtrlSyncDone = 2;
@@ -160,6 +161,81 @@ MegaCmdQueue::CPUSidePort::scheduleResponse()
     owner->schedule(sendResponseEvent, owner->clockEdge(Cycles(1)));
 }
 
+MegaCmdQueue::LaunchSidePort::LaunchSidePort(
+    const std::string &name, PortID id, MegaCmdQueue *owner)
+    : ResponsePort(name), owner(owner), id(id), needRetry(false),
+      blockedRespPacket(nullptr),
+      sendResponseEvent([this]() { sendDeferredResponse(); },
+                        name + ".sendResponseEvent")
+{
+}
+
+bool
+MegaCmdQueue::LaunchSidePort::recvTimingReq(PacketPtr pkt)
+{
+    if (blockedRespPacket != nullptr || needRetry) {
+        needRetry = true;
+        return false;
+    }
+
+    if (!owner->recvTimingLaunchSidebandReq(id, pkt)) {
+        needRetry = true;
+        return false;
+    }
+
+    if (pkt->needsResponse()) {
+        pkt->makeResponse();
+        blockedRespPacket = pkt;
+        owner->schedule(sendResponseEvent, owner->clockEdge(Cycles(1)));
+    }
+
+    return true;
+}
+
+void
+MegaCmdQueue::LaunchSidePort::sendDeferredResponse()
+{
+    if (blockedRespPacket == nullptr) {
+        return;
+    }
+
+    PacketPtr pkt = blockedRespPacket;
+    blockedRespPacket = nullptr;
+    if (!sendTimingResp(pkt)) {
+        blockedRespPacket = pkt;
+    }
+}
+
+void
+MegaCmdQueue::LaunchSidePort::recvRespRetry()
+{
+    assert(blockedRespPacket != nullptr);
+    sendDeferredResponse();
+}
+
+AddrRangeList
+MegaCmdQueue::LaunchSidePort::getAddrRanges() const
+{
+    return owner->getLaunchAddrRanges();
+}
+
+void
+MegaCmdQueue::LaunchSidePort::trySendRetry()
+{
+    if (!needRetry || blockedRespPacket != nullptr) {
+        return;
+    }
+
+    if (!owner->canPushMegaCmd()) {
+        return;
+    }
+
+    needRetry = false;
+    if (isConnected()) {
+        sendRetryReq();
+    }
+}
+
 MegaCmdQueue::MemSidePort::MemSidePort(
     const std::string &name, MegaCmdQueue *owner)
     : RequestPort(name, owner), owner(owner)
@@ -217,11 +293,14 @@ MegaCmdQueue::MegaCmdQueue(const MegaCmdQueueParams &params)
 
     stagingBuffers.resize(numInputPort);
     cpuSidePorts.reserve(numInputPort);
+    launchSidePorts.reserve(numInputPort);
 
     for (PortID i = 0; i < numInputPort; ++i) {
         stagingBuffers[i].bytes.resize(megaCmdBytes, 0);
         cpuSidePorts.emplace_back(csprintf("%s.cpu_side[%d]", name(), i),
                                   i, false, this);
+        launchSidePorts.emplace_back(
+            csprintf("%s.launch_side[%d]", name(), i), i, this);
 
         const Addr start = portBaseAddr(i);
         const Addr end = start + (2 * megaCmdBytes);
@@ -262,6 +341,12 @@ MegaCmdQueue::init()
         }
     }
 
+    for (auto &port : launchSidePorts) {
+        if (port.isConnected()) {
+            port.sendRangeChange();
+        }
+    }
+
     if (syncIndicatorSidePort.isConnected()) {
         syncIndicatorSidePort.sendRangeChange();
     }
@@ -274,6 +359,10 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
         return cpuSidePorts[idx];
     }
 
+    if (if_name == "launch_side" && idx < launchSidePorts.size()) {
+        return launchSidePorts[idx];
+    }
+
     if (if_name == "sync_indicator_side") {
         return syncIndicatorSidePort;
     }
@@ -283,6 +372,12 @@ MegaCmdQueue::getPort(const std::string &if_name, PortID idx)
     }
 
     return ClockedObject::getPort(if_name, idx);
+}
+
+AddrRangeList
+MegaCmdQueue::getLaunchAddrRanges() const
+{
+    return {};
 }
 
 Addr
@@ -308,6 +403,41 @@ bool
 MegaCmdQueue::canPushMegaCmd() const
 {
     return queue.size() < cmdQueueDepth && !hasEnqueuedCmd;
+}
+
+bool
+MegaCmdQueue::enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source)
+{
+    if (!canPushMegaCmd()) {
+        DPRINTF(MegaCmdQueue,
+                "%s rejected: queue=%llu depth=%u hasEnqueued=%d\n",
+                source,
+                static_cast<unsigned long long>(queue.size()),
+                cmdQueueDepth, hasEnqueuedCmd);
+        return false;
+    }
+
+    queue.emplace_back(std::move(cmd));
+    hasEnqueuedCmd = true;
+    if (!clearEnqueueGateEvent.scheduled()) {
+        schedule(clearEnqueueGateEvent, clockEdge(Cycles(1)));
+    }
+
+    DPRINTF(MegaCmdQueue,
+            "%s accepted: queue=%llu/%u clear_tick=%llu\n",
+            source,
+            static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
+            static_cast<unsigned long long>(clockEdge(Cycles(1))));
+
+    tryDispatchNext();
+    return true;
+}
+
+bool
+MegaCmdQueue::validLaunchOffset(Addr offset, size_t size) const
+{
+    return offset == FullLaunchOffsetScale * megaCmdBytes &&
+           size == megaCmdBytes;
 }
 
 bool
@@ -348,31 +478,39 @@ MegaCmdQueue::writeDataChunk(PortID port_id, Addr offset, PacketPtr pkt)
 bool
 MegaCmdQueue::recvTimingPushReq(PortID port_id)
 {
-    if (!canPushMegaCmd()) {
+    std::vector<uint8_t> cmd(stagingBuffers[port_id].bytes.begin(),
+                             stagingBuffers[port_id].bytes.end());
+    std::fill(stagingBuffers[port_id].bytes.begin(),
+              stagingBuffers[port_id].bytes.end(), 0);
+    return enqueueMegaCmd(std::move(cmd), "push");
+}
+
+bool
+MegaCmdQueue::recvTimingLaunchReq(PortID port_id, PacketPtr pkt)
+{
+    std::vector<uint8_t> cmd(pkt->getConstPtr<uint8_t>(),
+                             pkt->getConstPtr<uint8_t>() + megaCmdBytes);
+    DPRINTF(MegaCmdQueue,
+            "launch write port=%d addr=%#llx size=%u\n",
+            port_id, pkt->getAddr(), pkt->getSize());
+    return enqueueMegaCmd(std::move(cmd), "launch");
+}
+
+bool
+MegaCmdQueue::recvTimingLaunchSidebandReq(PortID port_id, PacketPtr pkt)
+{
+    if (!pkt->isWrite() || pkt->getSize() != megaCmdBytes) {
         DPRINTF(MegaCmdQueue,
-                "push rejected: queue=%llu depth=%u hasEnqueued=%d\n",
-                static_cast<unsigned long long>(queue.size()),
-                cmdQueueDepth, hasEnqueuedCmd);
+                "reject sideband launch port=%d cmd=%s size=%u\n",
+                port_id, pkt->cmdString(), pkt->getSize());
         return false;
     }
 
-    queue.emplace_back(stagingBuffers[port_id].bytes.begin(),
-                       stagingBuffers[port_id].bytes.end());
-    std::fill(stagingBuffers[port_id].bytes.begin(),
-              stagingBuffers[port_id].bytes.end(), 0);
-
-    hasEnqueuedCmd = true;
-    if (!clearEnqueueGateEvent.scheduled()) {
-        schedule(clearEnqueueGateEvent, clockEdge(Cycles(1)));
-    }
-
+    std::vector<uint8_t> cmd(pkt->getConstPtr<uint8_t>(),
+                             pkt->getConstPtr<uint8_t>() + megaCmdBytes);
     DPRINTF(MegaCmdQueue,
-            "push accepted: queue=%llu/%u clear_tick=%llu\n",
-            static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
-            static_cast<unsigned long long>(clockEdge(Cycles(1))));
-
-    tryDispatchNext();
-    return true;
+            "launch sideband port=%d size=%u\n", port_id, pkt->getSize());
+    return enqueueMegaCmd(std::move(cmd), "launch sideband");
 }
 
 void
@@ -459,6 +597,10 @@ MegaCmdQueue::handleRequest(PacketPtr pkt, PortID port_id)
                 "data write port=%d addr=%#llx off=%#llx size=%u accepted=%d\n",
                 port_id, pkt->getAddr(), offset, pkt->getSize(), ok);
         return ok;
+    }
+
+    if (validLaunchOffset(offset, pkt->getSize())) {
+        return recvTimingLaunchReq(port_id, pkt);
     }
 
     const uint64_t ctrl = pkt->getUintX(ByteOrder::little);
@@ -548,6 +690,10 @@ void
 MegaCmdQueue::trySendRetries()
 {
     for (auto &port : cpuSidePorts) {
+        port.trySendRetry();
+    }
+
+    for (auto &port : launchSidePorts) {
         port.trySendRetry();
     }
 

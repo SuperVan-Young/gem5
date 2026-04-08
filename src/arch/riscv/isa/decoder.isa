@@ -1333,6 +1333,12 @@ decode QUADRANT default Unknown::unknown() {
             }
         }
 
+        0x02: decode FUNCT3 {
+            0x0: decode FUNCT7 {
+                0x00: NpuLaunchOp::npu_launch();
+            }
+        }
+
         0x03: decode FUNCT3 {
             format FenceOp {
                 0x0: fence({{

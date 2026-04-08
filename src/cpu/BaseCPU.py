@@ -165,6 +165,7 @@ class BaseCPU(ClockedObject):
 
     icache_port = RequestPort("Instruction Port")
     dcache_port = RequestPort("Data Port")
+    npu_launch_port = RequestPort("NPU launch sideband port")
     _cached_ports = ["icache_port", "dcache_port"]
 
     _uncached_interrupt_response_ports = []

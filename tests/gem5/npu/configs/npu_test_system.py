@@ -349,6 +349,9 @@ class NPUTestSystemBuilder:
             self.system.cpu = cpu
         else:
             setattr(self.system, f"cpu{cpu_id}", cpu)
+        cmdq = self.components.get("cmdq")
+        if cmdq is not None:
+            cpu.npu_launch_port = cmdq.launch_side
         return cpu
 
     def add_cpus(self, num_cpus):
@@ -417,6 +420,8 @@ class NPUTestSystemBuilder:
         cmdq = MegaCmdQueue(**kwargs)
         for _ in range(num_input_port):
             cmdq.cpu_side = self._npu_mmio_target_port()
+        for cpu_id, cpu in enumerate(self.cpus[:num_input_port]):
+            cpu.npu_launch_port = cmdq.launch_side
         if num_sync_indicator is not None:
             cmdq.sync_indicator_side = self._npu_mmio_target_port()
             cmdq.mem_side = self._npu_mmio_request_port()
