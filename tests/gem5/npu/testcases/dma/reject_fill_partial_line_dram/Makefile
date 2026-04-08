@@ -5,7 +5,9 @@ OUTDIR := bin
 OUT := $(OUTDIR)/dma_reject_fill_partial_line_dram_riscv
 SRC := workload.c
 CXX := riscv64-linux-gnu-g++
-CXXFLAGS := -O0 -static -std=c++17 -x c++ -I../../../utils -I../../../utils/cmd
+CXXFLAGS := $(WORKLOAD_OPT) -static -std=c++17 -x c++ -I../../../utils -I../../../utils/cmd
+
+WORKLOAD_OPT ?= -O2
 
 .PHONY: all clean
 

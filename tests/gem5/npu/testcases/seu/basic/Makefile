@@ -7,13 +7,15 @@ SRC := workload.c
 CXX := riscv64-linux-gnu-g++
 CPPFLAGS := -I../../../utils -I../../../utils/cmd
 
+WORKLOAD_OPT ?= -O2
+
 .PHONY: all clean
 
 all: $(OUT)
 
 $(OUT): $(SRC)
 	mkdir -p $(OUTDIR)
-	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $<
+	$(CXX) $(CPPFLAGS) $(WORKLOAD_OPT) -static -o $@ $<
 
 clean:
 	rm -f $(OUT)

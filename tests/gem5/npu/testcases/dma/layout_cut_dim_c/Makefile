@@ -12,13 +12,15 @@ CPPFLAGS := -I../../../utils -I../../../utils/cmd \
 	-DCASE_NAME_STR=\"$(CASE_NAME)\" \
 	-DCASE_PASS_MARKER=\"DMA_$(CASE_TAG)_PASS\"
 
+WORKLOAD_OPT ?= -O2
+
 .PHONY: all clean
 
 all: $(OUT)
 
 $(OUT): $(SRC)
 	mkdir -p $(OUTDIR)
-	$(CXX) $(CPPFLAGS) -O0 -static -o $@ $<
+	$(CXX) $(CPPFLAGS) $(WORKLOAD_OPT) -static -o $@ $<
 
 clean:
 	rm -f $(OUT)
