@@ -68,22 +68,8 @@ def add_mpu_test(name, scenario, verifier_regex):
     )
 
 
-add_mpu_test(
-    "mpu_basic_tile_flow",
-    "basic_tile_flow",
-    (
-        r"MPU_SUMMARY scenario=basic_tile_flow cmds=7 reads=6 writes=2 macro=0 memq=0 execq=0 drainq=0 mvin=2 load=2 compute=1 drain=1 mvout=1 .*",
-        r"MPU_SCENARIO_PASS=basic_tile_flow",
-    ),
-)
-add_mpu_test(
-    "mpu_output_stationary_basic",
-    "output_stationary_basic",
-    (
-        r"MPU_SUMMARY scenario=output_stationary_basic cmds=7 .* mvin=2 load=2 compute=1 drain=1 mvout=1 .*",
-        r"MPU_SCENARIO_PASS=output_stationary_basic",
-    ),
-)
+# basic_tile_flow and output_stationary_basic have migrated to
+# tests/gem5/npu/testcases/mpu/*.
 add_mpu_test(
     "mpu_ab_auto_release_current_stage",
     "ab_auto_release_current_stage",

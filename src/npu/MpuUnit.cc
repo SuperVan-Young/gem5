@@ -162,6 +162,10 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
     fatal_if(memSidePorts.empty() || memSidePorts.size() > 2,
              "%s: MpuUnit requires one or two mem_side ports", name());
 
+    // Rebuild issue queues after base construction so MPU's override takes
+    // effect; virtual dispatch does not apply during base-class construction.
+    issueQueues = buildIssueQueues();
+
     busyStateKnown = true;
     busyState = false;
     busyStateChangeTick = 0;
@@ -390,7 +394,8 @@ MpuUnit::validateMvout(const ParsedCmd &cmd) const
 }
 
 void
-MpuUnit::validateCommand(const ParsedCmd &cmd) const
+MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
+                         const ParsedCmd &cmd) const
 {
     panic_if(cmd.header.deviceType != MpuDeviceType,
              "%s: unexpected device_type=%u for MPU command", name(),
@@ -406,18 +411,19 @@ MpuUnit::validateCommand(const ParsedCmd &cmd) const
              "%s: dimensions m=%u n=%u exceed array_dim=%u", name(),
              cmd.m, cmd.n, arrayDim);
 
-    panic_if(extractWord(activeCmd, ReadMaskWord) != 0,
+    panic_if(extractWord(rawCmd, ReadMaskWord) != 0,
              "%s: MPU commands require readMask == 0", name());
-    panic_if(extractWord(activeCmd, WriteMaskWord) != 0,
+    panic_if(extractWord(rawCmd, WriteMaskWord) != 0,
              "%s: MPU commands require writeMask == 0", name());
-    panic_if(extractWord(activeCmd, RepetitionWord) > 1,
-             "%s: MPU commands only support repetition <= 1 in the current stage",
+    panic_if(extractWord(rawCmd, RepetitionWord) > 1,
+             "%s: MPU commands only support repetition <= 1 "
+             "in the current stage",
              name());
-    panic_if(extractWord(activeCmd, ReservedWord) != 0,
+    panic_if(extractWord(rawCmd, ReservedWord) != 0,
              "%s: MPU commands require reserved word 4 == 0", name());
-    panic_if(cmd.flags != 0 || extractWord(activeCmd, ReservedWord13) != 0 ||
-                 extractWord(activeCmd, ReservedWord14) != 0 ||
-                 extractWord(activeCmd, ReservedWord15) != 0,
+    panic_if(cmd.flags != 0 || extractWord(rawCmd, ReservedWord13) != 0 ||
+                 extractWord(rawCmd, ReservedWord14) != 0 ||
+                 extractWord(rawCmd, ReservedWord15) != 0,
              "%s: MPU command reserved words must be zero", name());
 
     switch (cmd.kind) {
@@ -449,7 +455,6 @@ MpuUnit::resetCommandStructures()
                  !drainUopQueue.empty(),
              "%s: per-command uop queues must be empty at command start",
              name());
-    pendingMemWindow = PendingMemWindow{};
 }
 
 void
@@ -566,34 +571,66 @@ MpuUnit::selectedCBuffer(uint8_t index) const
 }
 
 void
-MpuUnit::beginMemWindow()
+MpuUnit::beginMemWindow(MpuMacroRuntime &runtime)
 {
-    pendingMemWindow.active = true;
-    pendingMemWindow.startTick = curTick();
-    pendingMemWindow.lastRespTick = curTick();
+    runtime.memWindow.active = true;
+    runtime.memWindow.startTick = curTick();
+    runtime.memWindow.lastRespTick = curTick();
 }
 
 void
-MpuUnit::observeMemResponse()
+MpuUnit::observeMemResponse(MpuMacroRuntime &runtime)
 {
-    if (!pendingMemWindow.active) {
+    if (!runtime.memWindow.active) {
         return;
     }
-    pendingMemWindow.lastRespTick = curTick();
+    runtime.memWindow.lastRespTick = curTick();
 }
 
 void
-MpuUnit::finalizeMemWindow()
+MpuUnit::finalizeMemWindow(MpuMacroRuntime &runtime)
 {
-    if (!pendingMemWindow.active) {
+    if (!runtime.memWindow.active) {
         return;
     }
 
-    if (pendingMemWindow.lastRespTick >= pendingMemWindow.startTick) {
+    if (runtime.memWindow.lastRespTick >= runtime.memWindow.startTick) {
         stats.stallCyclesWaitingForSpm += static_cast<uint64_t>(ticksToCycles(
-            pendingMemWindow.lastRespTick - pendingMemWindow.startTick));
+            runtime.memWindow.lastRespTick - runtime.memWindow.startTick));
     }
-    pendingMemWindow = PendingMemWindow{};
+    runtime.memWindow = PendingMemWindow{};
+}
+
+PortID
+MpuUnit::mvinPortId() const
+{
+    return 0;
+}
+
+PortID
+MpuUnit::mvoutPortId() const
+{
+    return memSidePorts.size() > 1 ? 1 : 0;
+}
+
+MpuUnit::MpuMacroRuntime &
+MpuUnit::runtimeFor(uint64_t macroCmdId)
+{
+    auto it = macroRuntimes.find(macroCmdId);
+    panic_if(it == macroRuntimes.end(),
+             "%s: missing MPU macro runtime for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmdId));
+    return it->second;
+}
+
+const MpuUnit::MpuMacroRuntime &
+MpuUnit::runtimeFor(uint64_t macroCmdId) const
+{
+    auto it = macroRuntimes.find(macroCmdId);
+    panic_if(it == macroRuntimes.end(),
+             "%s: missing MPU macro runtime for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmdId));
+    return it->second;
 }
 
 void
@@ -724,13 +761,8 @@ MpuUnit::serializeCRow(const CBufferSlot &slot, uint32_t row) const
 }
 
 void
-MpuUnit::pushQueueEntryForCurrentCmd()
+MpuUnit::pushQueueEntry(const ParsedCmd &cmd)
 {
-    panic_if(!parsedCurrentCmd.has_value(),
-             "%s: pushQueueEntryForCurrentCmd requires a parsed command",
-             name());
-
-    const ParsedCmd &cmd = *parsedCurrentCmd;
     QueueEntry entry{cmd.kind, cmd.bufferKind, cmd.bufferIndex,
                      cmd.m, cmd.n, cmd.k};
 
@@ -760,28 +792,26 @@ MpuUnit::pushQueueEntryForCurrentCmd()
 }
 
 void
-MpuUnit::popQueueEntryForCurrentCmd()
+MpuUnit::popQueueEntry(const ParsedCmd &cmd)
 {
-    if (parsedCurrentCmd) {
-        switch (parsedCurrentCmd->kind) {
-          case CmdKind::Mvin:
-          case CmdKind::Mvout:
-            if (!memUopQueue.empty()) {
-                memUopQueue.pop_front();
-            }
-            break;
-          case CmdKind::Load:
-          case CmdKind::Compute:
-            if (!execUopQueue.empty()) {
-                execUopQueue.pop_front();
-            }
-            break;
-          case CmdKind::Drain:
-            if (!drainUopQueue.empty()) {
-                drainUopQueue.pop_front();
-            }
-            break;
+    switch (cmd.kind) {
+      case CmdKind::Mvin:
+      case CmdKind::Mvout:
+        if (!memUopQueue.empty()) {
+            memUopQueue.pop_front();
         }
+        break;
+      case CmdKind::Load:
+      case CmdKind::Compute:
+        if (!execUopQueue.empty()) {
+            execUopQueue.pop_front();
+        }
+        break;
+      case CmdKind::Drain:
+        if (!drainUopQueue.empty()) {
+            drainUopQueue.pop_front();
+        }
+        break;
     }
 
     if (!macroCmdFifo.empty()) {
@@ -790,59 +820,105 @@ MpuUnit::popQueueEntryForCurrentCmd()
 }
 
 void
-MpuUnit::startExecuteCommand(const std::vector<uint8_t> &cmd)
+MpuUnit::appendMvinRowUop(MacroCmdContext &macroCmd,
+                          MpuMacroRuntime &runtime)
 {
-    const ParsedCmd parsed = parseCommand(cmd);
-    pendingParsedCmd = parsed;
-    activeCmd = cmd;
-    validateCommand(parsed);
+    const ParsedCmd &cmd = runtime.parsed;
+    const uint32_t row = runtime.nextMemRow;
+    panic_if(row >= expectedRows(cmd),
+             "%s: mvin row index %u is out of range", name(), row);
+    if (row == 0) {
+        beginMemWindow(runtime);
+    }
 
-    DPRINTF(MpuUnit,
-            "command accepted kind=%u buffer=%u idx=%u dims=(%u,%u,%u) "
-            "spm=%#llx stride=%u\n",
-            static_cast<unsigned>(parsed.kind),
-            static_cast<unsigned>(parsed.bufferKind),
-            parsed.bufferIndex, parsed.m, parsed.n, parsed.k,
-            static_cast<unsigned long long>(parsed.spmAddr),
-            parsed.strideBytes);
-
-    SpecializedExecutionUnit::startExecuteCommand(cmd);
+    appendLoadUop(macroCmd,
+                  cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes,
+                  expectedRowBytes(cmd));
+    macroCmd.uopQueue.back().portId = mvinPortId();
+    macroCmd.uopQueue.back().token = row;
+    runtime.nextMemRow++;
 }
 
 void
-MpuUnit::onCommandBegin(ActiveExecution &exec)
+MpuUnit::appendMvoutRowUop(MacroCmdContext &macroCmd,
+                           MpuMacroRuntime &runtime)
 {
-    panic_if(!pendingParsedCmd.has_value(),
-             "%s: missing pending parsed command at command begin",
-             name());
+    const ParsedCmd &cmd = runtime.parsed;
+    const uint32_t row = runtime.nextMemRow;
+    panic_if(row >= cmd.m, "%s: mvout row index %u is out of range",
+             name(), row);
+    if (row == 0) {
+        beginMemWindow(runtime);
+    }
 
-    parsedCurrentCmd = pendingParsedCmd;
-    pendingParsedCmd.reset();
+    appendStoreUop(macroCmd,
+                   cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes,
+                   cmd.n * sizeof(int32_t),
+                   serializeCRow(selectedCBuffer(cmd.bufferIndex), row));
+    macroCmd.uopQueue.back().portId = mvoutPortId();
+    macroCmd.uopQueue.back().token = row;
+    runtime.nextMemRow++;
+}
+
+MpuUnit::MacroCmdKind
+MpuUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
+{
+    switch (parseCommand(cmd).kind) {
+      case CmdKind::Mvin:
+        return MacroCmdKind::Load;
+      case CmdKind::Mvout:
+        return MacroCmdKind::Store;
+      case CmdKind::Load:
+      case CmdKind::Compute:
+      case CmdKind::Drain:
+        return MacroCmdKind::Exec;
+    }
+
+    panic("%s: unsupported MPU command kind in classifyMacroCmd", name());
+}
+
+uint32_t
+MpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                            MacroCmdKind kind) const
+{
+    (void)cmd;
+    (void)kind;
+    return 0;
+}
+
+std::vector<SpecializedExecutionUnit::IssueQueueState>
+MpuUnit::buildIssueQueues() const
+{
+    return {{0, IssueQueueKind::Exec, {}, {}, PortID(0)}};
+}
+
+void
+MpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
+{
     resetCommandStructures();
-    pushQueueEntryForCurrentCmd();
-    commandStartTick = curTick();
+
+    MpuMacroRuntime runtime;
+    runtime.parsed = parseCommand(macroCmd.cmd);
+    validateCommand(macroCmd.cmd, runtime.parsed);
+    runtime.commandStartTick = curTick();
+
+    const ParsedCmd &cmd = runtime.parsed;
+    pushQueueEntry(cmd);
+    macroRuntimes.emplace(macroCmd.macroCmdId, runtime);
     updateBusyAccounting(true);
 
-    const ParsedCmd &cmd = *parsedCurrentCmd;
     switch (cmd.kind) {
-      case CmdKind::Mvin:
-        if (cmd.bufferKind == BufferKind::A) {
-            ABBufferSlot &slot = aBuffers[cmd.bufferIndex];
-            slot.reset();
-            slot.state = BufferState::LoadingFromSpm;
-            slot.data.resize(requiredBytes(cmd), 0);
-        } else {
-            ABBufferSlot &slot = bBuffers[cmd.bufferIndex];
-            slot.reset();
-            slot.state = BufferState::LoadingFromSpm;
-            slot.data.resize(requiredBytes(cmd), 0);
-        }
+      case CmdKind::Mvin: {
+        ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
+        slot.reset();
+        slot.state = BufferState::LoadingFromSpm;
+        slot.data.resize(requiredBytes(cmd), 0);
         break;
+      }
       case CmdKind::Load:
         break;
       case CmdKind::Compute:
         outputStorage.reset();
-        outputStorage.state = OutputStorageState::Empty;
         break;
       case CmdKind::Drain:
         cBuffers[cmd.bufferIndex].reset();
@@ -855,95 +931,33 @@ MpuUnit::onCommandBegin(ActiveExecution &exec)
 
     refreshScoreboard();
     DPRINTF(MpuUnit,
-            "begin kind=%u macro_fifo=%llu mem_q=%llu exec_q=%llu drain_q=%llu\n",
+            "begin kind=%u macro=%llu macro_fifo=%llu mem_q=%llu exec_q=%llu "
+            "drain_q=%llu\n",
             static_cast<unsigned>(cmd.kind),
+            static_cast<unsigned long long>(macroCmd.macroCmdId),
             static_cast<unsigned long long>(macroFifoOccupancy()),
             static_cast<unsigned long long>(memUopQueueOccupancy()),
             static_cast<unsigned long long>(execUopQueueOccupancy()),
             static_cast<unsigned long long>(drainUopQueueOccupancy()));
-    (void)exec;
 }
 
 void
-MpuUnit::buildMvinRequests(ActiveExecution &exec,
-                           std::vector<MemRequestDesc> &reqs)
+MpuUnit::buildUops(MacroCmdContext &macroCmd)
 {
-    (void)exec;
-    if (!parsedCurrentCmd || parsedCurrentCmd->kind != CmdKind::Mvin) {
-        return;
-    }
+    auto &runtime = runtimeFor(macroCmd.macroCmdId);
+    const ParsedCmd &cmd = runtime.parsed;
 
-    const ParsedCmd &cmd = *parsedCurrentCmd;
-    const uint32_t rows = expectedRows(cmd);
-    const uint32_t rowBytes = expectedRowBytes(cmd);
-    const PortID port = 0;
-
-    for (uint32_t row = 0; row < rows; ++row) {
-        MemRequestDesc desc;
-        desc.portId = port;
-        desc.addr = cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes;
-        desc.size = rowBytes;
-        reqs.push_back(desc);
-    }
-
-    if (!reqs.empty()) {
-        beginMemWindow();
-    }
-}
-
-void
-MpuUnit::onMvinResponse(ActiveExecution &exec,
-                        const MemTxnContext &txn,
-                        PacketPtr pkt)
-{
-    (void)exec;
-    if (!parsedCurrentCmd || parsedCurrentCmd->kind != CmdKind::Mvin) {
-        return;
-    }
-
-    observeMemResponse();
-
-    const ParsedCmd &cmd = *parsedCurrentCmd;
-    const uint32_t rowBytes = expectedRowBytes(cmd);
-    const uint32_t row =
-        static_cast<uint32_t>((txn.addr - cmd.spmAddr) / cmd.strideBytes);
-    const uint8_t *src = pkt->getConstPtr<uint8_t>();
-
-    ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
-    const size_t offset = static_cast<size_t>(row) * rowBytes;
-    panic_if(offset + rowBytes > slot.data.size(),
-             "%s: mvin row write overflows destination buffer", name());
-    std::memcpy(reinterpret_cast<uint8_t *>(slot.data.data()) + offset,
-                src, rowBytes);
-
-    if (cmd.bufferKind == BufferKind::A) {
-        stats.totalABytesIn += rowBytes;
-    } else {
-        stats.totalBBytesIn += rowBytes;
-    }
-
-    DPRINTF(MpuUnit,
-            "mvin response row=%u addr=%#llx size=%u buffer=%u idx=%u\n",
-            row, static_cast<unsigned long long>(txn.addr), txn.size,
-            static_cast<unsigned>(cmd.bufferKind), cmd.bufferIndex);
-}
-
-Tick
-MpuUnit::execute(ActiveExecution &exec)
-{
-    (void)exec;
-    panic_if(!parsedCurrentCmd, "%s: execute requires a parsed command",
-             name());
-
-    const ParsedCmd &cmd = *parsedCurrentCmd;
     switch (cmd.kind) {
       case CmdKind::Mvin:
-        return mvinRequestLatency;
+        appendMvinRowUop(macroCmd, runtime);
+        break;
       case CmdKind::Mvout:
-        return mvoutRequestLatency;
+        appendMvoutRowUop(macroCmd, runtime);
+        break;
       case CmdKind::Load:
-        return loadLatencyBase;
-      case CmdKind::Compute: {
+        appendExecUop(macroCmd, loadLatencyBase);
+        break;
+      case CmdKind::Compute:
         outputStorage.reset();
         outputStorage.state = OutputStorageState::Active;
         outputStorage.m = cmd.m;
@@ -956,86 +970,98 @@ MpuUnit::execute(ActiveExecution &exec)
         DPRINTF(MpuUnit,
                 "compute start dims=(%u,%u,%u) latency_cycles=%llu\n",
                 cmd.m, cmd.n, cmd.k,
-                static_cast<unsigned long long>(lastComputeLatencyCyclesValue));
-        return (static_cast<Tick>(cmd.k) + cmd.m) * clockPeriod();
-      }
+                static_cast<unsigned long long>(
+                    lastComputeLatencyCyclesValue));
+        appendExecUop(macroCmd,
+                      (static_cast<Tick>(cmd.k) + cmd.m) * clockPeriod());
+        break;
       case CmdKind::Drain:
-        return drainLatencyBase +
-               static_cast<Tick>(cmd.m) * cmd.n * clockPeriod();
+        appendExecUop(macroCmd,
+                      drainLatencyBase +
+                      static_cast<Tick>(cmd.m) * cmd.n * clockPeriod());
+        break;
     }
 
-    panic("%s: execute reached unknown command kind", name());
-}
-
-void
-MpuUnit::buildMvoutRequests(ActiveExecution &exec,
-                            std::vector<MemRequestDesc> &reqs)
-{
-    (void)exec;
-    if (!parsedCurrentCmd || parsedCurrentCmd->kind != CmdKind::Mvout) {
-        return;
-    }
-
-    const ParsedCmd &cmd = *parsedCurrentCmd;
-    const CBufferSlot &slot = selectedCBuffer(cmd.bufferIndex);
-    const PortID port = memSidePorts.size() > 1 ? 1 : 0;
-
-    for (uint32_t row = 0; row < cmd.m; ++row) {
-        MemRequestDesc desc;
-        desc.portId = port;
-        desc.addr = cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes;
-        desc.size = cmd.n * sizeof(int32_t);
-        desc.data = serializeCRow(slot, row);
-        reqs.push_back(desc);
-    }
-
-    if (!reqs.empty()) {
-        beginMemWindow();
+    if (macroCmd.uopQueue.empty()) {
+        markEpiloguePending(macroCmd);
     }
 }
 
 void
-MpuUnit::onMvoutResponse(ActiveExecution &exec,
-                         const MemTxnContext &txn,
-                         PacketPtr pkt)
+MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
+                          const MemTxnContext &txn, PacketPtr pkt)
 {
-    (void)exec;
-    (void)pkt;
-    if (!parsedCurrentCmd || parsedCurrentCmd->kind != CmdKind::Mvout) {
-        return;
-    }
+    auto &runtime = runtimeFor(macroCmd.macroCmdId);
+    const ParsedCmd &cmd = runtime.parsed;
 
-    observeMemResponse();
-    stats.totalCBytesOut += txn.size;
-    DPRINTF(MpuUnit,
-            "mvout response addr=%#llx size=%u idx=%u\n",
-            static_cast<unsigned long long>(txn.addr), txn.size,
-            parsedCurrentCmd->bufferIndex);
+    switch (cmd.kind) {
+      case CmdKind::Mvin: {
+        observeMemResponse(runtime);
+        const uint32_t row = static_cast<uint32_t>(txn.token);
+        const uint32_t rowBytes = expectedRowBytes(cmd);
+        const uint8_t *src = pkt->getConstPtr<uint8_t>();
+        ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
+        const size_t offset = static_cast<size_t>(row) * rowBytes;
+        panic_if(offset + rowBytes > slot.data.size(),
+                 "%s: mvin row write overflows destination buffer", name());
+        std::memcpy(reinterpret_cast<uint8_t *>(slot.data.data()) + offset,
+                    src, rowBytes);
+
+        if (cmd.bufferKind == BufferKind::A) {
+            stats.totalABytesIn += rowBytes;
+        } else {
+            stats.totalBBytesIn += rowBytes;
+        }
+
+        DPRINTF(MpuUnit,
+                "mvin response row=%u addr=%#llx size=%u buffer=%u idx=%u\n",
+                row, static_cast<unsigned long long>(txn.addr), txn.size,
+                static_cast<unsigned>(cmd.bufferKind), cmd.bufferIndex);
+
+        if (runtime.nextMemRow < expectedRows(cmd)) {
+            appendMvinRowUop(macroCmd, runtime);
+        } else {
+            transitionABufferToFull(slot, cmd);
+            finalizeMemWindow(runtime);
+            refreshScoreboard();
+            markEpiloguePending(macroCmd);
+        }
+        break;
+      }
+      case CmdKind::Mvout:
+        observeMemResponse(runtime);
+        stats.totalCBytesOut += txn.size;
+        DPRINTF(MpuUnit,
+                "mvout response row=%llu addr=%#llx size=%u idx=%u\n",
+                static_cast<unsigned long long>(txn.token),
+                static_cast<unsigned long long>(txn.addr), txn.size,
+                cmd.bufferIndex);
+        if (runtime.nextMemRow < cmd.m) {
+            appendMvoutRowUop(macroCmd, runtime);
+        } else {
+            finalizeMemWindow(runtime);
+            markEpiloguePending(macroCmd);
+        }
+        break;
+      case CmdKind::Load:
+      case CmdKind::Compute:
+      case CmdKind::Drain:
+        break;
+    }
 }
 
 void
-MpuUnit::onMicroOpComplete(ActiveExecution &exec,
-                           const MicroOpContext &ctx,
-                           PacketPtr pkt)
+MpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
+                           const MicroOpContext &uop)
 {
-    (void)exec;
-    (void)pkt;
-    if (!parsedCurrentCmd) {
-        return;
-    }
+    auto &runtime = runtimeFor(macroCmd.macroCmdId);
+    const ParsedCmd &cmd = runtime.parsed;
 
-    const ParsedCmd &cmd = *parsedCurrentCmd;
-    if (ctx.kind != MicroOpContext::Kind::Exec) {
+    if (uop.kind != MicroOpContext::Kind::Exec) {
         return;
     }
 
     switch (cmd.kind) {
-      case CmdKind::Mvin: {
-        ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
-        transitionABufferToFull(slot, cmd);
-        finalizeMemWindow();
-        break;
-      }
       case CmdKind::Load: {
         ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
         transitionABufferToLoaded(slot, cmd);
@@ -1047,8 +1073,8 @@ MpuUnit::onMicroOpComplete(ActiveExecution &exec,
       case CmdKind::Drain:
         performDrain(cmd);
         break;
+      case CmdKind::Mvin:
       case CmdKind::Mvout:
-        finalizeMemWindow();
         break;
     }
 
@@ -1057,17 +1083,17 @@ MpuUnit::onMicroOpComplete(ActiveExecution &exec,
             "uop complete kind=%u a=(%d,%d) b=(%d,%d) out=%d\n",
             static_cast<unsigned>(cmd.kind), aBufferState(0), aBufferState(1),
             bBufferState(0), bBufferState(1), outputStorageStateCode());
+    markEpiloguePending(macroCmd);
 }
 
 void
-MpuUnit::epilogue(ActiveExecution &exec)
+MpuUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 {
-    (void)exec;
-    if (!parsedCurrentCmd) {
-        return;
-    }
-
-    const ParsedCmd &cmd = *parsedCurrentCmd;
+    const auto it = macroRuntimes.find(macroCmd.macroCmdId);
+    panic_if(it == macroRuntimes.end(),
+             "%s: missing MPU runtime during epilogue for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
+    const ParsedCmd &cmd = it->second.parsed;
     switch (cmd.kind) {
       case CmdKind::Mvin:
         stats.mvinCmdCount++;
@@ -1082,15 +1108,16 @@ MpuUnit::epilogue(ActiveExecution &exec)
         stats.drainCmdCount++;
         break;
       case CmdKind::Mvout:
-        finalizeMemWindow();
+        finalizeMemWindow(macroRuntimes.at(macroCmd.macroCmdId));
         cBuffers[cmd.bufferIndex].reset();
         stats.mvoutCmdCount++;
         break;
     }
 
-    lastCommandLatencyCyclesValue = elapsedCyclesSince(commandStartTick);
-    popQueueEntryForCurrentCmd();
-    parsedCurrentCmd.reset();
+    lastCommandLatencyCyclesValue =
+        elapsedCyclesSince(it->second.commandStartTick);
+    popQueueEntry(cmd);
+    macroRuntimes.erase(it);
     refreshScoreboard();
     updateBusyAccounting(false);
 
@@ -1239,10 +1266,10 @@ MpuUnit::lastCommandLatencyCycles() const
 int
 MpuUnit::currentCmdKind() const
 {
-    if (!parsedCurrentCmd) {
+    if (macroRuntimes.empty()) {
         return -1;
     }
-    return static_cast<int>(parsedCurrentCmd->kind);
+    return static_cast<int>(macroRuntimes.begin()->second.parsed.kind);
 }
 
 int

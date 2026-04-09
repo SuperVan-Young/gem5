@@ -34,6 +34,7 @@
 #include <deque>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "base/statistics.hh"
@@ -171,6 +172,14 @@ class MpuUnit : public SpecializedExecutionUnit
         Tick lastRespTick = 0;
     };
 
+    struct MpuMacroRuntime
+    {
+        ParsedCmd parsed;
+        Tick commandStartTick = 0;
+        PendingMemWindow memWindow;
+        uint32_t nextMemRow = 0;
+    };
+
     struct MpuStats : public statistics::Group
     {
         MpuStats(statistics::Group *parent);
@@ -213,9 +222,6 @@ class MpuUnit : public SpecializedExecutionUnit
     const Tick loadLatencyBase;
     const Tick drainLatencyBase;
 
-    std::optional<ParsedCmd> parsedCurrentCmd;
-    std::optional<ParsedCmd> pendingParsedCmd;
-
     std::array<ABBufferSlot, 2> aBuffers;
     std::array<ABBufferSlot, 2> bBuffers;
     std::array<CBufferSlot, 2> cBuffers;
@@ -233,15 +239,15 @@ class MpuUnit : public SpecializedExecutionUnit
     bool busyStateKnown = false;
     bool busyState = false;
 
-    Tick commandStartTick = 0;
     uint64_t lastCommandLatencyCyclesValue = 0;
     uint64_t lastComputeLatencyCyclesValue = 0;
 
-    PendingMemWindow pendingMemWindow;
+    std::unordered_map<uint64_t, MpuMacroRuntime> macroRuntimes;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
-    void validateCommand(const ParsedCmd &cmd) const;
+    void validateCommand(const std::vector<uint8_t> &rawCmd,
+                         const ParsedCmd &cmd) const;
     void validateMvin(const ParsedCmd &cmd) const;
     void validateLoad(const ParsedCmd &cmd) const;
     void validateCompute(const ParsedCmd &cmd) const;
@@ -249,8 +255,8 @@ class MpuUnit : public SpecializedExecutionUnit
     void validateMvout(const ParsedCmd &cmd) const;
 
     void resetCommandStructures();
-    void pushQueueEntryForCurrentCmd();
-    void popQueueEntryForCurrentCmd();
+    void pushQueueEntry(const ParsedCmd &cmd);
+    void popQueueEntry(const ParsedCmd &cmd);
     void refreshScoreboard();
     void updateBusyAccounting(bool now_busy);
     uint64_t elapsedCyclesSince(Tick start) const;
@@ -266,10 +272,17 @@ class MpuUnit : public SpecializedExecutionUnit
     uint32_t expectedCols(const ParsedCmd &cmd) const;
     uint32_t expectedRowBytes(const ParsedCmd &cmd) const;
     uint32_t requiredBytes(const ParsedCmd &cmd) const;
+    PortID mvinPortId() const;
+    PortID mvoutPortId() const;
     void validateSpmWindow(const ParsedCmd &cmd) const;
-    void beginMemWindow();
-    void observeMemResponse();
-    void finalizeMemWindow();
+    void beginMemWindow(MpuMacroRuntime &runtime);
+    void observeMemResponse(MpuMacroRuntime &runtime);
+    void finalizeMemWindow(MpuMacroRuntime &runtime);
+    MpuMacroRuntime &runtimeFor(uint64_t macroCmdId);
+    const MpuMacroRuntime &runtimeFor(uint64_t macroCmdId) const;
+    void appendMvinRowUop(MacroCmdContext &macroCmd, MpuMacroRuntime &runtime);
+    void appendMvoutRowUop(MacroCmdContext &macroCmd,
+                           MpuMacroRuntime &runtime);
 
     void transitionABufferToFull(ABBufferSlot &slot, const ParsedCmd &cmd);
     void transitionABufferToLoaded(ABBufferSlot &slot, const ParsedCmd &cmd);
@@ -282,23 +295,18 @@ class MpuUnit : public SpecializedExecutionUnit
                                        uint32_t row) const;
 
   protected:
-    void startExecuteCommand(const std::vector<uint8_t> &cmd) override;
-    void onCommandBegin(ActiveExecution &exec) override;
-    void buildMvinRequests(ActiveExecution &exec,
-                           std::vector<MemRequestDesc> &reqs) override;
-    void onMvinResponse(ActiveExecution &exec,
-                        const MemTxnContext &txn,
-                        PacketPtr pkt) override;
-    Tick execute(ActiveExecution &exec) override;
-    void buildMvoutRequests(ActiveExecution &exec,
-                            std::vector<MemRequestDesc> &reqs) override;
-    void onMvoutResponse(ActiveExecution &exec,
-                         const MemTxnContext &txn,
-                         PacketPtr pkt) override;
-    void onMicroOpComplete(ActiveExecution &exec,
-                           const MicroOpContext &ctx,
-                           PacketPtr pkt) override;
-    void epilogue(ActiveExecution &exec) override;
+    MacroCmdKind classifyMacroCmd(
+        const std::vector<uint8_t> &cmd) const override;
+    uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
+                                MacroCmdKind kind) const override;
+    std::vector<IssueQueueState> buildIssueQueues() const override;
+    void onMacroCmdBegin(MacroCmdContext &macroCmd) override;
+    void buildUops(MacroCmdContext &macroCmd) override;
+    void onMemUopComplete(MacroCmdContext &macroCmd,
+                          const MemTxnContext &txn, PacketPtr pkt) override;
+    void onExecUopComplete(MacroCmdContext &macroCmd,
+                           const MicroOpContext &uop) override;
+    void onMacroCmdEnd(MacroCmdContext &macroCmd) override;
 
   public:
     MpuUnit(const MpuUnitParams &params);
