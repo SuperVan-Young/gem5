@@ -22,8 +22,15 @@ parser.add_argument("--scenario", required=True)
 args = parser.parse_args()
 
 spm_size = 64 * 1024
-spm_bandwidth = "1GiB/s" if args.scenario == "spm_backpressure" else "100GiB/s"
-spm_latency = "20ns" if args.scenario == "spm_backpressure" else "10ns"
+if args.scenario == "spm_backpressure":
+    spm_bandwidth = "1GiB/s"
+    spm_latency = "20ns"
+elif args.scenario == "prefetch_compute_overlap":
+    spm_bandwidth = "1GiB/s"
+    spm_latency = "100us"
+else:
+    spm_bandwidth = "100GiB/s"
+    spm_latency = "10ns"
 mem_ranges = [
     AddrRange(0, size=0x60000000),
     AddrRange(0x60000000, size=spm_size),
@@ -90,7 +97,8 @@ print(
     f"spm_wait={active_mpu.stallCyclesWaitingForSpm()} "
     f"macs={active_mpu.totalMacOps()} "
     f"busy={active_mpu.busyCycles()} "
-    f"idle={active_mpu.idleCycles()}"
+    f"idle={active_mpu.idleCycles()} "
+    f"max_active_uops={active_mpu.maxActiveMicroOps()}"
 )
 
 if args.scenario == "multi_instance_route":

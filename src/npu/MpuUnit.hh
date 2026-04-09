@@ -172,12 +172,20 @@ class MpuUnit : public SpecializedExecutionUnit
         Tick lastRespTick = 0;
     };
 
+    enum class PendingExecAction : uint8_t
+    {
+        None = 0,
+        LoadRetry,
+        LoadCommit,
+    };
+
     struct MpuMacroRuntime
     {
         ParsedCmd parsed;
         Tick commandStartTick = 0;
         PendingMemWindow memWindow;
         uint32_t nextMemRow = 0;
+        PendingExecAction pendingExecAction = PendingExecAction::None;
     };
 
     struct MpuStats : public statistics::Group
@@ -230,10 +238,10 @@ class MpuUnit : public SpecializedExecutionUnit
     OutputStorage outputStorage;
     ScoreboardState scoreboard;
 
-    std::deque<QueueEntry> macroCmdFifo;
-    std::deque<QueueEntry> memUopQueue;
-    std::deque<QueueEntry> execUopQueue;
-    std::deque<QueueEntry> drainUopQueue;
+    std::unordered_map<uint64_t, QueueEntry> macroCmdFifo;
+    std::unordered_map<uint64_t, QueueEntry> memUopQueue;
+    std::unordered_map<uint64_t, QueueEntry> execUopQueue;
+    std::unordered_map<uint64_t, QueueEntry> drainUopQueue;
 
     Tick busyStateChangeTick = 0;
     bool busyStateKnown = false;
@@ -249,14 +257,15 @@ class MpuUnit : public SpecializedExecutionUnit
     void validateCommand(const std::vector<uint8_t> &rawCmd,
                          const ParsedCmd &cmd) const;
     void validateMvin(const ParsedCmd &cmd) const;
-    void validateLoad(const ParsedCmd &cmd) const;
+    void validateLoadStatic(const ParsedCmd &cmd) const;
     void validateCompute(const ParsedCmd &cmd) const;
     void validateDrain(const ParsedCmd &cmd) const;
     void validateMvout(const ParsedCmd &cmd) const;
+    bool loadReady(const ParsedCmd &cmd) const;
 
     void resetCommandStructures();
-    void pushQueueEntry(const ParsedCmd &cmd);
-    void popQueueEntry(const ParsedCmd &cmd);
+    void pushQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd);
+    void popQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd);
     void refreshScoreboard();
     void updateBusyAccounting(bool now_busy);
     uint64_t elapsedCyclesSince(Tick start) const;
@@ -283,6 +292,8 @@ class MpuUnit : public SpecializedExecutionUnit
     void appendMvinRowUop(MacroCmdContext &macroCmd, MpuMacroRuntime &runtime);
     void appendMvoutRowUop(MacroCmdContext &macroCmd,
                            MpuMacroRuntime &runtime);
+    void appendLoadProgressUop(MacroCmdContext &macroCmd,
+                               MpuMacroRuntime &runtime);
 
     void transitionABufferToFull(ABBufferSlot &slot, const ParsedCmd &cmd);
     void transitionABufferToLoaded(ABBufferSlot &slot, const ParsedCmd &cmd);

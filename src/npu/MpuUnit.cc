@@ -56,6 +56,8 @@ constexpr size_t FlagsWord = 12;
 constexpr size_t ReservedWord13 = 13;
 constexpr size_t ReservedWord14 = 14;
 constexpr size_t ReservedWord15 = 15;
+constexpr uint32_t ExecIssueQueueId = 0;
+constexpr uint32_t PrefetchIssueQueueId = 1;
 
 } // namespace
 
@@ -320,15 +322,24 @@ MpuUnit::validateMvin(const ParsedCmd &cmd) const
 }
 
 void
-MpuUnit::validateLoad(const ParsedCmd &cmd) const
+MpuUnit::validateLoadStatic(const ParsedCmd &cmd) const
 {
     panic_if(cmd.bufferKind == BufferKind::C,
              "%s: load(C) is not supported in MPU v1.1", name());
     panic_if(cmd.bufferKind == BufferKind::Reserved,
              "%s: load requires an A or B source buffer", name());
+}
 
+bool
+MpuUnit::loadReady(const ParsedCmd &cmd) const
+{
     const ABBufferSlot &slot = selectedABuffer(cmd.bufferKind,
                                                cmd.bufferIndex);
+    if (slot.state == BufferState::Empty ||
+        slot.state == BufferState::LoadingFromSpm) {
+        return false;
+    }
+
     panic_if(slot.state != BufferState::Full,
              "%s: load requires a FULL source buffer", name());
     panic_if(slot.rows != expectedRows(cmd) || slot.cols != expectedCols(cmd),
@@ -342,6 +353,7 @@ MpuUnit::validateLoad(const ParsedCmd &cmd) const
         panic_if(loadedB.valid,
                  "%s: loaded B source is already occupied", name());
     }
+    return true;
 }
 
 void
@@ -434,7 +446,7 @@ MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
         validateMvout(cmd);
         return;
       case CmdKind::Load:
-        validateLoad(cmd);
+        validateLoadStatic(cmd);
         return;
       case CmdKind::Compute:
         validateCompute(cmd);
@@ -451,10 +463,9 @@ MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
 void
 MpuUnit::resetCommandStructures()
 {
-    panic_if(!memUopQueue.empty() || !execUopQueue.empty() ||
-                 !drainUopQueue.empty(),
-             "%s: per-command uop queues must be empty at command start",
-             name());
+    // The SEU base owns the real per-macro uop queues. MPU's local queue
+    // structures are observational only and may remain populated while
+    // another issue queue is active.
 }
 
 void
@@ -761,12 +772,14 @@ MpuUnit::serializeCRow(const CBufferSlot &slot, uint32_t row) const
 }
 
 void
-MpuUnit::pushQueueEntry(const ParsedCmd &cmd)
+MpuUnit::pushQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd)
 {
     QueueEntry entry{cmd.kind, cmd.bufferKind, cmd.bufferIndex,
                      cmd.m, cmd.n, cmd.k};
 
-    macroCmdFifo.push_back(entry);
+    panic_if(!macroCmdFifo.emplace(macroCmdId, entry).second,
+             "%s: duplicate macro FIFO entry for macro %llu",
+             name(), static_cast<unsigned long long>(macroCmdId));
     panic_if(macroCmdFifo.size() > cmdQueueDepth,
              "%s: macro FIFO overflow", name());
 
@@ -775,48 +788,40 @@ MpuUnit::pushQueueEntry(const ParsedCmd &cmd)
       case CmdKind::Mvout:
         panic_if(memUopQueue.size() >= memUopQueueDepth,
                  "%s: mem uop queue overflow", name());
-        memUopQueue.push_back(entry);
+        memUopQueue.emplace(macroCmdId, entry);
         break;
       case CmdKind::Load:
       case CmdKind::Compute:
         panic_if(execUopQueue.size() >= execUopQueueDepth,
                  "%s: exec uop queue overflow", name());
-        execUopQueue.push_back(entry);
+        execUopQueue.emplace(macroCmdId, entry);
         break;
       case CmdKind::Drain:
         panic_if(drainUopQueue.size() >= drainUopQueueDepth,
                  "%s: drain uop queue overflow", name());
-        drainUopQueue.push_back(entry);
+        drainUopQueue.emplace(macroCmdId, entry);
         break;
     }
 }
 
 void
-MpuUnit::popQueueEntry(const ParsedCmd &cmd)
+MpuUnit::popQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd)
 {
     switch (cmd.kind) {
       case CmdKind::Mvin:
       case CmdKind::Mvout:
-        if (!memUopQueue.empty()) {
-            memUopQueue.pop_front();
-        }
+        memUopQueue.erase(macroCmdId);
         break;
       case CmdKind::Load:
       case CmdKind::Compute:
-        if (!execUopQueue.empty()) {
-            execUopQueue.pop_front();
-        }
+        execUopQueue.erase(macroCmdId);
         break;
       case CmdKind::Drain:
-        if (!drainUopQueue.empty()) {
-            drainUopQueue.pop_front();
-        }
+        drainUopQueue.erase(macroCmdId);
         break;
     }
 
-    if (!macroCmdFifo.empty()) {
-        macroCmdFifo.pop_front();
-    }
+    macroCmdFifo.erase(macroCmdId);
 }
 
 void
@@ -860,6 +865,21 @@ MpuUnit::appendMvoutRowUop(MacroCmdContext &macroCmd,
     runtime.nextMemRow++;
 }
 
+void
+MpuUnit::appendLoadProgressUop(MacroCmdContext &macroCmd,
+                               MpuMacroRuntime &runtime)
+{
+    const ParsedCmd &cmd = runtime.parsed;
+    if (loadReady(cmd)) {
+        runtime.pendingExecAction = PendingExecAction::LoadCommit;
+        appendExecUop(macroCmd, loadLatencyBase);
+        return;
+    }
+
+    runtime.pendingExecAction = PendingExecAction::LoadRetry;
+    appendExecUop(macroCmd, clockPeriod());
+}
+
 MpuUnit::MacroCmdKind
 MpuUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
 {
@@ -881,15 +901,18 @@ uint32_t
 MpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
                             MacroCmdKind kind) const
 {
-    (void)cmd;
     (void)kind;
-    return 0;
+    return parseCommand(cmd).kind == CmdKind::Mvin ?
+        PrefetchIssueQueueId : ExecIssueQueueId;
 }
 
 std::vector<SpecializedExecutionUnit::IssueQueueState>
 MpuUnit::buildIssueQueues() const
 {
-    return {{0, IssueQueueKind::Exec, {}, {}, PortID(0)}};
+    return {
+        {ExecIssueQueueId, IssueQueueKind::Exec, {}, {}, PortID(0)},
+        {PrefetchIssueQueueId, IssueQueueKind::Mem, {}, {}, mvinPortId()},
+    };
 }
 
 void
@@ -903,9 +926,9 @@ MpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
     runtime.commandStartTick = curTick();
 
     const ParsedCmd &cmd = runtime.parsed;
-    pushQueueEntry(cmd);
+    pushQueueEntry(macroCmd.macroCmdId, cmd);
     macroRuntimes.emplace(macroCmd.macroCmdId, runtime);
-    updateBusyAccounting(true);
+    updateBusyAccounting(!macroRuntimes.empty());
 
     switch (cmd.kind) {
       case CmdKind::Mvin: {
@@ -955,7 +978,7 @@ MpuUnit::buildUops(MacroCmdContext &macroCmd)
         appendMvoutRowUop(macroCmd, runtime);
         break;
       case CmdKind::Load:
-        appendExecUop(macroCmd, loadLatencyBase);
+        appendLoadProgressUop(macroCmd, runtime);
         break;
       case CmdKind::Compute:
         outputStorage.reset();
@@ -1063,6 +1086,16 @@ MpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
 
     switch (cmd.kind) {
       case CmdKind::Load: {
+        if (runtime.pendingExecAction == PendingExecAction::LoadRetry) {
+            stats.stallCyclesBufferHazard++;
+            appendLoadProgressUop(macroCmd, runtime);
+            return;
+        }
+        panic_if(runtime.pendingExecAction != PendingExecAction::LoadCommit,
+                 "%s: load macro %llu completed without a committed load uop",
+                 name(),
+                 static_cast<unsigned long long>(macroCmd.macroCmdId));
+        runtime.pendingExecAction = PendingExecAction::None;
         ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
         transitionABufferToLoaded(slot, cmd);
         break;
@@ -1116,10 +1149,10 @@ MpuUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 
     lastCommandLatencyCyclesValue =
         elapsedCyclesSince(it->second.commandStartTick);
-    popQueueEntry(cmd);
+    popQueueEntry(macroCmd.macroCmdId, cmd);
     macroRuntimes.erase(it);
     refreshScoreboard();
-    updateBusyAccounting(false);
+    updateBusyAccounting(!macroRuntimes.empty());
 
     DPRINTF(MpuUnit,
             "epilogue complete macro_fifo=%llu mem_q=%llu exec_q=%llu "

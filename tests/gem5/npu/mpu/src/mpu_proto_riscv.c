@@ -351,6 +351,41 @@ run_compute_latency(uint32_t device_id)
 }
 
 static int
+run_prefetch_compute_overlap(uint32_t device_id)
+{
+    const int8_t a0_values[4] = {1, 2, 3, 4};
+    const int8_t b0_values[4] = {2, -1, 0, 3};
+    const int8_t a1_values[4] = {-2, 1, 4, 0};
+    const int8_t b1_values[4] = {1, 3, -1, 2};
+    int32_t expected0[4];
+    int32_t expected1[4];
+
+    fill_matrix_i8(A0_SPM, 2, 2, 2, a0_values);
+    fill_matrix_i8(B0_SPM, 2, 2, 2, b0_values);
+    fill_matrix_i32(C0_SPM, 2, 2, 2 * sizeof(int32_t), -77);
+    compute_expected(a0_values, b0_values, 2, 2, 2, expected0);
+
+    fill_matrix_i8(A1_SPM, 2, 2, 2, a1_values);
+    fill_matrix_i8(B1_SPM, 2, 2, 2, b1_values);
+    fill_matrix_i32(C1_SPM, 2, 2, 2 * sizeof(int32_t), 55);
+    compute_expected(a1_values, b1_values, 2, 2, 2, expected1);
+
+    launch_mpu_episode(device_id, A0_SPM, B0_SPM, C0_SPM,
+                       2, 2, 2, 0, 0, 0);
+    launch_mpu_episode(device_id, A1_SPM, B1_SPM, C1_SPM,
+                       2, 2, 2, 1, 1, 1);
+
+    if (!spin_until_i32_match(C0_SPM, 2, 2, 2 * sizeof(int32_t), expected0)) {
+        return 0;
+    }
+    if (!spin_until_i32_match(C1_SPM, 2, 2, 2 * sizeof(int32_t), expected1)) {
+        return 0;
+    }
+    return matrix_matches_i32(C0_SPM, 2, 2, 2 * sizeof(int32_t), expected0) &&
+           matrix_matches_i32(C1_SPM, 2, 2, 2 * sizeof(int32_t), expected1);
+}
+
+static int
 run_spm_backpressure(uint32_t device_id)
 {
     int8_t a_values[32];
@@ -487,6 +522,8 @@ main(int argc, char **argv)
         ok = run_ab_auto_release(0U);
     } else if (strcmp(scenario, "compute_latency_k_plus_m") == 0) {
         ok = run_compute_latency(0U);
+    } else if (strcmp(scenario, "prefetch_compute_overlap") == 0) {
+        ok = run_prefetch_compute_overlap(0U);
     } else if (strcmp(scenario, "spm_backpressure") == 0) {
         ok = run_spm_backpressure(0U);
     } else if (strcmp(scenario, "multi_instance_route") == 0) {
