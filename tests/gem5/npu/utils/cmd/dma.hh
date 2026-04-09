@@ -9,6 +9,13 @@ enum DmaOpcodeMode {
     DMA_MODE_FILL = 0x2U,
 };
 
+enum DmaCommandStage {
+    DMA_CMD_STAGE_LEGACY = 0x0U,
+    DMA_CMD_STAGE_LOAD = 0x1U,
+    DMA_CMD_STAGE_COMPUTE = 0x2U,
+    DMA_CMD_STAGE_STORE = 0x3U,
+};
+
 enum DmaMemSpace {
     DMA_MEM_SPACE_DRAM = 0x0U,
     DMA_MEM_SPACE_SPM = 0x1U,
@@ -127,6 +134,43 @@ dma_cmd_init_move_layout(NpuCmd *cmd, uint32_t device_id,
 }
 
 static inline void
+dma_cmd_init_move_layout_stage(NpuCmd *cmd, uint32_t device_id,
+                               uintptr_t src_base, uintptr_t dst_base,
+                               const DmaLayout *src_layout,
+                               const DmaLayout *dst_layout,
+                               uint32_t command_stage,
+                               uint32_t sync_indicator,
+                               uint32_t set_completion_sync)
+{
+    DmaCmdInstr dma_cmd = {};
+    NpuCmdBinaryData binary = {};
+
+    dma_cmd.header = npuBuildHeaderWord(
+        NPU_DEVICE_TYPE_DMA, device_id,
+        (0U << 5) | (DMA_MODE_MOVE_LAYOUT << 2) | (command_stage & 0x3U),
+        sync_indicator, set_completion_sync ? 1U : 0U, 0U);
+    dma_cmd.src_base_addr = (uint32_t)src_base;
+    dma_cmd.dst_base_addr = (uint32_t)dst_base;
+    dma_cmd.shape_h = src_layout->h;
+    dma_cmd.shape_w = src_layout->w;
+    dma_cmd.shape_c = src_layout->c;
+    dma_cmd.src_stride_h = src_layout->stride_h;
+    dma_cmd.src_stride_w = src_layout->stride_w;
+    dma_cmd.src_stride_c = src_layout->stride_c;
+    dma_cmd.dst_stride_h = dst_layout->stride_h;
+    dma_cmd.dst_stride_w = dst_layout->stride_w;
+    dma_cmd.dst_stride_c = dst_layout->stride_c;
+    dma_cmd.block_cfg =
+        ((uint32_t)dst_layout->k << 16) | src_layout->k;
+    dma_cmd.mode_cfg = dma_move_layout_mode_cfg(
+        src_base, dst_base, src_layout->cut_dim, dst_layout->cut_dim);
+    dma_cmd.bank_cfg = 0U;
+    dma_cmd.word15 = 0U;
+    npuBinaryDataFromObject(&binary, dma_cmd);
+    cmd->loadBinary(binary);
+}
+
+static inline void
 dma_cmd_launch_move_layout(uint32_t device_id, uintptr_t src_base,
                            uintptr_t dst_base, const DmaLayout *src_layout,
                            const DmaLayout *dst_layout,
@@ -137,6 +181,22 @@ dma_cmd_launch_move_layout(uint32_t device_id, uintptr_t src_base,
     dma_cmd_init_move_layout(&cmd, device_id, src_base, dst_base,
                              src_layout, dst_layout, sync_indicator,
                              set_completion_sync);
+    cmd.launchCmd();
+}
+
+static inline void
+dma_cmd_launch_move_layout_stage(uint32_t device_id, uintptr_t src_base,
+                                 uintptr_t dst_base,
+                                 const DmaLayout *src_layout,
+                                 const DmaLayout *dst_layout,
+                                 uint32_t command_stage,
+                                 uint32_t sync_indicator,
+                                 uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+    dma_cmd_init_move_layout_stage(
+        &cmd, device_id, src_base, dst_base, src_layout, dst_layout,
+        command_stage, sync_indicator, set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -152,6 +212,22 @@ dma_cmd_launch_move_layout_at(uint64_t port_base, uint32_t device_id,
     dma_cmd_init_move_layout(&cmd, device_id, src_base, dst_base,
                              src_layout, dst_layout, sync_indicator,
                              set_completion_sync);
+    cmd.launchCmdAt(port_base);
+}
+
+static inline void
+dma_cmd_launch_move_layout_stage_at(uint64_t port_base, uint32_t device_id,
+                                    uintptr_t src_base, uintptr_t dst_base,
+                                    const DmaLayout *src_layout,
+                                    const DmaLayout *dst_layout,
+                                    uint32_t command_stage,
+                                    uint32_t sync_indicator,
+                                    uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+    dma_cmd_init_move_layout_stage(
+        &cmd, device_id, src_base, dst_base, src_layout, dst_layout,
+        command_stage, sync_indicator, set_completion_sync);
     cmd.launchCmdAt(port_base);
 }
 

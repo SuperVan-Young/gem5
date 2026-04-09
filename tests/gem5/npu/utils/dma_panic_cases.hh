@@ -33,6 +33,11 @@
 #define DMA_MODE_TRANSPOSE 0x1U
 #define DMA_MODE_FILL 0x2U
 
+#define DMA_STAGE_LEGACY 0x0U
+#define DMA_STAGE_LOAD 0x1U
+#define DMA_STAGE_COMPUTE 0x2U
+#define DMA_STAGE_STORE 0x3U
+
 #define DMA_MEM_SPACE_DRAM 0x0U
 #define DMA_MEM_SPACE_SPM 0x1U
 #define DMA_MEM_SPACE_DMA_BANK 0x2U
@@ -174,14 +179,17 @@ fill_bank_cfg(uint32_t dst_bank_id)
 }
 
 static inline void
-build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
-                  Layout src_layout, Layout dst_layout, uint32_t data_type,
-                  uint32_t mode, uint32_t mode_cfg, uint32_t bank_cfg,
-                  uint32_t sync_idx, uint32_t set_completion_sync,
-                  uint32_t word15)
+build_dma_cmd_raw_with_stage(NpuCmd *cmd, uintptr_t src_base,
+                             uintptr_t dst_base, Layout src_layout,
+                             Layout dst_layout, uint32_t data_type,
+                             uint32_t mode, uint32_t stage,
+                             uint32_t mode_cfg, uint32_t bank_cfg,
+                             uint32_t sync_idx,
+                             uint32_t set_completion_sync, uint32_t word15)
 {
     const uint32_t op =
-        ((data_type & 0x7U) << 5) | ((mode & 0x7U) << 2);
+        ((data_type & 0x7U) << 5) | ((mode & 0x7U) << 2) |
+        (stage & 0x3U);
 
     cmd->clear();
     cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
@@ -206,6 +214,19 @@ build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
     cmd->setWord(13U, mode_cfg);
     cmd->setWord(14U, bank_cfg);
     cmd->setWord(15U, word15);
+}
+
+static inline void
+build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
+                  Layout src_layout, Layout dst_layout, uint32_t data_type,
+                  uint32_t mode, uint32_t mode_cfg, uint32_t bank_cfg,
+                  uint32_t sync_idx, uint32_t set_completion_sync,
+                  uint32_t word15)
+{
+    build_dma_cmd_raw_with_stage(
+        cmd, src_base, dst_base, src_layout, dst_layout, data_type, mode,
+        DMA_STAGE_LEGACY, mode_cfg, bank_cfg, sync_idx,
+        set_completion_sync, word15);
 }
 
 static inline void
@@ -517,6 +538,20 @@ scenario_fill_invalid_bank_id(void)
 }
 
 static int
+scenario_staged_fill_unsupported(void)
+{
+    Layout dst = make_layout(1, 1, 64, 0);
+    NpuCmd cmd;
+
+    build_dma_cmd_raw_with_stage(
+        &cmd, 0U, SPM_BASE + 0x3000UL, dst, dst, 0U, DMA_MODE_FILL,
+        DMA_STAGE_LOAD, fill_mode_cfg(DMA_MEM_SPACE_SPM), 0U, 67, 0, 0U);
+    cmd.launchCmd();
+    spin_forever();
+    return 0;
+}
+
+static int
 scenario_fill_reserved_bank_cfg_bits(void)
 {
     Layout dst = make_layout(2, 4, 8, 0);
@@ -604,6 +639,24 @@ scenario_transpose_same_bank(void)
     Layout dst = make_layout(4, 2, 1, 0);
     launch_transpose(DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL, src, dst,
                      DMA_CUT_DIM_H, DMA_CUT_DIM_W, 1U, 1U, 48, 0);
+    spin_forever();
+    return 0;
+}
+
+static int
+scenario_staged_transpose_unsupported(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    NpuCmd cmd;
+
+    build_dma_cmd_raw_with_stage(
+        &cmd, DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL, src, dst, 0U,
+        DMA_MODE_TRANSPOSE, DMA_STAGE_LOAD,
+        transpose_mode_cfg(DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL,
+                           DMA_CUT_DIM_H, DMA_CUT_DIM_W),
+        transpose_bank_cfg(0U, 1U), 68, 0, 0U);
+    cmd.launchCmd();
     spin_forever();
     return 0;
 }

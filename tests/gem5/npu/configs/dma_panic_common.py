@@ -117,6 +117,10 @@ DMA_PANIC_CASES = {
         scenario="fill_reserved_fill_value_bits",
         stderr_regex=r".*DmaUnit: fill requires Word 15\[31:8\] == 0.*",
     ),
+    "reject_staged_fill_unsupported": DmaPanicCaseSpec(
+        scenario="staged_fill_unsupported",
+        stderr_regex=r".*DmaUnit: staged fill is unsupported.*",
+    ),
     "reject_transpose_same_bank": DmaPanicCaseSpec(
         scenario="transpose_same_bank",
         stderr_regex=(
@@ -144,6 +148,10 @@ DMA_PANIC_CASES = {
             r".*DmaUnit: transpose required_bytes=4097 exceeds "
             r"bank_size=4096.*"
         ),
+    ),
+    "reject_staged_transpose_unsupported": DmaPanicCaseSpec(
+        scenario="staged_transpose_unsupported",
+        stderr_regex=r".*DmaUnit: staged transpose is unsupported.*",
     ),
 }
 

@@ -35,6 +35,7 @@
 #include <deque>
 #include <iosfwd>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -181,6 +182,23 @@ class DmaUnit : public SpecializedExecutionUnit
         std::unordered_map<uint64_t, PendingMvinTxn> pendingMvinTxns;
         size_t currentIteration = 0;
         RuntimeStage runtimeStage = RuntimeStage::SourceLoads;
+        bool stagedMoveLayout = false;
+        std::optional<size_t> stagedIterationInFlight;
+    };
+
+    struct StagedMoveLayoutSequence
+    {
+        ParsedCmd descriptor;
+        std::vector<IterationPlan> iterationPlans;
+        std::optional<uint64_t> loadMacroId;
+        std::optional<uint64_t> computeMacroId;
+        std::optional<uint64_t> storeMacroId;
+        std::optional<size_t> loadedIteration;
+        std::optional<size_t> computedIteration;
+        std::optional<size_t> overlapObservedStoreIteration;
+        size_t nextLoadIteration = 0;
+        size_t nextComputeIteration = 0;
+        size_t nextStoreIteration = 0;
     };
 
     static constexpr size_t CacheLineBytes = 64;
@@ -194,6 +212,8 @@ class DmaUnit : public SpecializedExecutionUnit
 
     std::vector<std::vector<uint8_t>> dmaBanks;
     std::unordered_map<uint64_t, DmaMacroState> macroStates;
+    std::optional<StagedMoveLayoutSequence> stagedMoveLayoutState;
+    uint64_t observedBatchOverlapCountValue = 0;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
     ParsedCmd parseCommand(const std::vector<uint8_t> &cmd) const;
@@ -228,8 +248,17 @@ class DmaUnit : public SpecializedExecutionUnit
     void buildFillPlans(DmaMacroState &state) const;
     void buildBatchLines(const ParsedCmd &cmd, IterationPlan &plan) const;
     void buildTransposeLines(const ParsedCmd &cmd, IterationPlan &plan) const;
+    bool destLineHazard(const IterationPlan &loadPlan,
+                        const IterationPlan &storePlan) const;
     PortID readPortId() const;
     PortID writePortId() const;
+    bool isStagedMoveLayout(const ParsedCmd &cmd) const;
+    bool stagedMoveLayoutDescriptorsMatch(const ParsedCmd &lhs,
+                                          const ParsedCmd &rhs) const;
+    StagedMoveLayoutSequence &stagedMoveLayoutSequence();
+    const StagedMoveLayoutSequence &stagedMoveLayoutSequence() const;
+    void registerStagedMoveLayoutMacro(MacroCmdContext &macroCmd,
+                                       DmaMacroState &state);
     bool needsSourceLoads(const ParsedCmd &cmd) const;
     bool needsDestLoads(const ParsedCmd &cmd) const;
     bool needsStores(const ParsedCmd &cmd) const;
@@ -244,10 +273,18 @@ class DmaUnit : public SpecializedExecutionUnit
                        Addr addr, size_t size);
     void appendWriteUop(MacroCmdContext &macroCmd, Addr addr, size_t size,
                         const std::vector<uint8_t> &data);
+    void queueStagedMoveLayoutWork(MacroCmdContext &macroCmd,
+                                   DmaMacroState &state);
+    void wakeStagedMoveLayoutMacros();
+    void observeStagedMoveLayoutOverlap(const DmaMacroState &state,
+                                        size_t iteration);
     void queueNextStage(MacroCmdContext &macroCmd, DmaMacroState &state);
     void finishStoreStage(MacroCmdContext &macroCmd, DmaMacroState &state);
     void executeIteration(DmaMacroState &state, IterationPlan &plan);
     void materializeBankFill(const ParsedCmd &cmd);
+
+  public:
+    uint64_t observedBatchOverlapCount() const;
 
   protected:
     MacroCmdKind classifyMacroCmd(
