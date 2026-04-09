@@ -644,7 +644,7 @@ scenario_transpose_same_bank(void)
 }
 
 static int
-scenario_staged_transpose_unsupported(void)
+scenario_staged_transpose_interleaving(void)
 {
     Layout src = make_layout(2, 4, 1, 0);
     Layout dst = make_layout(4, 2, 1, 0);
@@ -656,6 +656,52 @@ scenario_staged_transpose_unsupported(void)
         transpose_mode_cfg(DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL,
                            DMA_CUT_DIM_H, DMA_CUT_DIM_W),
         transpose_bank_cfg(0U, 1U), 68, 0, 0U);
+    cmd.launchCmd();
+    launch_move_layout(DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL, src, src,
+                       69, 0);
+    spin_forever();
+    return 0;
+}
+
+static int
+scenario_staged_transpose_mismatch(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    NpuCmd cmd;
+
+    build_dma_cmd_raw_with_stage(
+        &cmd, DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL, src, dst, 0U,
+        DMA_MODE_TRANSPOSE, DMA_STAGE_LOAD,
+        transpose_mode_cfg(DRAM_BASE + 0x1000UL, SPM_BASE + 0x3000UL,
+                           DMA_CUT_DIM_H, DMA_CUT_DIM_W),
+        transpose_bank_cfg(0U, 1U), 70, 0, 0U);
+    cmd.launchCmd();
+
+    build_dma_cmd_raw_with_stage(
+        &cmd, DRAM_BASE + 0x1000UL, SPM_BASE + 0x5000UL, src, dst, 0U,
+        DMA_MODE_TRANSPOSE, DMA_STAGE_COMPUTE,
+        transpose_mode_cfg(DRAM_BASE + 0x1000UL, SPM_BASE + 0x5000UL,
+                           DMA_CUT_DIM_H, DMA_CUT_DIM_W),
+        transpose_bank_cfg(0U, 1U), 71, 0, 0U);
+    cmd.launchCmd();
+    spin_forever();
+    return 0;
+}
+
+static int
+scenario_staged_transpose_aliasing(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    NpuCmd cmd;
+
+    build_dma_cmd_raw_with_stage(
+        &cmd, DRAM_BASE + 0x1000UL, DRAM_BASE + 0x1000UL, src, dst, 0U,
+        DMA_MODE_TRANSPOSE, DMA_STAGE_LOAD,
+        transpose_mode_cfg(DRAM_BASE + 0x1000UL, DRAM_BASE + 0x1000UL,
+                           DMA_CUT_DIM_H, DMA_CUT_DIM_W),
+        transpose_bank_cfg(0U, 1U), 72, 0, 0U);
     cmd.launchCmd();
     spin_forever();
     return 0;

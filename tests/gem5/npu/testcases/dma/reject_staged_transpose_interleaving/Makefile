@@ -2,7 +2,7 @@
 # All rights reserved.
 
 OUTDIR := bin
-OUT := $(OUTDIR)/dma_reject_staged_transpose_unsupported_riscv
+OUT := $(OUTDIR)/dma_reject_staged_transpose_interleaving_riscv
 SRC := workload.c
 CXX := riscv64-linux-gnu-g++
 CXXFLAGS := $(WORKLOAD_OPT) -static -std=c++17 -x c++ -I../../../utils -I../../../utils/cmd

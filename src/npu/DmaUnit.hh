@@ -183,10 +183,26 @@ class DmaUnit : public SpecializedExecutionUnit
         size_t currentIteration = 0;
         RuntimeStage runtimeStage = RuntimeStage::SourceLoads;
         bool stagedMoveLayout = false;
+        bool stagedTranspose = false;
         std::optional<size_t> stagedIterationInFlight;
     };
 
     struct StagedMoveLayoutSequence
+    {
+        ParsedCmd descriptor;
+        std::vector<IterationPlan> iterationPlans;
+        std::optional<uint64_t> loadMacroId;
+        std::optional<uint64_t> computeMacroId;
+        std::optional<uint64_t> storeMacroId;
+        std::optional<size_t> loadedIteration;
+        std::optional<size_t> computedIteration;
+        std::optional<size_t> overlapObservedStoreIteration;
+        size_t nextLoadIteration = 0;
+        size_t nextComputeIteration = 0;
+        size_t nextStoreIteration = 0;
+    };
+
+    struct StagedTransposeSequence
     {
         ParsedCmd descriptor;
         std::vector<IterationPlan> iterationPlans;
@@ -213,6 +229,7 @@ class DmaUnit : public SpecializedExecutionUnit
     std::vector<std::vector<uint8_t>> dmaBanks;
     std::unordered_map<uint64_t, DmaMacroState> macroStates;
     std::optional<StagedMoveLayoutSequence> stagedMoveLayoutState;
+    std::optional<StagedTransposeSequence> stagedTransposeState;
     uint64_t observedBatchOverlapCountValue = 0;
 
     uint32_t extractWord(const std::vector<uint8_t> &cmd, size_t index) const;
@@ -253,12 +270,21 @@ class DmaUnit : public SpecializedExecutionUnit
     PortID readPortId() const;
     PortID writePortId() const;
     bool isStagedMoveLayout(const ParsedCmd &cmd) const;
+    bool isStagedTranspose(const ParsedCmd &cmd) const;
     bool stagedMoveLayoutDescriptorsMatch(const ParsedCmd &lhs,
                                           const ParsedCmd &rhs) const;
+    bool stagedTransposeDescriptorsMatch(const ParsedCmd &lhs,
+                                         const ParsedCmd &rhs) const;
+    bool stagedTransposeHasLineAlias(
+        const std::vector<IterationPlan> &plans) const;
     StagedMoveLayoutSequence &stagedMoveLayoutSequence();
     const StagedMoveLayoutSequence &stagedMoveLayoutSequence() const;
+    StagedTransposeSequence &stagedTransposeSequence();
+    const StagedTransposeSequence &stagedTransposeSequence() const;
     void registerStagedMoveLayoutMacro(MacroCmdContext &macroCmd,
                                        DmaMacroState &state);
+    void registerStagedTransposeMacro(MacroCmdContext &macroCmd,
+                                      DmaMacroState &state);
     bool needsSourceLoads(const ParsedCmd &cmd) const;
     bool needsDestLoads(const ParsedCmd &cmd) const;
     bool needsStores(const ParsedCmd &cmd) const;
@@ -275,9 +301,14 @@ class DmaUnit : public SpecializedExecutionUnit
                         const std::vector<uint8_t> &data);
     void queueStagedMoveLayoutWork(MacroCmdContext &macroCmd,
                                    DmaMacroState &state);
+    void queueStagedTransposeWork(MacroCmdContext &macroCmd,
+                                  DmaMacroState &state);
     void wakeStagedMoveLayoutMacros();
+    void wakeStagedTransposeMacros();
     void observeStagedMoveLayoutOverlap(const DmaMacroState &state,
                                         size_t iteration);
+    void observeStagedTransposeOverlap(const DmaMacroState &state,
+                                       size_t iteration);
     void queueNextStage(MacroCmdContext &macroCmd, DmaMacroState &state);
     void finishStoreStage(MacroCmdContext &macroCmd, DmaMacroState &state);
     void executeIteration(DmaMacroState &state, IterationPlan &plan);

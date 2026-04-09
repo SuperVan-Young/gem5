@@ -260,8 +260,6 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
 void
 DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
 {
-    panic_if(cmd.stage != CommandStage::Legacy,
-             "DmaUnit: staged transpose is unsupported");
     panic_if((cmd.modeCfg & ~TransposeModeCfgMask) != 0,
              "DmaUnit: reserved mode_cfg bits set for transpose");
     panic_if(cmd.transposeDimA > static_cast<uint8_t>(CutDim::C),
@@ -888,6 +886,13 @@ DmaUnit::isStagedMoveLayout(const ParsedCmd &cmd) const
 }
 
 bool
+DmaUnit::isStagedTranspose(const ParsedCmd &cmd) const
+{
+    return static_cast<Mode>(cmd.mode) == Mode::Transpose &&
+           cmd.stage != CommandStage::Legacy;
+}
+
+bool
 DmaUnit::stagedMoveLayoutDescriptorsMatch(const ParsedCmd &lhs,
                                           const ParsedCmd &rhs) const
 {
@@ -915,6 +920,73 @@ DmaUnit::stagedMoveLayoutDescriptorsMatch(const ParsedCmd &lhs,
            lhs.dstStrideC == rhs.dstStrideC &&
            lhs.srcK == rhs.srcK &&
            lhs.dstK == rhs.dstK;
+}
+
+DmaUnit::StagedTransposeSequence &
+DmaUnit::stagedTransposeSequence()
+{
+    panic_if(!stagedTransposeState.has_value(),
+             "%s: missing staged transpose sequence state", name());
+    return *stagedTransposeState;
+}
+
+const DmaUnit::StagedTransposeSequence &
+DmaUnit::stagedTransposeSequence() const
+{
+    panic_if(!stagedTransposeState.has_value(),
+             "%s: missing staged transpose sequence state", name());
+    return *stagedTransposeState;
+}
+
+bool
+DmaUnit::stagedTransposeDescriptorsMatch(const ParsedCmd &lhs,
+                                         const ParsedCmd &rhs) const
+{
+    return lhs.deviceId == rhs.deviceId &&
+           lhs.dataType == rhs.dataType &&
+           lhs.mode == rhs.mode &&
+           lhs.srcMemSpace == rhs.srcMemSpace &&
+           lhs.dstMemSpace == rhs.dstMemSpace &&
+           lhs.transposeDimA == rhs.transposeDimA &&
+           lhs.transposeDimB == rhs.transposeDimB &&
+           lhs.srcBankId == rhs.srcBankId &&
+           lhs.dstBankId == rhs.dstBankId &&
+           lhs.modeCfg == rhs.modeCfg &&
+           lhs.bankCfg == rhs.bankCfg &&
+           lhs.word15 == rhs.word15 &&
+           lhs.fillValue == rhs.fillValue &&
+           lhs.srcBaseAddr == rhs.srcBaseAddr &&
+           lhs.dstBaseAddr == rhs.dstBaseAddr &&
+           lhs.shapeH == rhs.shapeH &&
+           lhs.shapeW == rhs.shapeW &&
+           lhs.shapeC == rhs.shapeC &&
+           lhs.srcStrideH == rhs.srcStrideH &&
+           lhs.srcStrideW == rhs.srcStrideW &&
+           lhs.srcStrideC == rhs.srcStrideC &&
+           lhs.dstStrideH == rhs.dstStrideH &&
+           lhs.dstStrideW == rhs.dstStrideW &&
+           lhs.dstStrideC == rhs.dstStrideC &&
+           lhs.srcK == rhs.srcK &&
+           lhs.dstK == rhs.dstK;
+}
+
+bool
+DmaUnit::stagedTransposeHasLineAlias(
+    const std::vector<IterationPlan> &plans) const
+{
+    for (const auto &src_plan : plans) {
+        for (const auto &src_line : src_plan.sourceLines) {
+            for (const auto &dst_plan : plans) {
+                for (const auto &dst_line : dst_plan.destLines) {
+                    if (src_line.lineAddr == dst_line.lineAddr) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 DmaUnit::StagedMoveLayoutSequence &
@@ -987,6 +1059,65 @@ DmaUnit::registerStagedMoveLayoutMacro(MacroCmdContext &macroCmd,
     }
 
     state.stagedMoveLayout = true;
+}
+
+void
+DmaUnit::registerStagedTransposeMacro(MacroCmdContext &macroCmd,
+                                      DmaMacroState &state)
+{
+    const auto &cmd = state.parsedCmd;
+    panic_if(!isStagedTranspose(cmd),
+             "%s: staged transpose registration requires a staged "
+             "transpose command",
+             name());
+
+    if (!stagedTransposeState.has_value()) {
+        panic_if(cmd.stage != CommandStage::Load,
+                 "DmaUnit: staged transpose sequence must start with Load");
+
+        DmaMacroState plan_state;
+        plan_state.parsedCmd = cmd;
+        buildTransposePlans(plan_state);
+        panic_if(stagedTransposeHasLineAlias(plan_state.iterationPlans),
+                 "DmaUnit: staged transpose requires source/destination "
+                 "cache-line disjointness");
+
+        StagedTransposeSequence seq;
+        seq.descriptor = cmd;
+        seq.iterationPlans = std::move(plan_state.iterationPlans);
+        seq.loadMacroId = macroCmd.macroCmdId;
+        stagedTransposeState = std::move(seq);
+        state.stagedTranspose = true;
+        return;
+    }
+
+    auto &seq = stagedTransposeSequence();
+    panic_if(!stagedTransposeDescriptorsMatch(seq.descriptor, cmd),
+             "DmaUnit: staged transpose command does not match the "
+             "active staged sequence");
+
+    switch (cmd.stage) {
+      case CommandStage::Load:
+        panic_if(seq.loadMacroId.has_value(),
+                 "DmaUnit: staged transpose already has a Load command");
+        seq.loadMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Compute:
+        panic_if(seq.computeMacroId.has_value(),
+                 "DmaUnit: staged transpose already has a Compute command");
+        seq.computeMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Store:
+        panic_if(seq.storeMacroId.has_value(),
+                 "DmaUnit: staged transpose already has a Store command");
+        seq.storeMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Legacy:
+        panic("%s: staged transpose registration reached Legacy stage",
+              name());
+    }
+
+    state.stagedTranspose = true;
 }
 
 bool
@@ -1334,6 +1465,215 @@ DmaUnit::observeStagedMoveLayoutOverlap(const DmaMacroState &state,
 }
 
 void
+DmaUnit::queueStagedTransposeWork(MacroCmdContext &macroCmd,
+                                  DmaMacroState &state)
+{
+    auto &seq = stagedTransposeSequence();
+    while (macroCmd.uopQueue.empty()) {
+        switch (state.parsedCmd.stage) {
+          case CommandStage::Load:
+          {
+            if (seq.nextLoadIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (seq.loadedIteration.has_value()) {
+                return;
+            }
+
+            const size_t iteration = seq.nextLoadIteration;
+            const auto &plan = seq.iterationPlans.at(iteration);
+            if (seq.computedIteration.has_value() &&
+                destLineHazard(plan,
+                               seq.iterationPlans.at(*seq.computedIteration))) {
+                return;
+            }
+            state.stagedIterationInFlight = iteration;
+            for (size_t i = 0; i < plan.sourceLines.size(); ++i) {
+                appendReadUop(macroCmd, state, iteration,
+                              PendingMvinKind::SourceLine, i,
+                              plan.sourceLines[i].lineAddr, CacheLineBytes);
+            }
+            for (size_t i = 0; i < plan.destLines.size(); ++i) {
+                appendReadUop(macroCmd, state, iteration,
+                              PendingMvinKind::DestLine, i,
+                              plan.destLines[i].lineAddr, CacheLineBytes);
+            }
+            if (!macroCmd.uopQueue.empty()) {
+                return;
+            }
+
+            seq.loadedIteration = iteration;
+            seq.nextLoadIteration++;
+            state.stagedIterationInFlight.reset();
+            continue;
+          }
+
+          case CommandStage::Compute:
+          {
+            if (seq.nextComputeIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (!seq.loadedIteration.has_value() ||
+                *seq.loadedIteration != seq.nextComputeIteration ||
+                seq.computedIteration.has_value()) {
+                return;
+            }
+
+            const size_t iteration = seq.nextComputeIteration;
+            state.stagedIterationInFlight = iteration;
+            appendExecUop(macroCmd,
+                          std::max<Tick>(1,
+                              seq.iterationPlans.at(iteration).execLatency));
+            macroCmd.uopQueue.back().token = iteration;
+            return;
+          }
+
+          case CommandStage::Store:
+          {
+            if (seq.nextStoreIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (!seq.computedIteration.has_value() ||
+                *seq.computedIteration != seq.nextStoreIteration) {
+                return;
+            }
+
+            const size_t iteration = seq.nextStoreIteration;
+            const auto &plan = seq.iterationPlans.at(iteration);
+            state.stagedIterationInFlight = iteration;
+            for (const auto &line : plan.destLines) {
+                appendWriteUop(macroCmd, line.lineAddr, CacheLineBytes,
+                               std::vector<uint8_t>(line.lineData.begin(),
+                                                    line.lineData.end()));
+            }
+            if (!macroCmd.uopQueue.empty()) {
+                return;
+            }
+
+            panic_if(!seq.computedIteration.has_value() ||
+                         *seq.computedIteration != iteration,
+                     "%s: staged transpose store lost computed batch %llu",
+                     name(), static_cast<unsigned long long>(iteration));
+            seq.computedIteration.reset();
+            seq.nextStoreIteration++;
+            if (seq.overlapObservedStoreIteration == iteration) {
+                seq.overlapObservedStoreIteration.reset();
+            }
+            state.stagedIterationInFlight.reset();
+            continue;
+          }
+
+          case CommandStage::Legacy:
+            panic("%s: staged transpose queue reached Legacy stage",
+                  name());
+        }
+    }
+}
+
+void
+DmaUnit::wakeStagedTransposeMacros()
+{
+    if (!stagedTransposeState.has_value()) {
+        return;
+    }
+
+    auto try_wake = [this](const std::optional<uint64_t> &macro_id_opt) {
+        if (!macro_id_opt.has_value()) {
+            return;
+        }
+
+        auto macro_it = macroCmdContexts.find(*macro_id_opt);
+        if (macro_it == macroCmdContexts.end()) {
+            return;
+        }
+
+        auto &macro_cmd = macro_it->second;
+        if (macro_cmd.phase != Phase::Active || macro_cmd.waitingCallback ||
+            !macro_cmd.uopQueue.empty()) {
+            return;
+        }
+
+        auto &state = macroState(*macro_id_opt);
+        if (!state.stagedTranspose) {
+            return;
+        }
+        queueStagedTransposeWork(macro_cmd, state);
+    };
+
+    const auto &seq = stagedTransposeSequence();
+    try_wake(seq.computeMacroId);
+    try_wake(seq.loadMacroId);
+    try_wake(seq.storeMacroId);
+    tryScheduleIssue();
+}
+
+void
+DmaUnit::observeStagedTransposeOverlap(const DmaMacroState &state,
+                                       size_t iteration)
+{
+    if (!stagedTransposeState.has_value()) {
+        return;
+    }
+
+    auto &seq = stagedTransposeSequence();
+    size_t store_iteration = 0;
+    std::optional<uint64_t> other_macro_id;
+    if (state.parsedCmd.stage == CommandStage::Load) {
+        if (iteration == 0) {
+            return;
+        }
+        store_iteration = iteration - 1;
+        other_macro_id = seq.storeMacroId;
+    } else if (state.parsedCmd.stage == CommandStage::Store) {
+        store_iteration = iteration;
+        other_macro_id = seq.loadMacroId;
+    } else {
+        return;
+    }
+
+    if (seq.overlapObservedStoreIteration == store_iteration ||
+        !other_macro_id.has_value()) {
+        return;
+    }
+
+    for (const auto &entry : activeMemTxns) {
+        const auto &txn = entry.second;
+        if (txn.macroCmdId != *other_macro_id) {
+            continue;
+        }
+
+        const auto &other_state = macroState(txn.macroCmdId);
+        if (!other_state.stagedIterationInFlight.has_value()) {
+            continue;
+        }
+
+        if (state.parsedCmd.stage == CommandStage::Load) {
+            if (*other_state.stagedIterationInFlight != store_iteration) {
+                continue;
+            }
+        } else {
+            if (*other_state.stagedIterationInFlight != store_iteration + 1) {
+                continue;
+            }
+        }
+
+        seq.overlapObservedStoreIteration = store_iteration;
+        observedBatchOverlapCountValue++;
+        DPRINTF(DmaUnit,
+                "DMA_OVERLAP_OBSERVE mode=Transpose store_iter=%llu "
+                "load_iter=%llu observed=%llu\n",
+                static_cast<unsigned long long>(store_iteration),
+                static_cast<unsigned long long>(store_iteration + 1),
+                static_cast<unsigned long long>(
+                    observedBatchOverlapCountValue));
+        return;
+    }
+}
+
+void
 DmaUnit::finishStoreStage(MacroCmdContext &macroCmd, DmaMacroState &state)
 {
     (void)macroCmd;
@@ -1500,9 +1840,11 @@ DmaUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
     DmaMacroState state;
     state.parsedCmd = parseCommand(macroCmd.cmd);
     validateParsedCommand(state.parsedCmd);
-    if (stagedMoveLayoutState.has_value() &&
-        !isStagedMoveLayout(state.parsedCmd)) {
-        panic("DmaUnit: staged move_layout sequence does not allow "
+    if ((stagedMoveLayoutState.has_value() &&
+         !isStagedMoveLayout(state.parsedCmd)) ||
+        (stagedTransposeState.has_value() &&
+         !isStagedTranspose(state.parsedCmd))) {
+        panic("DmaUnit: active staged DMA sequence does not allow "
               "interleaved DMA commands");
     }
 
@@ -1510,6 +1852,10 @@ DmaUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
     auto &stored = macroState(macroCmd.macroCmdId);
     if (isStagedMoveLayout(stored.parsedCmd)) {
         registerStagedMoveLayoutMacro(macroCmd, stored);
+        return;
+    }
+    if (isStagedTranspose(stored.parsedCmd)) {
+        registerStagedTransposeMacro(macroCmd, stored);
         return;
     }
 
@@ -1523,6 +1869,10 @@ DmaUnit::buildUops(MacroCmdContext &macroCmd)
     auto &state = macroState(macroCmd.macroCmdId);
     if (state.stagedMoveLayout) {
         queueStagedMoveLayoutWork(macroCmd, state);
+        return;
+    }
+    if (state.stagedTranspose) {
+        queueStagedTransposeWork(macroCmd, state);
         return;
     }
     queueNextStage(macroCmd, state);
@@ -1542,6 +1892,16 @@ DmaUnit::onMemUopComplete(MacroCmdContext &macroCmd,
             auto &seq = stagedMoveLayoutSequence();
             panic_if(pending.iteration >= seq.iterationPlans.size(),
                      "%s: staged iteration %llu out of range (num plans=%llu)",
+                     name(),
+                     static_cast<unsigned long long>(pending.iteration),
+                     static_cast<unsigned long long>(
+                         seq.iterationPlans.size()));
+            plan_ptr = &seq.iterationPlans.at(pending.iteration);
+        } else if (state.stagedTranspose) {
+            auto &seq = stagedTransposeSequence();
+            panic_if(pending.iteration >= seq.iterationPlans.size(),
+                     "%s: staged transpose iteration %llu out of range "
+                     "(num plans=%llu)",
                      name(),
                      static_cast<unsigned long long>(pending.iteration),
                      static_cast<unsigned long long>(
@@ -1618,6 +1978,54 @@ DmaUnit::onMemUopComplete(MacroCmdContext &macroCmd,
         }
     }
 
+    if (state.stagedTranspose) {
+        panic_if(!state.stagedIterationInFlight.has_value(),
+                 "%s: staged transpose mem completion missing "
+                 "iteration tracking",
+                 name());
+        const size_t iteration = *state.stagedIterationInFlight;
+        observeStagedTransposeOverlap(state, iteration);
+        if (!macroCmd.uopQueue.empty()) {
+            return;
+        }
+
+        auto &seq = stagedTransposeSequence();
+        switch (state.parsedCmd.stage) {
+          case CommandStage::Load:
+            panic_if(seq.loadedIteration.has_value(),
+                     "%s: staged transpose read slot is already occupied",
+                     name());
+            seq.loadedIteration = iteration;
+            seq.nextLoadIteration = iteration + 1;
+            state.stagedIterationInFlight.reset();
+            queueStagedTransposeWork(macroCmd, state);
+            wakeStagedTransposeMacros();
+            return;
+
+          case CommandStage::Store:
+            panic_if(!seq.computedIteration.has_value() ||
+                         *seq.computedIteration != iteration,
+                     "%s: staged transpose store completed unexpected "
+                     "iteration %llu",
+                     name(),
+                     static_cast<unsigned long long>(iteration));
+            seq.computedIteration.reset();
+            seq.nextStoreIteration = iteration + 1;
+            if (seq.overlapObservedStoreIteration == iteration) {
+                seq.overlapObservedStoreIteration.reset();
+            }
+            state.stagedIterationInFlight.reset();
+            queueStagedTransposeWork(macroCmd, state);
+            wakeStagedTransposeMacros();
+            return;
+
+          case CommandStage::Compute:
+          case CommandStage::Legacy:
+            panic("%s: unexpected staged transpose memory completion stage",
+                  name());
+        }
+    }
+
     if (!macroCmd.uopQueue.empty()) {
         return;
     }
@@ -1677,6 +2085,37 @@ DmaUnit::onExecUopComplete(MacroCmdContext &macroCmd,
         return;
     }
 
+    if (state.stagedTranspose) {
+        auto &seq = stagedTransposeSequence();
+        const size_t iteration = uop.token;
+        panic_if(!state.stagedIterationInFlight.has_value() ||
+                     *state.stagedIterationInFlight != iteration,
+                 "%s: staged transpose compute completed unexpected "
+                 "iteration %llu",
+                 name(), static_cast<unsigned long long>(iteration));
+        panic_if(!seq.loadedIteration.has_value() ||
+                     *seq.loadedIteration != iteration,
+                 "%s: staged transpose compute requires loaded "
+                 "iteration %llu",
+                 name(), static_cast<unsigned long long>(iteration));
+        panic_if(seq.computedIteration.has_value(),
+                 "%s: staged transpose write slot is already occupied",
+                 name());
+
+        DmaMacroState exec_state;
+        exec_state.parsedCmd = state.parsedCmd;
+        auto &plan = seq.iterationPlans.at(iteration);
+        executeIteration(exec_state, plan);
+
+        seq.loadedIteration.reset();
+        seq.computedIteration = iteration;
+        seq.nextComputeIteration = iteration + 1;
+        state.stagedIterationInFlight.reset();
+        queueStagedTransposeWork(macroCmd, state);
+        wakeStagedTransposeMacros();
+        return;
+    }
+
     auto &plan = iterationPlan(state, state.currentIteration);
     executeIteration(state, plan);
 
@@ -1710,6 +2149,25 @@ DmaUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
             stagedMoveLayoutState.reset();
         }
     }
+    if (state_it != macroStates.end() && state_it->second.stagedTranspose &&
+        stagedTransposeState.has_value()) {
+        auto &seq = stagedTransposeSequence();
+        if (seq.loadMacroId == macroCmd.macroCmdId) {
+            seq.loadMacroId.reset();
+        }
+        if (seq.computeMacroId == macroCmd.macroCmdId) {
+            seq.computeMacroId.reset();
+        }
+        if (seq.storeMacroId == macroCmd.macroCmdId) {
+            seq.storeMacroId.reset();
+        }
+        if (!seq.loadMacroId.has_value() &&
+            !seq.computeMacroId.has_value() &&
+            !seq.storeMacroId.has_value() &&
+            seq.nextStoreIteration >= seq.iterationPlans.size()) {
+            stagedTransposeState.reset();
+        }
+    }
     macroStates.erase(macroCmd.macroCmdId);
 }
 
@@ -1729,6 +2187,22 @@ DmaUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
     size_t current_iteration = state.currentIteration;
     if (state.stagedMoveLayout && stagedMoveLayoutState.has_value()) {
         const auto &seq = stagedMoveLayoutSequence();
+        iteration_plans = seq.iterationPlans.size();
+        switch (cmd.stage) {
+          case CommandStage::Load:
+            current_iteration = seq.nextLoadIteration;
+            break;
+          case CommandStage::Compute:
+            current_iteration = seq.nextComputeIteration;
+            break;
+          case CommandStage::Store:
+            current_iteration = seq.nextStoreIteration;
+            break;
+          case CommandStage::Legacy:
+            break;
+        }
+    } else if (state.stagedTranspose && stagedTransposeState.has_value()) {
+        const auto &seq = stagedTransposeSequence();
         iteration_plans = seq.iterationPlans.size();
         switch (cmd.stage) {
           case CommandStage::Load:
