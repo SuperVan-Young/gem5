@@ -207,14 +207,10 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
              "DmaUnit: reserved src_cut_dim=%u", cmd.srcCutDim);
     panic_if(cmd.dstCutDim > static_cast<uint8_t>(CutDim::C),
              "DmaUnit: reserved dst_cut_dim=%u", cmd.dstCutDim);
-    if (cmd.stage == CommandStage::Legacy) {
-        panic_if(cmd.bankCfg != 0,
-                 "DmaUnit: move_layout requires bank_cfg == 0");
-    } else {
-        panic_if(cmd.srcBankId >= numBanks || cmd.dstBankId >= numBanks,
-                 "DmaUnit: move_layout bank id exceeds num_banks=%u",
-                 static_cast<unsigned>(numBanks));
-    }
+    panic_if(cmd.bankCfg != 0,
+             cmd.stage == CommandStage::Legacy ?
+                 "DmaUnit: move_layout requires bank_cfg == 0" :
+                 "DmaUnit: staged move_layout requires bank_cfg == 0");
 
     validateBaseAddress(cmd.srcBaseAddr, cmd.srcMemSpace, "source");
     validateBaseAddress(cmd.dstBaseAddr, cmd.dstMemSpace, "destination");
@@ -264,6 +260,8 @@ DmaUnit::validateMoveLayoutCommand(const ParsedCmd &cmd) const
 void
 DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
 {
+    panic_if(cmd.stage != CommandStage::Legacy,
+             "DmaUnit: staged transpose is unsupported");
     panic_if((cmd.modeCfg & ~TransposeModeCfgMask) != 0,
              "DmaUnit: reserved mode_cfg bits set for transpose");
     panic_if(cmd.transposeDimA > static_cast<uint8_t>(CutDim::C),
@@ -299,6 +297,8 @@ DmaUnit::validateTransposeCommand(const ParsedCmd &cmd) const
 void
 DmaUnit::validateFillCommand(const ParsedCmd &cmd) const
 {
+    panic_if(cmd.stage != CommandStage::Legacy,
+             "DmaUnit: staged fill is unsupported");
     panic_if((cmd.modeCfg & ~FillModeCfgMask) != 0,
              "DmaUnit: reserved mode_cfg bits set for fill");
     panic_if(cmd.dstMemSpace == MemorySpace::Invalid,
@@ -853,6 +853,21 @@ DmaUnit::buildTransposeLines(const ParsedCmd &cmd, IterationPlan &plan) const
     }
 }
 
+bool
+DmaUnit::destLineHazard(const IterationPlan &loadPlan,
+                        const IterationPlan &storePlan) const
+{
+    for (const auto &load_line : loadPlan.destLines) {
+        for (const auto &store_line : storePlan.destLines) {
+            if (load_line.lineAddr == store_line.lineAddr) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 PortID
 DmaUnit::readPortId() const
 {
@@ -863,6 +878,115 @@ PortID
 DmaUnit::writePortId() const
 {
     return memSidePorts.size() > 1 ? 1 : 0;
+}
+
+bool
+DmaUnit::isStagedMoveLayout(const ParsedCmd &cmd) const
+{
+    return static_cast<Mode>(cmd.mode) == Mode::MoveLayout &&
+           cmd.stage != CommandStage::Legacy;
+}
+
+bool
+DmaUnit::stagedMoveLayoutDescriptorsMatch(const ParsedCmd &lhs,
+                                          const ParsedCmd &rhs) const
+{
+    return lhs.deviceId == rhs.deviceId &&
+           lhs.dataType == rhs.dataType &&
+           lhs.mode == rhs.mode &&
+           lhs.srcMemSpace == rhs.srcMemSpace &&
+           lhs.dstMemSpace == rhs.dstMemSpace &&
+           lhs.srcCutDim == rhs.srcCutDim &&
+           lhs.dstCutDim == rhs.dstCutDim &&
+           lhs.modeCfg == rhs.modeCfg &&
+           lhs.bankCfg == rhs.bankCfg &&
+           lhs.word15 == rhs.word15 &&
+           lhs.fillValue == rhs.fillValue &&
+           lhs.srcBaseAddr == rhs.srcBaseAddr &&
+           lhs.dstBaseAddr == rhs.dstBaseAddr &&
+           lhs.shapeH == rhs.shapeH &&
+           lhs.shapeW == rhs.shapeW &&
+           lhs.shapeC == rhs.shapeC &&
+           lhs.srcStrideH == rhs.srcStrideH &&
+           lhs.srcStrideW == rhs.srcStrideW &&
+           lhs.srcStrideC == rhs.srcStrideC &&
+           lhs.dstStrideH == rhs.dstStrideH &&
+           lhs.dstStrideW == rhs.dstStrideW &&
+           lhs.dstStrideC == rhs.dstStrideC &&
+           lhs.srcK == rhs.srcK &&
+           lhs.dstK == rhs.dstK;
+}
+
+DmaUnit::StagedMoveLayoutSequence &
+DmaUnit::stagedMoveLayoutSequence()
+{
+    panic_if(!stagedMoveLayoutState.has_value(),
+             "%s: missing staged move_layout sequence state", name());
+    return *stagedMoveLayoutState;
+}
+
+const DmaUnit::StagedMoveLayoutSequence &
+DmaUnit::stagedMoveLayoutSequence() const
+{
+    panic_if(!stagedMoveLayoutState.has_value(),
+             "%s: missing staged move_layout sequence state", name());
+    return *stagedMoveLayoutState;
+}
+
+void
+DmaUnit::registerStagedMoveLayoutMacro(MacroCmdContext &macroCmd,
+                                       DmaMacroState &state)
+{
+    const auto &cmd = state.parsedCmd;
+    panic_if(!isStagedMoveLayout(cmd),
+             "%s: staged move_layout registration requires a staged "
+             "move_layout command",
+             name());
+
+    if (!stagedMoveLayoutState.has_value()) {
+        panic_if(cmd.stage != CommandStage::Load,
+                 "DmaUnit: staged move_layout sequence must start with Load");
+
+        DmaMacroState plan_state;
+        plan_state.parsedCmd = cmd;
+        buildMoveLayoutPlans(plan_state);
+
+        StagedMoveLayoutSequence seq;
+        seq.descriptor = cmd;
+        seq.iterationPlans = std::move(plan_state.iterationPlans);
+        seq.loadMacroId = macroCmd.macroCmdId;
+        stagedMoveLayoutState = std::move(seq);
+        state.stagedMoveLayout = true;
+        return;
+    }
+
+    auto &seq = stagedMoveLayoutSequence();
+    panic_if(!stagedMoveLayoutDescriptorsMatch(seq.descriptor, cmd),
+             "DmaUnit: staged move_layout command does not match the "
+             "active staged sequence");
+
+    switch (cmd.stage) {
+      case CommandStage::Load:
+        panic_if(seq.loadMacroId.has_value(),
+                 "DmaUnit: staged move_layout already has a Load command");
+        seq.loadMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Compute:
+        panic_if(seq.computeMacroId.has_value(),
+                 "DmaUnit: staged move_layout already has a Compute command");
+        seq.computeMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Store:
+        panic_if(seq.storeMacroId.has_value(),
+                 "DmaUnit: staged move_layout already has a Store command");
+        seq.storeMacroId = macroCmd.macroCmdId;
+        break;
+      case CommandStage::Legacy:
+        panic("%s: staged move_layout registration reached Legacy stage",
+              name());
+    }
+
+    state.stagedMoveLayout = true;
 }
 
 bool
@@ -998,6 +1122,215 @@ DmaUnit::appendWriteUop(MacroCmdContext &macroCmd, Addr addr, size_t size,
     uop.size = size;
     uop.data = data;
     macroCmd.uopQueue.push_back(std::move(uop));
+}
+
+void
+DmaUnit::queueStagedMoveLayoutWork(MacroCmdContext &macroCmd,
+                                   DmaMacroState &state)
+{
+    auto &seq = stagedMoveLayoutSequence();
+    while (macroCmd.uopQueue.empty()) {
+        switch (state.parsedCmd.stage) {
+          case CommandStage::Load:
+          {
+            if (seq.nextLoadIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (seq.loadedIteration.has_value()) {
+                return;
+            }
+
+            const size_t iteration = seq.nextLoadIteration;
+            const auto &plan = seq.iterationPlans.at(iteration);
+            if (seq.computedIteration.has_value() &&
+                destLineHazard(plan,
+                               seq.iterationPlans.at(*seq.computedIteration))) {
+                return;
+            }
+            state.stagedIterationInFlight = iteration;
+            for (size_t i = 0; i < plan.sourceLines.size(); ++i) {
+                appendReadUop(macroCmd, state, iteration,
+                              PendingMvinKind::SourceLine, i,
+                              plan.sourceLines[i].lineAddr, CacheLineBytes);
+            }
+            for (size_t i = 0; i < plan.destLines.size(); ++i) {
+                appendReadUop(macroCmd, state, iteration,
+                              PendingMvinKind::DestLine, i,
+                              plan.destLines[i].lineAddr, CacheLineBytes);
+            }
+            if (!macroCmd.uopQueue.empty()) {
+                return;
+            }
+
+            seq.loadedIteration = iteration;
+            seq.nextLoadIteration++;
+            state.stagedIterationInFlight.reset();
+            continue;
+          }
+
+          case CommandStage::Compute:
+          {
+            if (seq.nextComputeIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (!seq.loadedIteration.has_value() ||
+                *seq.loadedIteration != seq.nextComputeIteration ||
+                seq.computedIteration.has_value()) {
+                return;
+            }
+
+            const size_t iteration = seq.nextComputeIteration;
+            state.stagedIterationInFlight = iteration;
+            appendExecUop(macroCmd,
+                          std::max<Tick>(1,
+                              seq.iterationPlans.at(iteration).execLatency));
+            macroCmd.uopQueue.back().token = iteration;
+            return;
+          }
+
+          case CommandStage::Store:
+          {
+            if (seq.nextStoreIteration >= seq.iterationPlans.size()) {
+                markEpiloguePending(macroCmd);
+                return;
+            }
+            if (!seq.computedIteration.has_value() ||
+                *seq.computedIteration != seq.nextStoreIteration) {
+                return;
+            }
+
+            const size_t iteration = seq.nextStoreIteration;
+            const auto &plan = seq.iterationPlans.at(iteration);
+            state.stagedIterationInFlight = iteration;
+            for (const auto &line : plan.destLines) {
+                appendWriteUop(macroCmd, line.lineAddr, CacheLineBytes,
+                               std::vector<uint8_t>(line.lineData.begin(),
+                                                    line.lineData.end()));
+            }
+            if (!macroCmd.uopQueue.empty()) {
+                return;
+            }
+
+            panic_if(!seq.computedIteration.has_value() ||
+                         *seq.computedIteration != iteration,
+                     "%s: staged move_layout store lost computed batch %llu",
+                     name(), static_cast<unsigned long long>(iteration));
+            seq.computedIteration.reset();
+            seq.nextStoreIteration++;
+            if (seq.overlapObservedStoreIteration == iteration) {
+                seq.overlapObservedStoreIteration.reset();
+            }
+            state.stagedIterationInFlight.reset();
+            continue;
+          }
+
+          case CommandStage::Legacy:
+            panic("%s: staged move_layout queue reached Legacy stage",
+                  name());
+        }
+    }
+}
+
+void
+DmaUnit::wakeStagedMoveLayoutMacros()
+{
+    if (!stagedMoveLayoutState.has_value()) {
+        return;
+    }
+
+    auto try_wake = [this](const std::optional<uint64_t> &macro_id_opt) {
+        if (!macro_id_opt.has_value()) {
+            return;
+        }
+
+        auto macro_it = macroCmdContexts.find(*macro_id_opt);
+        if (macro_it == macroCmdContexts.end()) {
+            return;
+        }
+
+        auto &macro_cmd = macro_it->second;
+        if (macro_cmd.phase != Phase::Active || macro_cmd.waitingCallback ||
+            !macro_cmd.uopQueue.empty()) {
+            return;
+        }
+
+        auto &state = macroState(*macro_id_opt);
+        if (!state.stagedMoveLayout) {
+            return;
+        }
+        queueStagedMoveLayoutWork(macro_cmd, state);
+    };
+
+    const auto &seq = stagedMoveLayoutSequence();
+    try_wake(seq.computeMacroId);
+    try_wake(seq.loadMacroId);
+    try_wake(seq.storeMacroId);
+    tryScheduleIssue();
+}
+
+void
+DmaUnit::observeStagedMoveLayoutOverlap(const DmaMacroState &state,
+                                        size_t iteration)
+{
+    if (!stagedMoveLayoutState.has_value()) {
+        return;
+    }
+
+    auto &seq = stagedMoveLayoutSequence();
+    size_t store_iteration = 0;
+    std::optional<uint64_t> other_macro_id;
+    if (state.parsedCmd.stage == CommandStage::Load) {
+        if (iteration == 0) {
+            return;
+        }
+        store_iteration = iteration - 1;
+        other_macro_id = seq.storeMacroId;
+    } else if (state.parsedCmd.stage == CommandStage::Store) {
+        store_iteration = iteration;
+        other_macro_id = seq.loadMacroId;
+    } else {
+        return;
+    }
+
+    if (seq.overlapObservedStoreIteration == store_iteration ||
+        !other_macro_id.has_value()) {
+        return;
+    }
+
+    for (const auto &entry : activeMemTxns) {
+        const auto &txn = entry.second;
+        if (txn.macroCmdId != *other_macro_id) {
+            continue;
+        }
+
+        const auto &other_state = macroState(txn.macroCmdId);
+        if (!other_state.stagedIterationInFlight.has_value()) {
+            continue;
+        }
+
+        if (state.parsedCmd.stage == CommandStage::Load) {
+            if (*other_state.stagedIterationInFlight != store_iteration) {
+                continue;
+            }
+        } else {
+            if (*other_state.stagedIterationInFlight != store_iteration + 1) {
+                continue;
+            }
+        }
+
+        seq.overlapObservedStoreIteration = store_iteration;
+        observedBatchOverlapCountValue++;
+        DPRINTF(DmaUnit,
+                "DMA_OVERLAP_OBSERVE store_iter=%llu load_iter=%llu "
+                "observed=%llu\n",
+                static_cast<unsigned long long>(store_iteration),
+                static_cast<unsigned long long>(store_iteration + 1),
+                static_cast<unsigned long long>(
+                    observedBatchOverlapCountValue));
+        return;
+    }
 }
 
 void
@@ -1167,15 +1500,31 @@ DmaUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
     DmaMacroState state;
     state.parsedCmd = parseCommand(macroCmd.cmd);
     validateParsedCommand(state.parsedCmd);
-    state.runtimeStage = initialRuntimeStage(state.parsedCmd);
-    buildIterationPlans(state);
+    if (stagedMoveLayoutState.has_value() &&
+        !isStagedMoveLayout(state.parsedCmd)) {
+        panic("DmaUnit: staged move_layout sequence does not allow "
+              "interleaved DMA commands");
+    }
+
     macroStates.emplace(macroCmd.macroCmdId, std::move(state));
+    auto &stored = macroState(macroCmd.macroCmdId);
+    if (isStagedMoveLayout(stored.parsedCmd)) {
+        registerStagedMoveLayoutMacro(macroCmd, stored);
+        return;
+    }
+
+    stored.runtimeStage = initialRuntimeStage(stored.parsedCmd);
+    buildIterationPlans(stored);
 }
 
 void
 DmaUnit::buildUops(MacroCmdContext &macroCmd)
 {
     auto &state = macroState(macroCmd.macroCmdId);
+    if (state.stagedMoveLayout) {
+        queueStagedMoveLayoutWork(macroCmd, state);
+        return;
+    }
     queueNextStage(macroCmd, state);
 }
 
@@ -1188,7 +1537,20 @@ DmaUnit::onMemUopComplete(MacroCmdContext &macroCmd,
     if (pending_it != state.pendingMvinTxns.end()) {
         const PendingMvinTxn pending = pending_it->second;
         state.pendingMvinTxns.erase(pending_it);
-        auto &plan = iterationPlan(state, pending.iteration);
+        IterationPlan *plan_ptr = nullptr;
+        if (state.stagedMoveLayout) {
+            auto &seq = stagedMoveLayoutSequence();
+            panic_if(pending.iteration >= seq.iterationPlans.size(),
+                     "%s: staged iteration %llu out of range (num plans=%llu)",
+                     name(),
+                     static_cast<unsigned long long>(pending.iteration),
+                     static_cast<unsigned long long>(
+                         seq.iterationPlans.size()));
+            plan_ptr = &seq.iterationPlans.at(pending.iteration);
+        } else {
+            plan_ptr = &iterationPlan(state, pending.iteration);
+        }
+        auto &plan = *plan_ptr;
 
         switch (pending.kind) {
           case PendingMvinKind::SourceLine: {
@@ -1205,6 +1567,54 @@ DmaUnit::onMemUopComplete(MacroCmdContext &macroCmd,
                         CacheLineBytes);
             break;
           }
+        }
+    }
+
+    if (state.stagedMoveLayout) {
+        panic_if(!state.stagedIterationInFlight.has_value(),
+                 "%s: staged move_layout mem completion missing "
+                 "iteration tracking",
+                 name());
+        const size_t iteration = *state.stagedIterationInFlight;
+        observeStagedMoveLayoutOverlap(state, iteration);
+        if (!macroCmd.uopQueue.empty()) {
+            return;
+        }
+
+        auto &seq = stagedMoveLayoutSequence();
+        switch (state.parsedCmd.stage) {
+          case CommandStage::Load:
+            panic_if(seq.loadedIteration.has_value(),
+                     "%s: staged move_layout read slot is already occupied",
+                     name());
+            seq.loadedIteration = iteration;
+            seq.nextLoadIteration = iteration + 1;
+            state.stagedIterationInFlight.reset();
+            queueStagedMoveLayoutWork(macroCmd, state);
+            wakeStagedMoveLayoutMacros();
+            return;
+
+          case CommandStage::Store:
+            panic_if(!seq.computedIteration.has_value() ||
+                         *seq.computedIteration != iteration,
+                     "%s: staged move_layout store completed unexpected "
+                     "iteration %llu",
+                     name(),
+                     static_cast<unsigned long long>(iteration));
+            seq.computedIteration.reset();
+            seq.nextStoreIteration = iteration + 1;
+            if (seq.overlapObservedStoreIteration == iteration) {
+                seq.overlapObservedStoreIteration.reset();
+            }
+            state.stagedIterationInFlight.reset();
+            queueStagedMoveLayoutWork(macroCmd, state);
+            wakeStagedMoveLayoutMacros();
+            return;
+
+          case CommandStage::Compute:
+          case CommandStage::Legacy:
+            panic("%s: unexpected staged move_layout memory completion stage",
+                  name());
         }
     }
 
@@ -1235,8 +1645,38 @@ void
 DmaUnit::onExecUopComplete(MacroCmdContext &macroCmd,
                            const MicroOpContext &uop)
 {
-    (void)uop;
     auto &state = macroState(macroCmd.macroCmdId);
+    if (state.stagedMoveLayout) {
+        auto &seq = stagedMoveLayoutSequence();
+        const size_t iteration = uop.token;
+        panic_if(!state.stagedIterationInFlight.has_value() ||
+                     *state.stagedIterationInFlight != iteration,
+                 "%s: staged move_layout compute completed unexpected "
+                 "iteration %llu",
+                 name(), static_cast<unsigned long long>(iteration));
+        panic_if(!seq.loadedIteration.has_value() ||
+                     *seq.loadedIteration != iteration,
+                 "%s: staged move_layout compute requires loaded "
+                 "iteration %llu",
+                 name(), static_cast<unsigned long long>(iteration));
+        panic_if(seq.computedIteration.has_value(),
+                 "%s: staged move_layout write slot is already occupied",
+                 name());
+
+        DmaMacroState exec_state;
+        exec_state.parsedCmd = state.parsedCmd;
+        auto &plan = seq.iterationPlans.at(iteration);
+        executeIteration(exec_state, plan);
+
+        seq.loadedIteration.reset();
+        seq.computedIteration = iteration;
+        seq.nextComputeIteration = iteration + 1;
+        state.stagedIterationInFlight.reset();
+        queueStagedMoveLayoutWork(macroCmd, state);
+        wakeStagedMoveLayoutMacros();
+        return;
+    }
+
     auto &plan = iterationPlan(state, state.currentIteration);
     executeIteration(state, plan);
 
@@ -1250,6 +1690,26 @@ DmaUnit::onExecUopComplete(MacroCmdContext &macroCmd,
 void
 DmaUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
 {
+    auto state_it = macroStates.find(macroCmd.macroCmdId);
+    if (state_it != macroStates.end() && state_it->second.stagedMoveLayout &&
+        stagedMoveLayoutState.has_value()) {
+        auto &seq = stagedMoveLayoutSequence();
+        if (seq.loadMacroId == macroCmd.macroCmdId) {
+            seq.loadMacroId.reset();
+        }
+        if (seq.computeMacroId == macroCmd.macroCmdId) {
+            seq.computeMacroId.reset();
+        }
+        if (seq.storeMacroId == macroCmd.macroCmdId) {
+            seq.storeMacroId.reset();
+        }
+        if (!seq.loadMacroId.has_value() &&
+            !seq.computeMacroId.has_value() &&
+            !seq.storeMacroId.has_value() &&
+            seq.nextStoreIteration >= seq.iterationPlans.size()) {
+            stagedMoveLayoutState.reset();
+        }
+    }
     macroStates.erase(macroCmd.macroCmdId);
 }
 
@@ -1265,6 +1725,25 @@ DmaUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
 {
     const auto &state = macroState(macroCmd.macroCmdId);
     const auto &cmd = state.parsedCmd;
+    size_t iteration_plans = state.iterationPlans.size();
+    size_t current_iteration = state.currentIteration;
+    if (state.stagedMoveLayout && stagedMoveLayoutState.has_value()) {
+        const auto &seq = stagedMoveLayoutSequence();
+        iteration_plans = seq.iterationPlans.size();
+        switch (cmd.stage) {
+          case CommandStage::Load:
+            current_iteration = seq.nextLoadIteration;
+            break;
+          case CommandStage::Compute:
+            current_iteration = seq.nextComputeIteration;
+            break;
+          case CommandStage::Store:
+            current_iteration = seq.nextStoreIteration;
+            break;
+          case CommandStage::Legacy:
+            break;
+        }
+    }
 
     os << "\"stage\":";
     appendJsonString(os, stageName(cmd.stage));
@@ -1301,9 +1780,15 @@ DmaUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
     os << ",\"bank_cfg\":" << cmd.bankCfg;
     os << ",\"word15\":" << cmd.word15;
     os << ",\"fill_value\":" << static_cast<unsigned>(cmd.fillValue);
-    os << ",\"iteration_plans\":" << state.iterationPlans.size();
-    os << ",\"current_iteration\":" << state.currentIteration;
+    os << ",\"iteration_plans\":" << iteration_plans;
+    os << ",\"current_iteration\":" << current_iteration;
     os << ",\"pending_mvin_txns\":" << state.pendingMvinTxns.size();
+}
+
+uint64_t
+DmaUnit::observedBatchOverlapCount() const
+{
+    return observedBatchOverlapCountValue;
 }
 
 } // namespace gem5
