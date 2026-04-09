@@ -21,14 +21,6 @@ enum ReduceSumI32HwPipelineLayout
     SYNC_INDICATOR = 0x92U,
 };
 
-static inline uint32_t
-spm_slot_addr(uint32_t port)
-{
-    return (uint32_t)(NPU_MEM_DEFAULT_SPM_BASE_ADDR +
-                      ((uint64_t)port *
-                       NPU_MEM_DEFAULT_SPM_SLOT_STRIDE_BYTES));
-}
-
 int
 main(void)
 {
@@ -36,8 +28,11 @@ main(void)
     uint32_t src_bits[ELEM_COUNT];
     int32_t expected_i32 = 0;
     uint32_t expected = 0;
-    NpuCmd cmd;
-
+    uint32_t shape = 0U;
+    uint32_t stride = 0U;
+    uint32_t w_layout_log2 = 0U;
+    uint32_t c_layout_log2 = 0U;
+    uint32_t layout_order = 0U;
     for (uint32_t idx = 0U; idx < ELEM_COUNT; ++idx) {
         memcpy(&src_bits[idx], &src_i32[idx], sizeof(src_bits[idx]));
     }
@@ -48,12 +43,28 @@ main(void)
     npu_golden_vpu_reduce_sum_i32(src_i32, &expected_i32, ELEM_COUNT);
     memcpy(&expected, &expected_i32, sizeof(expected));
 
-    vpu_cmd_init_raw(&cmd, VPU_DEVICE_ID, VPU_OP_VREDUCE_SUM, SYNC_INDICATOR);
-    vpu_cmd_set_common_fields(
-        &cmd, 0x1U, 0x2U, 1U, 0U, ELEM_COUNT, sizeof(uint32_t),
-        sizeof(uint32_t), VPU_DATA_I32, 0U, spm_slot_addr(SRC_PORT), 0U, 0U,
-        spm_slot_addr(DST_PORT));
-    cmd.launchCmd();
+    vpu_default_tensor_geometry(ELEM_COUNT, VPU_DATA_I32, &shape, &stride,
+                                &w_layout_log2, &c_layout_log2,
+                                &layout_order);
+    vpu_cmd_launch_load_one(VPU_DEVICE_ID, 0U, SRC_PORT, ELEM_COUNT,
+                            sizeof(uint32_t), VPU_DATA_I32,
+                            VPU_DEFAULT_INPUT0_BUFFER);
+    {
+        const VpuTensorDesc dst = vpu_tensor_desc(
+            vpu_local_addr(VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER),
+            vpu_pack_shape_field(1U, 1U), vpu_pack_stride_field(1U, 1U));
+        const VpuTensorDesc src0 = vpu_tensor_desc(
+            vpu_local_addr(VPU_LOCAL_INPUT_BASE, VPU_DEFAULT_INPUT0_BUFFER),
+            shape, stride);
+        const VpuTensorDesc src1 = {0U, 0U, 0U};
+        vpu_cmd_launch_compute(VPU_DEVICE_ID, VPU_OP_VREDUCE_SUM, 0U,
+                               VPU_DATA_I32, VPU_DATA_I32, VPU_DATA_I32,
+                               w_layout_log2, c_layout_log2, layout_order, &dst,
+                               &src0, &src1, 0U);
+    }
+    vpu_cmd_launch_store_one(VPU_DEVICE_ID, SYNC_INDICATOR, DST_PORT, 1U,
+                             sizeof(uint32_t), VPU_DATA_I32,
+                             VPU_LOCAL_OUTPUT_BASE, VPU_DEFAULT_OUTPUT_BUFFER);
 
     if (npu_wait_u32_scalar_match(NULL,
                                   npu_spm_slot_word_ptr_default(DST_PORT),

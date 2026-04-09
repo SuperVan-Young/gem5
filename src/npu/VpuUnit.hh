@@ -42,32 +42,6 @@
 namespace gem5
 {
 
-/*
- * VpuUnit is now a semantic layer on top of the generic SEU issue/uop
- * infrastructure.
- *
- * Public infrastructure inherited from SpecializedExecutionUnit:
- * - dispatch/issue scheduling
- * - mem-side transaction routing
- * - exec uop timing and callback delivery
- * - completion sync writes and queue ownership
- *
- * VpuUnit-specific responsibilities:
- * - decode VPU commands
- * - classify commands into load/store/compute
- * - validate SPM-vs-local-buffer address usage
- * - manage the configurable local input/output buffer arrays
- * - run vector arithmetic in exec callbacks
- *
- * Current modeling rule:
- * - load/store commands may access SPM
- * - compute commands normally consume/produce local-buffer addresses
- * - if a compute command names SPM in any input/output field, the SEU drains
- *   outstanding issue activity first and the VPU auto-inserts batched
- *   load/compute/store uops behind the same macro command
- * - helper code may still decompose one software-level VPU operation into
- *   several load/compute/store macro commands; that path remains supported
- */
 class VpuUnit : public SpecializedExecutionUnit
 {
   private:
@@ -75,23 +49,20 @@ class VpuUnit : public SpecializedExecutionUnit
     static constexpr Addr SpmBase = 0x60000000;
     static constexpr Addr SpmSlotStride = 0x40;
 
-    static constexpr size_t ReadMaskWord = 1;
-    static constexpr size_t WriteMaskWord = 2;
-    static constexpr size_t RepetitionWord = 3;
-    static constexpr size_t FlagsWord = 4;
-    static constexpr size_t ElemCountWord = 5;
-    static constexpr size_t SrcStrideWord = 6;
-    static constexpr size_t DstStrideWord = 7;
-    static constexpr size_t DataTypeWord = 8;
-    static constexpr size_t ScalarBitsWord = 9;
-    static constexpr size_t Src0AddrWord = 10;
-    static constexpr size_t Src1AddrWord = 11;
-    static constexpr size_t Src2AddrWord = 12;
-    static constexpr size_t DstAddrWord = 13;
+    static constexpr size_t FormatWord = 1;
+    static constexpr size_t DstAddrWord = 2;
+    static constexpr size_t DstShapeWord = 3;
+    static constexpr size_t DstStrideWord = 4;
+    static constexpr size_t Src0AddrWord = 5;
+    static constexpr size_t Src0ShapeWord = 6;
+    static constexpr size_t Src0StrideWord = 7;
+    static constexpr size_t Src1AddrWord = 8;
+    static constexpr size_t Src1ShapeWord = 9;
+    static constexpr size_t Src1StrideWord = 10;
+    static constexpr size_t Extra0Word = 11;
 
     enum class Opcode : uint8_t
     {
-        Exec = 0x0,
         VAdd = 0x1,
         VSub = 0x2,
         VMul = 0x3,
@@ -100,19 +71,29 @@ class VpuUnit : public SpecializedExecutionUnit
         VCvtI2F = 0x6,
         VCvtF2I = 0x7,
         VSqrt = 0x8,
-        VFma = 0x9,
         VReduceSum = 0xa,
         VReduceMax = 0xb,
         VLoad = 0xc,
         VStore = 0xd,
         VExp = 0xe,
-        VSoftmax = 0xf,
     };
 
     enum class DataType : uint32_t
     {
-        Int32 = 0x0,
-        Float32 = 0x1,
+        Int8 = 0x0,
+        Int16 = 0x1,
+        Int32 = 0x2,
+        UInt8 = 0x4,
+        UInt16 = 0x5,
+        UInt32 = 0x6,
+        Float16 = 0x9,
+        Float32 = 0xa,
+    };
+
+    enum class LayoutOrder : uint8_t
+    {
+        WC = 0,
+        CW = 1,
     };
 
     enum class BufferRole : uint8_t
@@ -121,26 +102,39 @@ class VpuUnit : public SpecializedExecutionUnit
         Output,
     };
 
+    struct AxisPair
+    {
+        uint32_t w = 1;
+        uint32_t c = 1;
+    };
+
+    struct TensorDesc
+    {
+        Addr addr = 0;
+        AxisPair shape;
+        AxisPair stride;
+    };
+
     struct DecodedVectorOp
     {
-        Opcode opcode = Opcode::Exec;
-        DataType dataType = DataType::Int32;
-        uint32_t flags = 0;
-        uint32_t elemCount = 0;
-        uint32_t srcStrideBytes = 0;
-        uint32_t dstStrideBytes = 0;
+        Opcode opcode = Opcode::VAdd;
+        DataType dstType = DataType::Int32;
+        DataType src0Type = DataType::Int32;
+        DataType src1Type = DataType::Int32;
+        LayoutOrder layoutOrder = LayoutOrder::WC;
+        uint32_t wLayoutElems = 1;
+        uint32_t cLayoutElems = 1;
         uint32_t scalarBits = 0;
-        uint32_t repetition = 1;
-        size_t elemSize = sizeof(uint32_t);
-        size_t srcSpanBytes = sizeof(uint32_t);
-        size_t dstSpanBytes = sizeof(uint32_t);
-        bool legacyExec = false;
+        size_t dstElemSize = sizeof(uint32_t);
+        size_t src0ElemSize = sizeof(uint32_t);
+        size_t src1ElemSize = sizeof(uint32_t);
+        bool hasSrc1 = false;
+        bool isReduce = false;
     };
 
     struct LocalAddr
     {
         BufferRole role = BufferRole::Input;
-        PortID portId = InvalidPortID;
         uint32_t bufferIndex = 0;
         size_t offset = 0;
     };
@@ -153,46 +147,20 @@ class VpuUnit : public SpecializedExecutionUnit
 
     struct VpuMacroState
     {
-        enum class RuntimeStage : uint8_t
-        {
-            SourceLoads,
-            Compute,
-            Stores,
-        };
-
-        struct PendingMemOp
-        {
-            enum class Kind : uint8_t
-            {
-                SourceLoad,
-                ResultStore,
-            };
-
-            Kind kind = Kind::SourceLoad;
-            size_t sourceIndex = 0;
-            PortID logicalPort = InvalidPortID;
-        };
-
         DecodedVectorOp op;
-        uint32_t readMask = 0;
-        uint32_t writeMask = 0;
-        Addr src0Addr = 0;
-        Addr src1Addr = 0;
-        Addr src2Addr = 0;
-        Addr dstAddr = 0;
-        std::vector<PortID> readPorts;
-        std::vector<PortID> writePorts;
-        bool usesSpmPipeline = false;
-        RuntimeStage runtimeStage = RuntimeStage::Compute;
-        std::unordered_map<uint64_t, PendingMemOp> pendingMemOps;
-        size_t completedExecUops = 0;
+        TensorDesc dst;
+        TensorDesc src0;
+        TensorDesc src1;
+        size_t dstSpanBytes = 0;
+        size_t src0SpanBytes = 0;
+        size_t src1SpanBytes = 0;
+        uint32_t completedExecUops = 0;
     };
 
     enum class ExecToken : uint64_t
     {
-        WaitInputs = 1,
+        WaitStoreData = 1,
         RunCompute = 2,
-        WaitStoreData = 3,
     };
 
     const uint8_t deviceId;
@@ -205,76 +173,74 @@ class VpuUnit : public SpecializedExecutionUnit
     const Addr localInputBase;
     const Addr localOutputBase;
     const uint32_t localBufferStride;
+    const uint32_t dlenBytes;
 
-    std::vector<std::vector<LocalBufferSlot>> inputBuffers;
-    std::vector<std::vector<LocalBufferSlot>> outputBuffers;
+    std::vector<LocalBufferSlot> inputBuffers;
+    std::vector<LocalBufferSlot> outputBuffers;
     std::unordered_map<uint64_t, VpuMacroState> macroStates;
 
     Tick lastLinearExecuteLatencyValue = 0;
     Tick lastLinearCompletionTickValue = 0;
 
-    uint32_t unpackWord(const std::vector<uint8_t> &bytes) const;
-    std::vector<uint8_t> packWord(uint32_t value) const;
     uint32_t cmdWord(const std::vector<uint8_t> &cmd, size_t wordIdx) const;
     Addr slotAddr(PortID portId, Addr offset = 0) const;
     Opcode decodeOpcode(uint8_t opCode) const;
+    DataType decodeDataType(uint32_t raw) const;
+    AxisPair decodeAxisField(uint32_t raw) const;
+    TensorDesc decodeTensor(const std::vector<uint8_t> &cmd,
+                            size_t addrWord) const;
+    size_t elemSizeBytes(DataType dataType) const;
+    bool isFloatType(DataType dataType) const;
+    bool isSignedType(DataType dataType) const;
+    const char *opcodeName(Opcode opcode) const;
+    const char *dataTypeName(DataType dataType) const;
     DecodedVectorOp decodeVectorOp(const MacroCmdContext &macroCmd) const;
-    std::vector<PortID> decodeMask(uint32_t mask) const;
-    void validatePortLayout(const VpuMacroState &state) const;
-    void validateCommand(const MacroCmdContext &macroCmd,
-                         VpuMacroState &state) const;
     bool isComputeOpcode(Opcode opcode) const;
+    bool isLutOpcode(Opcode opcode) const;
+    bool isLinearOpcode(Opcode opcode) const;
     bool isSpmAddr(Addr addr) const;
     bool isInputLocalAddr(Addr addr) const;
     bool isOutputLocalAddr(Addr addr) const;
     LocalAddr decodeLocalAddr(Addr addr, BufferRole expected,
                               size_t accessSize) const;
     PortID decodeSpmPort(Addr addr, size_t accessSize) const;
-    size_t resultSpanBytes(const VpuMacroState &state) const;
-    Addr sourceAddr(const VpuMacroState &state, size_t sourceIndex) const;
-    bool sourceAddrIsSpm(const VpuMacroState &state, size_t sourceIndex) const;
-    bool destAddrIsSpm(const VpuMacroState &state) const;
-    LocalAddr inputSlotAddr(const VpuMacroState &state, size_t sourceIndex,
-                            PortID logicalPort) const;
-    LocalAddr outputSlotAddr(const VpuMacroState &state, PortID logicalPort)
-        const;
-    bool computeTouchesSpm(const std::vector<uint8_t> &cmd) const;
+    uint32_t layoutLowestDim(const DecodedVectorOp &op) const;
+    size_t tileElems(const DecodedVectorOp &op) const;
+    size_t tensorSpanBytes(const TensorDesc &tensor, size_t elemSize,
+                           const DecodedVectorOp &op) const;
+    size_t tensorElemOffset(const TensorDesc &tensor, const DecodedVectorOp &op,
+                            uint32_t w, uint32_t c, size_t elemSize) const;
+    AxisPair broadcastShape(const TensorDesc &src0, const TensorDesc &src1) const;
+    void validateTensor(const TensorDesc &tensor, size_t elemSize,
+                        const DecodedVectorOp &op, const char *label) const;
+    void validateCommand(const MacroCmdContext &macroCmd,
+                         VpuMacroState &state) const;
     Tick computeExecLatency(const VpuMacroState &state);
-    uint32_t loadUint32(
-        const std::vector<uint8_t> &bytes, size_t offset) const;
-    float loadFloat32(const std::vector<uint8_t> &bytes, size_t offset) const;
-    void storeUint32(std::vector<uint8_t> &bytes, size_t offset,
-                     uint32_t value) const;
-    void storeFloat32(std::vector<uint8_t> &bytes, size_t offset,
-                      float value) const;
-    bool isLutOpcode(Opcode opcode) const;
-    bool isLinearOpcode(Opcode opcode) const;
     LutUnit::Operation lutOperation(Opcode opcode) const;
     LocalBufferSlot &bufferSlot(const LocalAddr &addr);
     const LocalBufferSlot &bufferSlot(const LocalAddr &addr) const;
-    const std::vector<uint8_t> &sourceBytes(const VpuMacroState &state,
-                                            size_t sourceIndex,
-                                            PortID logicalPort) const;
-    bool sourceReady(const VpuMacroState &state, size_t sourceIndex,
-                     PortID logicalPort) const;
-    bool computeInputsReady(const VpuMacroState &state) const;
+    const std::vector<uint8_t> &sourceBytes(const TensorDesc &tensor,
+                                            const DecodedVectorOp &op,
+                                            size_t spanBytes) const;
+    bool sourceReady(const TensorDesc &tensor, BufferRole role,
+                     size_t spanBytes) const;
     bool storeSourceReady(const VpuMacroState &state) const;
-    void writeResultBytes(const VpuMacroState &state, PortID dstPort,
-                          const std::vector<uint8_t> &bytes) const;
-    void appendComputeWhenReady(MacroCmdContext &macroCmd,
-                                VpuMacroState &state);
-    void appendHwPipelineSourceLoads(MacroCmdContext &macroCmd,
-                                     VpuMacroState &state);
-    void appendHwPipelineStores(MacroCmdContext &macroCmd,
-                                VpuMacroState &state);
-    void appendStoreWhenReady(MacroCmdContext &macroCmd,
-                              const VpuMacroState &state);
-    const char *opcodeName(Opcode opcode) const;
-    const char *dataTypeName(DataType dataType) const;
-    void executeLegacy(VpuMacroState &state) const;
+    void writeResultBytes(const TensorDesc &dst, const std::vector<uint8_t> &bytes,
+                          size_t spanBytes) const;
+    uint64_t loadUnsignedValue(const std::vector<uint8_t> &bytes, size_t offset,
+                               size_t elemSize) const;
+    int64_t loadSignedValue(const std::vector<uint8_t> &bytes, size_t offset,
+                           size_t elemSize) const;
+    double loadFloatValue(const std::vector<uint8_t> &bytes, size_t offset,
+                          DataType dataType) const;
+    void storeUnsignedValue(std::vector<uint8_t> &bytes, size_t offset,
+                            uint64_t value, size_t elemSize) const;
+    void storeSignedValue(std::vector<uint8_t> &bytes, size_t offset,
+                          int64_t value, size_t elemSize) const;
+    void storeFloatValue(std::vector<uint8_t> &bytes, size_t offset,
+                         double value, DataType dataType) const;
     void executeBinary(const VpuMacroState &state) const;
     void executeUnary(const VpuMacroState &state) const;
-    void executeFma(const VpuMacroState &state) const;
     void executeReduce(const VpuMacroState &state) const;
     void executeLoadStoreBypass(const VpuMacroState &state) const;
     void executeVectorOp(VpuMacroState &state) const;

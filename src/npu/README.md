@@ -237,13 +237,11 @@ Current scope and caveats:
 - this is a functional plus timing-shape model, not a calibrated production
   vector ISA timing model.
 - only timing mode is supported.
-- `VSoftmax` is implemented as one VPU command with internal
-  `reduce_max + exp + reduce_sum + normalize` steps, but those substages are
-  not yet exported as separate timing counters.
+- `VSoftmax` is no longer part of the active VPU ISA surface.
 
 #### Nonlinear Path Through `LutUnit`
 
-`VSQRT`, `VEXP`, and `VSOFTMAX` no longer depend on hidden host-side nonlinear
+`VSQRT` and `VEXP` no longer depend on hidden host-side nonlinear
 timing inside `VpuUnit`. They now use an explicit `LutUnit` resource.
 
 Current `LutUnit` model:
@@ -408,8 +406,8 @@ and VPU tests as well as DMA SPM transfers.
 - `DmaUnit` currently handles only `dataType == 0`.
 - `LutUnit` is still a first-pass timing model: single resource, fixed latency,
   no bank-level contention, and no explicit queue-depth/backpressure policy.
-- `VSoftmax` already has the correct functional boundary, but internal
-  substages are not yet exported as separate timing counters.
+- Softmax is intentionally out of the current VPU ISA surface because it needs
+  extra workspace beyond the internal-buffer model.
 
 ## Recommended Regression Set
 
@@ -418,7 +416,7 @@ regression set is:
 
 - unit-style:
   - `tests/gem5/npu/testcases/vpu/unary_exp`
-  - `tests/gem5/npu/testcases/vpu/softmax_ramp`
+  - `tests/gem5/npu/testcases/vpu/unary_sqrt`
 - system-style:
   - `tests/gem5/npu/system_basic`
   - `tests/gem5/npu/testcases/system/vpu_dual_release_gate`
@@ -428,11 +426,10 @@ regression set is:
 What each group is intended to catch:
 
 - `unary_exp`: unary nonlinear path correctness plus LUT timing behavior
-- `vpu_softmax`: softmax correctness plus LUT accounting
 - `system_basic`: command queue routing, sync order, one linear op plus one LUT
   op
 - `system_vpu_dual`: two VPU instances sharing one LUT
-- `system_pipeline`: DMA + linear VPU stage + softmax stage
+- `system_pipeline`: DMA + linear VPU stage + exp stage
 - `system_multiport`: multi-port submission with shared queue and shared LUT
 
 When adding new nonlinear behavior, update at least one unit-level case and one

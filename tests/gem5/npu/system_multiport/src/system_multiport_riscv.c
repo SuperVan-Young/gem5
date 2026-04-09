@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,7 +33,7 @@ enum SystemMultiportLayout
     SYSTEM_MULTIPORT_SPM_BASE = 0x60000000U,
     SYSTEM_MULTIPORT_SRC_SLOT = 0U,
     SYSTEM_MULTIPORT_LINEAR_SLOT = 1U,
-    SYSTEM_MULTIPORT_SOFTMAX_SLOT = 2U,
+    SYSTEM_MULTIPORT_EXP_SLOT = 2U,
     SYSTEM_MULTIPORT_ELEM_COUNT = 4U,
     SYSTEM_MULTIPORT_VECTOR_BYTES = SYSTEM_MULTIPORT_ELEM_COUNT *
         sizeof(uint32_t),
@@ -206,18 +207,11 @@ push_dma_at(uint64_t port_base, uint32_t sync_idx,
 }
 
 static void
-compute_expected(const uint32_t *src, uint32_t *linear, uint32_t *softmax)
+compute_expected(const uint32_t *src, uint32_t *linear, uint32_t *exp_out)
 {
-    static const uint32_t softmax_expected[SYSTEM_MULTIPORT_ELEM_COUNT] = {
-        0x3dcff243U, // ~0.101536
-        0x3e2b6c44U, // ~0.167405
-        0x3e8d5075U, // ~0.276004
-        0x3ee8fcd9U, // ~0.455054
-    };
-
     for (uint32_t idx = 0U; idx < SYSTEM_MULTIPORT_ELEM_COUNT; ++idx) {
         linear[idx] = float_to_bits(bits_to_float(src[idx]) * 0.5f);
-        softmax[idx] = softmax_expected[idx];
+        exp_out[idx] = float_to_bits(expf(bits_to_float(linear[idx])));
     }
 }
 
@@ -231,7 +225,7 @@ cpu0_main(uint64_t port_base)
         float_to_bits(2.0f),
     };
     uint32_t linear_expected[SYSTEM_MULTIPORT_ELEM_COUNT];
-    uint32_t softmax_expected[SYSTEM_MULTIPORT_ELEM_COUNT];
+    uint32_t exp_expected[SYSTEM_MULTIPORT_ELEM_COUNT];
     uint32_t actual[SYSTEM_MULTIPORT_ELEM_COUNT];
 
     *mailbox_ptr(SYSTEM_MULTIPORT_MAILBOX_READY) = 0U;
@@ -239,10 +233,10 @@ cpu0_main(uint64_t port_base)
 
     clear_slot(SYSTEM_MULTIPORT_SRC_SLOT);
     clear_slot(SYSTEM_MULTIPORT_LINEAR_SLOT);
-    clear_slot(SYSTEM_MULTIPORT_SOFTMAX_SLOT);
+    clear_slot(SYSTEM_MULTIPORT_EXP_SLOT);
     clear_dram_dst();
     seed_dram_source(src);
-    compute_expected(src, linear_expected, softmax_expected);
+    compute_expected(src, linear_expected, exp_expected);
 
     push_dma_at(port_base, SYSTEM_MULTIPORT_DMA_SYNC,
                 SYSTEM_MULTIPORT_DRAM_SRC_BASE, SYSTEM_MULTIPORT_SPM_BASE);
@@ -275,30 +269,30 @@ cpu0_main(uint64_t port_base)
         return 1;
     }
 
-    if (float_vector_close_spm(SYSTEM_MULTIPORT_SOFTMAX_SLOT,
-                               softmax_expected, 0.03f, 0.03f) != 0) {
+    if (float_vector_close_spm(SYSTEM_MULTIPORT_EXP_SLOT,
+                               exp_expected, 0.03f, 0.03f) != 0) {
         for (uint32_t idx = 0U; idx < SYSTEM_MULTIPORT_ELEM_COUNT; ++idx) {
-            actual[idx] = spm_slot_ptr(SYSTEM_MULTIPORT_SOFTMAX_SLOT)[idx];
+            actual[idx] = spm_slot_ptr(SYSTEM_MULTIPORT_EXP_SLOT)[idx];
         }
-        print_vector("SYSTEM_MULTIPORT_SOFTMAX_EXPECTED", softmax_expected);
-        print_vector("SYSTEM_MULTIPORT_SOFTMAX_ACTUAL", actual);
+        print_vector("SYSTEM_MULTIPORT_EXP_EXPECTED", exp_expected);
+        print_vector("SYSTEM_MULTIPORT_EXP_ACTUAL", actual);
         printf("SYSTEM_MULTIPORT_TEST_FAIL\n");
         return 1;
     }
 
-    if (float_vector_close_dram(softmax_expected, 0.03f, 0.03f) != 0) {
+    if (float_vector_close_dram(exp_expected, 0.03f, 0.03f) != 0) {
         for (uint32_t idx = 0U; idx < SYSTEM_MULTIPORT_ELEM_COUNT; ++idx) {
             actual[idx] = read_word_le(
                 dram_dst_byte_ptr(idx * sizeof(uint32_t)));
         }
-        print_vector("SYSTEM_MULTIPORT_DRAM_EXPECTED", softmax_expected);
+        print_vector("SYSTEM_MULTIPORT_DRAM_EXPECTED", exp_expected);
         print_vector("SYSTEM_MULTIPORT_DRAM_ACTUAL", actual);
         printf("SYSTEM_MULTIPORT_TEST_FAIL\n");
         return 1;
     }
 
     print_vector("SYSTEM_MULTIPORT_LINEAR_FINAL", linear_expected);
-    print_vector("SYSTEM_MULTIPORT_SOFTMAX_FINAL", softmax_expected);
+    print_vector("SYSTEM_MULTIPORT_EXP_FINAL", exp_expected);
     printf("SYSTEM_MULTIPORT_TEST_PASS\n");
     return 0;
 }
@@ -311,14 +305,14 @@ cpu1_main(uint64_t port_base)
     }
 
     vpu_cmd_launch_unary_at(port_base, SYSTEM_MULTIPORT_VPU1_ID,
-                            VPU_OP_VSOFTMAX, SYSTEM_MULTIPORT_VPU1_SYNC,
+                            VPU_OP_VEXP, SYSTEM_MULTIPORT_VPU1_SYNC,
                             0x2U, 0x4U, 1U, SYSTEM_MULTIPORT_ELEM_COUNT,
                             sizeof(uint32_t), sizeof(uint32_t), VPU_DATA_F32);
     npu_launch_sync_wait_at(SYSTEM_MULTIPORT_VPU1_ID,
                             SYSTEM_MULTIPORT_VPU1_SYNC, 0U, 0U, 0U, port_base);
     push_dma_at(port_base, SYSTEM_MULTIPORT_COPYBACK_SYNC,
                 SYSTEM_MULTIPORT_SPM_BASE +
-                    (SYSTEM_MULTIPORT_SOFTMAX_SLOT *
+                    (SYSTEM_MULTIPORT_EXP_SLOT *
                      SYSTEM_MULTIPORT_SLOT_STRIDE_BYTES),
                 SYSTEM_MULTIPORT_DRAM_DST_BASE);
     npu_launch_sync_wait_at(SYSTEM_MULTIPORT_DMA_DEVICE_ID,

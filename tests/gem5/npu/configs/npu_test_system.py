@@ -476,6 +476,7 @@ class NPUTestSystemBuilder:
         input_buffer_count=2,
         output_buffer_count=2,
         local_buffer_stride=0x40,
+        dlen_bytes=4,
         base_addr=None,
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
@@ -500,18 +501,19 @@ class NPUTestSystemBuilder:
             "cmd_queue_depth": cmd_queue_depth,
             "num_mem_side_ports": num_mem_side_ports,
             "num_input_ports": (
-                num_mem_side_ports
+                max(2, num_mem_side_ports)
                 if num_input_ports is None
                 else num_input_ports
             ),
             "num_output_ports": (
-                num_mem_side_ports
+                max(1, num_mem_side_ports)
                 if num_output_ports is None
                 else num_output_ports
             ),
             "input_buffer_count": input_buffer_count,
             "output_buffer_count": output_buffer_count,
             "local_buffer_stride": local_buffer_stride,
+            "dlen_bytes": dlen_bytes,
             "debug_process_latency": debug_process_latency,
             "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
         }

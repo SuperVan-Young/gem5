@@ -14,11 +14,11 @@ class VpuUnit(SpecializedExecutionUnit):
     )
     lut = Param.LutUnit(
         LutUnit(),
-        "Shared LUT resource used by VSQRT/VEXP/VSOFTMAX; the default is a "
+        "Shared LUT resource used by VSQRT/VEXP; the default is a "
         "single-resource single-queue model",
     )
     num_input_ports = Param.Unsigned(
-        1, "Number of logical local input ports visible to compute commands"
+        2, "Number of logical local input ports visible to compute commands"
     )
     num_output_ports = Param.Unsigned(
         1, "Number of logical local output ports visible to compute commands"
@@ -38,6 +38,11 @@ class VpuUnit(SpecializedExecutionUnit):
     local_buffer_stride = Param.Unsigned(
         0x40,
         "Stride of one logical local-buffer slot in the encoded address map",
+    )
+    dlen_bytes = Param.Unsigned(
+        4,
+        "Logical dlen in bytes; the innermost layout dimension times dtype "
+        "width must equal this value",
     )
 
     cxx_exports = [

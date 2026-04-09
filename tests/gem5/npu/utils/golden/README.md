@@ -12,6 +12,4 @@
 
 - `vpu_unary.hh/.cc`
 - `vpu_elemwise.hh/.cc`
-- `vpu_fma.hh/.cc`
 - `vpu_reduce.hh/.cc`
-- `vpu_softmax.hh/.cc`

@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "cmd/common.hh"
@@ -27,7 +28,7 @@ enum SystemPipelineLayout
     SYSTEM_PIPELINE_SPM_BASE = 0x60000000U,
     SYSTEM_PIPELINE_SRC_SLOT = 0U,
     SYSTEM_PIPELINE_LINEAR_SLOT = 1U,
-    SYSTEM_PIPELINE_SOFTMAX_SLOT = 2U,
+    SYSTEM_PIPELINE_EXP_SLOT = 2U,
     SYSTEM_PIPELINE_ELEM_COUNT = 4U,
     SYSTEM_PIPELINE_VECTOR_BYTES = SYSTEM_PIPELINE_ELEM_COUNT *
         sizeof(uint32_t),
@@ -189,18 +190,11 @@ push_dma(uint32_t sync_idx, uint32_t src_base,
 }
 
 static void
-compute_expected(const uint32_t *src, uint32_t *linear, uint32_t *softmax)
+compute_expected(const uint32_t *src, uint32_t *linear, uint32_t *exp_out)
 {
-    static const uint32_t softmax_expected[SYSTEM_PIPELINE_ELEM_COUNT] = {
-        0x3dcff243U, // ~0.101536
-        0x3e2b6c44U, // ~0.167405
-        0x3e8d5075U, // ~0.276004
-        0x3ee8fcd9U, // ~0.455054
-    };
-
     for (uint32_t idx = 0U; idx < SYSTEM_PIPELINE_ELEM_COUNT; ++idx) {
         linear[idx] = float_to_bits(bits_to_float(src[idx]) * 0.5f);
-        softmax[idx] = softmax_expected[idx];
+        exp_out[idx] = float_to_bits(expf(bits_to_float(linear[idx])));
     }
 }
 
@@ -215,7 +209,7 @@ main(int argc, char **argv)
         float_to_bits(2.0f),
     };
     uint32_t linear_expected[SYSTEM_PIPELINE_ELEM_COUNT];
-    uint32_t softmax_expected[SYSTEM_PIPELINE_ELEM_COUNT];
+    uint32_t exp_expected[SYSTEM_PIPELINE_ELEM_COUNT];
     uint32_t actual[SYSTEM_PIPELINE_ELEM_COUNT];
 
     if (argc > 2 ||
@@ -225,10 +219,10 @@ main(int argc, char **argv)
 
     clear_slot(SYSTEM_PIPELINE_SRC_SLOT);
     clear_slot(SYSTEM_PIPELINE_LINEAR_SLOT);
-    clear_slot(SYSTEM_PIPELINE_SOFTMAX_SLOT);
+    clear_slot(SYSTEM_PIPELINE_EXP_SLOT);
     clear_dram_dest();
     seed_dram_source(src);
-    compute_expected(src, linear_expected, softmax_expected);
+    compute_expected(src, linear_expected, exp_expected);
 
     push_dma(SYSTEM_PIPELINE_DMA_SYNC,
              SYSTEM_PIPELINE_DRAM_SRC_BASE, SYSTEM_PIPELINE_SPM_BASE);
@@ -242,7 +236,7 @@ main(int argc, char **argv)
     npu_launch_sync_wait(SYSTEM_PIPELINE_VPU0_ID,
                          SYSTEM_PIPELINE_VPU0_SYNC, 0U, 0U, 0U);
 
-    vpu_cmd_launch_unary(SYSTEM_PIPELINE_VPU1_ID, VPU_OP_VSOFTMAX,
+    vpu_cmd_launch_unary(SYSTEM_PIPELINE_VPU1_ID, VPU_OP_VEXP,
                          SYSTEM_PIPELINE_VPU1_SYNC, 0x2U, 0x4U, 1U,
                          SYSTEM_PIPELINE_ELEM_COUNT, sizeof(uint32_t),
                          sizeof(uint32_t), VPU_DATA_F32);
@@ -261,13 +255,13 @@ main(int argc, char **argv)
         return 1;
     }
 
-    if (float_vector_close_spm(SYSTEM_PIPELINE_SOFTMAX_SLOT, softmax_expected,
+    if (float_vector_close_spm(SYSTEM_PIPELINE_EXP_SLOT, exp_expected,
                                0.03f, 0.03f) != 0) {
         for (uint32_t idx = 0U; idx < SYSTEM_PIPELINE_ELEM_COUNT; ++idx) {
-            actual[idx] = spm_slot_ptr(SYSTEM_PIPELINE_SOFTMAX_SLOT)[idx];
+            actual[idx] = spm_slot_ptr(SYSTEM_PIPELINE_EXP_SLOT)[idx];
         }
-        print_vector("SYSTEM_PIPELINE_SOFTMAX_EXPECTED", softmax_expected);
-        print_vector("SYSTEM_PIPELINE_SOFTMAX_ACTUAL", actual);
+        print_vector("SYSTEM_PIPELINE_EXP_EXPECTED", exp_expected);
+        print_vector("SYSTEM_PIPELINE_EXP_ACTUAL", actual);
         printf("SYSTEM_PIPELINE_TEST_FAIL\n");
         return 1;
     }
@@ -275,19 +269,19 @@ main(int argc, char **argv)
     if (copy_back) {
         push_dma(SYSTEM_PIPELINE_COPYBACK_SYNC,
                  SYSTEM_PIPELINE_SPM_BASE +
-                     (SYSTEM_PIPELINE_SOFTMAX_SLOT *
+                     (SYSTEM_PIPELINE_EXP_SLOT *
                       SYSTEM_PIPELINE_SLOT_STRIDE_BYTES),
                  SYSTEM_PIPELINE_DRAM_DST_BASE);
         npu_launch_sync_wait(SYSTEM_PIPELINE_DMA_DEVICE_ID,
                              SYSTEM_PIPELINE_COPYBACK_SYNC, 0U, 0U, 0U);
         npu_cmd_sync_done();
 
-        if (float_vector_close_dram(softmax_expected, 0.03f, 0.03f) != 0) {
+        if (float_vector_close_dram(exp_expected, 0.03f, 0.03f) != 0) {
             for (uint32_t idx = 0U; idx < SYSTEM_PIPELINE_ELEM_COUNT; ++idx) {
                 actual[idx] = read_word_le(
                     dram_dst_byte_ptr(idx * sizeof(uint32_t)));
             }
-            print_vector("SYSTEM_PIPELINE_DRAM_EXPECTED", softmax_expected);
+            print_vector("SYSTEM_PIPELINE_DRAM_EXPECTED", exp_expected);
             print_vector("SYSTEM_PIPELINE_DRAM_ACTUAL", actual);
             printf("SYSTEM_PIPELINE_TEST_FAIL\n");
             return 1;
@@ -295,7 +289,7 @@ main(int argc, char **argv)
     }
 
     print_vector("SYSTEM_PIPELINE_LINEAR_FINAL", linear_expected);
-    print_vector("SYSTEM_PIPELINE_SOFTMAX_FINAL", softmax_expected);
+    print_vector("SYSTEM_PIPELINE_EXP_FINAL", exp_expected);
     printf("SYSTEM_PIPELINE_DMA_EXPECTED_COMPLETED=%u\n", copy_back ? 2U : 1U);
     printf("SYSTEM_PIPELINE_VPU0_EXPECTED_COMPLETED=1\n");
     printf("SYSTEM_PIPELINE_VPU0_EXPECTED_PROLOGUES=1\n");
