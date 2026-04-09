@@ -489,6 +489,12 @@ BaseCPU::getPort(const std::string &if_name, PortID idx)
         return ClockedObject::getPort(if_name, idx);
 }
 
+Fault
+BaseCPU::initiateNpuLaunch(const uint8_t *data, unsigned size)
+{
+    panic("%s does not support NPU launch sideband requests", name());
+}
+
 void
 BaseCPU::registerThreadContexts()
 {

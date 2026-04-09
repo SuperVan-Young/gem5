@@ -1,3 +1,30 @@
 # -*- mode:python -*-
 
 Import('*')
+
+if env['CONF'].get('NPU_PROFILE', False):
+    env.Append(CPPDEFINES=['NPU_PROFILE_ENABLE'])
+
+DebugFlag('MegaCmdQueue')
+DebugFlag('SpecializedExecutionUnit')
+DebugFlag('DmaUnit')
+DebugFlag('MpuUnit')
+DebugFlag('ScratchpadMemory')
+DebugFlag('VPU')
+DebugFlag('NPUProfile')
+
+SimObject('LutUnit.py', sim_objects=['LutUnit'])
+SimObject('DmaUnit.py', sim_objects=['DmaUnit'])
+SimObject('MegaCmdQueue.py', sim_objects=['MegaCmdQueue'])
+SimObject('MpuUnit.py', sim_objects=['MpuUnit'])
+SimObject('SpecializedExecutionUnit.py',
+          sim_objects=['SpecializedExecutionUnit'])
+SimObject('VpuUnit.py', sim_objects=['VpuUnit'])
+SimObject('ScratchpadMemory.py', sim_objects=['ScratchpadMemory'])
+Source('LutUnit.cc')
+Source('DmaUnit.cc')
+Source('MegaCmdQueue.cc')
+Source('MpuUnit.cc')
+Source('SpecializedExecutionUnit.cc')
+Source('VpuUnit.cc')
+Source('ScratchpadMemory.cc')

@@ -1,0 +1,110 @@
+// -*- mode:c++ -*-
+
+// Copyright (c) 2026
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met: redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer;
+// redistributions in binary form must reproduce the above copyright
+// notice, this list of conditions and the following disclaimer in the
+// documentation and/or other materials provided with the distribution;
+// neither the name of the copyright holders nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+def template NpuLaunchDeclare {{
+    class %(class_name)s : public Store
+    {
+      private:
+        %(reg_idx_arr_decl)s;
+
+      public:
+        %(class_name)s(ExtMachInst machInst);
+        Fault execute(ExecContext *, trace::InstRecord *) const override;
+        Fault initiateAcc(ExecContext *, trace::InstRecord *) const override;
+        Fault completeAcc(PacketPtr, ExecContext *,
+                          trace::InstRecord *) const override;
+        std::string generateDisassembly(
+            Addr pc, const loader::SymbolTable *symtab) const override;
+    };
+}};
+
+def template NpuLaunchConstructor {{
+    %(class_name)s::%(class_name)s(ExtMachInst machInst)
+        : Store("%(mnemonic)s", machInst, MemWriteOp)
+    {
+        %(set_reg_idx_arr)s;
+    }
+}};
+
+def template NpuLaunchExecute {{
+    Fault
+    %(class_name)s::execute(
+        ExecContext *xc, trace::InstRecord *traceData) const
+    {
+        uint64_t payload[8] = {};
+        const int stageRegs[8] = {
+            MISCREG_NPU_CMD0, MISCREG_NPU_CMD1, MISCREG_NPU_CMD2,
+            MISCREG_NPU_CMD3, MISCREG_NPU_CMD4, MISCREG_NPU_CMD5,
+            MISCREG_NPU_CMD6, MISCREG_NPU_CMD7};
+        for (size_t i = 0; i < 8; ++i) {
+            payload[i] = xc->readMiscReg(stageRegs[i]);
+        }
+        return xc->tcBase()->getCpuPtr()->initiateNpuLaunch(
+            reinterpret_cast<const uint8_t *>(payload), sizeof(payload));
+    }
+
+    Fault
+    %(class_name)s::initiateAcc(
+        ExecContext *xc, trace::InstRecord *traceData) const
+    {
+        uint64_t payload[8] = {};
+        const int stageRegs[8] = {
+            MISCREG_NPU_CMD0, MISCREG_NPU_CMD1, MISCREG_NPU_CMD2,
+            MISCREG_NPU_CMD3, MISCREG_NPU_CMD4, MISCREG_NPU_CMD5,
+            MISCREG_NPU_CMD6, MISCREG_NPU_CMD7};
+        for (size_t i = 0; i < 8; ++i) {
+            payload[i] = xc->readMiscReg(stageRegs[i]);
+        }
+        return xc->tcBase()->getCpuPtr()->initiateNpuLaunch(
+            reinterpret_cast<const uint8_t *>(payload), sizeof(payload));
+    }
+
+    Fault
+    %(class_name)s::completeAcc(PacketPtr pkt, ExecContext *xc,
+        trace::InstRecord *traceData) const
+    {
+        return NoFault;
+    }
+
+    std::string
+    %(class_name)s::generateDisassembly(
+        Addr pc, const loader::SymbolTable *symtab) const
+    {
+        std::stringstream ss;
+        ss << mnemonic;
+        return ss.str();
+    }
+}};
+
+def format NpuLaunchOp(*flags) {{
+    iop = InstObjParams(name, Name, 'Store', '', ['IsStore'] + makeList(flags))
+    header_output = NpuLaunchDeclare.subst(iop)
+    decoder_output = NpuLaunchConstructor.subst(iop)
+    decode_block = BasicDecode.subst(iop)
+    exec_output = NpuLaunchExecute.subst(iop)
+}};

@@ -253,13 +253,40 @@ class TimingSimpleCPU : public BaseSimpleCPU
 
     };
 
+    class NpuLaunchPort : public TimingCPUPort
+    {
+      public:
+        NpuLaunchPort(TimingSimpleCPU *_cpu)
+            : TimingCPUPort(_cpu->name() + ".npu_launch_port", _cpu),
+              tickEvent(_cpu)
+        { }
+
+      protected:
+        bool recvTimingResp(PacketPtr pkt) override;
+        void recvReqRetry() override;
+
+        struct NTickEvent : public TickEvent
+        {
+            NTickEvent(TimingSimpleCPU *_cpu) : TickEvent(_cpu) {}
+            void process();
+            const char *description() const override
+            {
+                return "Timing CPU NPU launch tick";
+            }
+        };
+
+        NTickEvent tickEvent;
+    };
+
     void updateCycleCounts();
 
     IcachePort icachePort;
     DcachePort dcachePort;
+    NpuLaunchPort npuLaunchPort;
 
     PacketPtr ifetch_pkt;
     PacketPtr dcache_pkt;
+    PacketPtr npu_launch_pkt;
 
     Cycles previousCycle;
 
@@ -272,6 +299,9 @@ class TimingSimpleCPU : public BaseSimpleCPU
     Port &getInstPort() override { return icachePort; }
 
   public:
+
+    Port &getPort(const std::string &if_name,
+                  PortID idx = InvalidPortID) override;
 
     DrainState drain() override;
     void drainResume() override;
@@ -293,6 +323,8 @@ class TimingSimpleCPU : public BaseSimpleCPU
                    Addr addr, Request::Flags flags, uint64_t *res,
                    const std::vector<bool>& byte_enable = std::vector<bool>())
         override;
+
+    Fault initiateNpuLaunch(const uint8_t *data, unsigned size) override;
 
     Fault initiateMemAMO(Addr addr, unsigned size, Request::Flags flags,
                          AtomicOpFunctorPtr amo_op) override;

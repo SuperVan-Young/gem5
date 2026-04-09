@@ -1,0 +1,15 @@
+# -*- mode:python -*-
+
+Import('*')
+
+npu_vars = Variables()
+npu_vars.AddVariables(
+    BoolVariable(
+        'NPU_PROFILE',
+        'Enable compile-time NPU profiling support',
+        False,
+    ),
+)
+npu_vars.Update(main)
+
+main['CONF']['NPU_PROFILE'] = bool(main.get('NPU_PROFILE', False))

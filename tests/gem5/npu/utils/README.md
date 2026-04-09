@@ -1,8 +1,17 @@
 # NPU C Helper Layout
 
+> 说明：本目录是 `software_utils/` 的迁移前暂存位置。V2 目标是把这里整体重命名为 `tests/gem5/npu/software_utils/`，并保持现有头文件名与 `#include` 方式不变。
+
 - `npu_mmio.hh`: contiguous `uint32_t` MMIO read/write helpers.
+- `npu_mem.hh`: shared slot-pointer, SPM/region clear, and vector
+  load/store/fill helpers for testcase workloads.
+- `npu_assert.hh`: shared wait/compare/assert helpers plus float bit-cast
+  utilities and vector dump helpers.
 - `cmd/common.hh`: shared macro-command container, common header fields, field get/set helpers, and launch helpers.
+- `cmd/vpu.hh`: VPU opcode enum plus typed launch helpers for unary, binary,
+  ternary, scale, and explicit queue-port variants.
 - `npu_sync.hh`: sync-wait, sync-set, and `rvSyncCmdDone` completion helpers built on `cmd/common.hh`.
+- `golden/`: software reference models for testcase expected-value calculation.
 
 Common macro-command header fields currently live in the first 32 bits of `cmd/common.hh` word 0:
 - `device_type` at bits `[31:28]`
@@ -19,4 +28,11 @@ Completion convention for NPU tests:
 - Keep Python-side post-exit checks for debug counters such as queue occupancy and completed command counts.
 - Do not use Python polling loops to infer macro-command completion when the testcase is backed by `MegaCmdQueue`.
 
-Prefer named field setters/getters for common header bits. Add new files under `utils/cmd/` only when a command view becomes stable and clearly reused.
+Current VPU helper notes:
+- `vpu_cmd_init()` now sets the SNS bit automatically when `sync_indicator != 0`.
+- `_at` helper variants are the preferred way to target non-zero `MegaCmdQueue`
+  input-port windows in multi-port system tests.
+- For shared-LUT tests, prefer workload-side result validation plus Python-side
+  checks on `LutUnit` and mirrored `VpuUnit` timing counters.
+
+Prefer named field setters/getters for common header bits. Add new files under `software_utils/cmd/` only when a command view becomes stable and clearly reused.

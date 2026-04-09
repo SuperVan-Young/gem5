@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <cstring>
+
 #include "../npu_mmio.hh"
 
 #define NPU_CMD_PORT_BASE 0x70000000UL
@@ -15,8 +17,18 @@
 #define NPU_CMD_LAUNCH_WORDS NPU_CMD_BUFFER_WORDS
 #define NPU_CMD_LAUNCH_BYTES (NPU_CMD_LAUNCH_WORDS * sizeof(uint32_t))
 #define NPU_CMD_CTRL_ADDR(port_base) ((port_base) + NPU_CMD_LAUNCH_BYTES)
+#define NPU_CMD_FAST_LAUNCH_ADDR(port_base) NPU_CMD_CTRL_ADDR(port_base)
 #define NPU_CMD_CTRL_PUSH 0U
 #define NPU_CMD_CTRL_POP 1U
+
+#define NPU_CMD_STAGE_CSR0 0x800U
+#define NPU_CMD_STAGE_CSR1 0x801U
+#define NPU_CMD_STAGE_CSR2 0x802U
+#define NPU_CMD_STAGE_CSR3 0x803U
+#define NPU_CMD_STAGE_CSR4 0x804U
+#define NPU_CMD_STAGE_CSR5 0x805U
+#define NPU_CMD_STAGE_CSR6 0x806U
+#define NPU_CMD_STAGE_CSR7 0x807U
 
 enum NpuDeviceType {
     NPU_DEVICE_TYPE_MEGA_CMD_QUEUE = 0x0U,
@@ -26,15 +38,148 @@ enum NpuDeviceType {
     NPU_DEVICE_TYPE_DMA = 0x4U,
 };
 
+union NpuCmdHeaderWord
+{
+    struct Bits
+    {
+        uint32_t reserved0 : 6;
+        uint32_t setIndicatorSnd : 1;
+        uint32_t setIndicatorSns : 1;
+        uint32_t syncIndicator : 8;
+        uint32_t opCode : 8;
+        uint32_t deviceId : 4;
+        uint32_t deviceType : 4;
+    } bits;
+    uint32_t raw;
+
+    constexpr NpuCmdHeaderWord() : raw(0U) {}
+};
+
+struct NpuCmdBinaryData
+{
+    uint64_t rs[8];
+};
+
+static_assert(sizeof(NpuCmdHeaderWord) == sizeof(uint32_t),
+              "NPU command header must remain 32 bits.");
+static_assert(sizeof(NpuCmdBinaryData) == NPU_CMD_BUFFER_BYTES,
+              "NPU command binary view must remain 64 bytes.");
+
+static inline uint32_t
+npuBuildHeaderWord(uint32_t device_type, uint32_t device_id, uint32_t op_code,
+                   uint32_t sync_indicator, uint32_t set_indicator_sns,
+                   uint32_t set_indicator_snd)
+{
+    NpuCmdHeaderWord header;
+
+    header.bits.deviceType = device_type;
+    header.bits.deviceId = device_id;
+    header.bits.opCode = op_code;
+    header.bits.syncIndicator = sync_indicator;
+    header.bits.setIndicatorSns = set_indicator_sns;
+    header.bits.setIndicatorSnd = set_indicator_snd;
+    return header.raw;
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdLaunchInsn()
+{
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 0, x0, x0, x0\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdStageInsn0(uint64_t low, uint64_t high)
+{
+    (void)low;
+    (void)high;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 1, x0, a0, a1\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdStageInsn1(uint64_t low, uint64_t high)
+{
+    (void)low;
+    (void)high;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 2, x0, a0, a1\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdStageInsn2(uint64_t low, uint64_t high)
+{
+    (void)low;
+    (void)high;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 3, x0, a0, a1\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdStageInsn3(uint64_t low, uint64_t high)
+{
+    (void)low;
+    (void)high;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 4, x0, a0, a1\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+template <typename T>
+static inline void
+npuBinaryDataFromObject(NpuCmdBinaryData *binary, const T &value)
+{
+    static_assert(sizeof(T) == sizeof(NpuCmdBinaryData),
+                  "Object size must match NPU command size.");
+
+    *binary = {};
+    memcpy(binary, &value, sizeof(*binary));
+}
+
+template <typename T>
+static inline void
+npuObjectFromBinaryData(T *value, const NpuCmdBinaryData &binary)
+{
+    static_assert(sizeof(T) == sizeof(NpuCmdBinaryData),
+                  "Object size must match NPU command size.");
+
+    *value = {};
+    memcpy(value, &binary, sizeof(*value));
+}
+
 class NpuCmd
 {
   public:
-    NpuCmd() : words{} {}
+    NpuCmd() : storage{} {}
 
     void clear()
     {
-        for (unsigned i = 0; i < NPU_CMD_BUFFER_WORDS; ++i) {
-            words[i] = 0U;
+        for (unsigned i = 0; i < 8U; ++i) {
+            storage.pairs[i] = 0U;
         }
     }
 
@@ -44,13 +189,13 @@ class NpuCmd
             return 0U;
         }
 
-        return words[word_index];
+        return storage.words[word_index];
     }
 
     void setWord(unsigned word_index, uint32_t value)
     {
         if (word_index < NPU_CMD_BUFFER_WORDS) {
-            words[word_index] = value;
+            storage.words[word_index] = value;
         }
     }
 
@@ -70,7 +215,8 @@ class NpuCmd
             const unsigned bit_in_word = cmdBitIndex(bit_index);
             const unsigned chunk_width = minUnsigned(32U - bit_in_word,
                                                      width - bits_done);
-            const uint32_t chunk = (words[word_index] >> bit_in_word) &
+            const uint32_t chunk =
+                (storage.words[word_index] >> bit_in_word) &
                 bitMask(chunk_width);
 
             value |= chunk << bits_done;
@@ -99,7 +245,8 @@ class NpuCmd
             const uint32_t chunk = ((value >> bits_done) &
                                     bitMask(chunk_width)) << bit_in_word;
 
-            words[word_index] = (words[word_index] & ~field_mask) | chunk;
+            storage.words[word_index] =
+                (storage.words[word_index] & ~field_mask) | chunk;
             bits_done += chunk_width;
         }
     }
@@ -124,15 +271,50 @@ class NpuCmd
 
     void clearCommonReservedBits() { setBits(0U, 6U, 0U); }
 
+    void loadBinary(const NpuCmdBinaryData &binary)
+    {
+        for (unsigned i = 0; i < 8U; ++i) {
+            storage.pairs[i] = binary.rs[i];
+        }
+    }
+
+    void copyBinaryData(NpuCmdBinaryData *binary) const
+    {
+        *binary = {};
+        for (unsigned i = 0; i < 8U; ++i) {
+            binary->rs[i] = storage.pairs[i];
+        }
+    }
+
+    void writeCmdWordsAt(unsigned word_count, uint64_t port_base) const
+    {
+        npu_mmio_write32(port_base, storage.words, word_count);
+    }
+
+    void ringDoorbellAt(uint64_t port_base) const
+    {
+        npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_PUSH);
+    }
+
     void launchCmdWordsAt(unsigned word_count, uint64_t port_base) const
     {
-        npu_mmio_write32(port_base, words, word_count);
-        npu_mmio_write32_one(NPU_CMD_CTRL_ADDR(port_base), NPU_CMD_CTRL_PUSH);
+        writeCmdWordsAt(word_count, port_base);
+        ringDoorbellAt(port_base);
+    }
+
+    void launchCmdViaMmioAt(uint64_t port_base) const
+    {
+        launchCmdWordsAt(NPU_CMD_LAUNCH_WORDS, port_base);
+    }
+
+    void launchCmdViaMmio() const
+    {
+        launchCmdViaMmioAt(NPU_CMD_PORT_BASE);
     }
 
     void launchCmdAt(uint64_t port_base) const
     {
-        launchCmdWordsAt(NPU_CMD_LAUNCH_WORDS, port_base);
+        launchCmdViaStage2At(port_base);
     }
 
     void launchCmd() const
@@ -140,7 +322,78 @@ class NpuCmd
         launchCmdAt(NPU_CMD_PORT_BASE);
     }
 
+    void stageCmdWords() const
+    {
+        stageBinaryPairs(storage.pairs);
+    }
+
+    void launchStagedCmdAt(uint64_t port_base) const
+    {
+        (void)port_base;
+        asm volatile(".insn r 0x0b, 0, 0, x0, x0, x0" : : : "memory");
+    }
+
+    void launchCmdViaStage2At(uint64_t port_base) const
+    {
+        launchBinaryPairsAt(storage.pairs, port_base);
+    }
+
+    void launchCmdViaStage2() const
+    {
+        launchCmdViaStage2At(NPU_CMD_PORT_BASE);
+    }
+
   private:
+    static void stageBinaryPairs(const uint64_t *pairs)
+    {
+        for (unsigned i = 0; i < 4U; ++i) {
+            writeStagePair(i, pairs[(2U * i)], pairs[(2U * i) + 1U]);
+        }
+    }
+
+    static void launchBinaryPairsAt(const uint64_t *pairs, uint64_t port_base)
+    {
+        stageBinaryPairs(pairs);
+        launchStagedOnlyAt(port_base);
+    }
+
+    static void launchStagedOnlyAt(uint64_t port_base)
+    {
+        (void)port_base;
+        asm volatile("" ::: "memory");
+        npuCmdLaunchInsn();
+        asm volatile("" ::: "memory");
+    }
+
+    static void
+    writeStagePair(unsigned pair_index, uint64_t low, uint64_t high)
+    {
+        switch (pair_index) {
+          case 0:
+            asm volatile("" ::: "memory");
+            npuCmdStageInsn0(low, high);
+            asm volatile("" ::: "memory");
+            break;
+          case 1:
+            asm volatile("" ::: "memory");
+            npuCmdStageInsn1(low, high);
+            asm volatile("" ::: "memory");
+            break;
+          case 2:
+            asm volatile("" ::: "memory");
+            npuCmdStageInsn2(low, high);
+            asm volatile("" ::: "memory");
+            break;
+          case 3:
+            asm volatile("" ::: "memory");
+            npuCmdStageInsn3(low, high);
+            asm volatile("" ::: "memory");
+            break;
+          default:
+            break;
+        }
+    }
+
     static unsigned cmdWordIndex(unsigned bit_index)
     {
         return bit_index / 32U;
@@ -165,7 +418,13 @@ class NpuCmd
         return (1U << width) - 1U;
     }
 
-    uint32_t words[NPU_CMD_BUFFER_WORDS];
+    union Storage
+    {
+        uint32_t words[NPU_CMD_BUFFER_WORDS];
+        uint64_t pairs[8];
+
+        constexpr Storage() : pairs{} {}
+    } storage;
 };
 
 #endif

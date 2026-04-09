@@ -95,6 +95,19 @@ For `tests/gem5/` structure, pass/fail conventions, build/run workflow, and the 
 
 - `.agent/skill/testing-gem5.md`
 
+For `tests/gem5/npu/`, additionally follow the testcase structure and rules in:
+
+- `.agent/skill/testing-gem5-npu.md`
+
+When touching `tests/gem5/npu/`, treat the current checked-in structure as:
+
+- testcase entry files live at `tests/gem5/npu/testcases/<module>/<case>/test.py`
+- shared Python infra lives under `tests/gem5/npu/configs/`
+- shared workload headers currently live under `tests/gem5/npu/utils/`
+
+Do not assume the planned `software_utils/` rename has already happened unless
+the tree actually contains that directory.
+
 Prefer these notes when asked about writing, reviewing, or debugging gem5 tests. Unless explicitly requested by the user, do not retain or prioritize `tests/pyunit/` guidance.
 
 ## Commit conventions (repo-enforced)
@@ -104,4 +117,3 @@ Prefer these notes when asked about writing, reviewing, or debugging gem5 tests.
 - If there’s a body, the header must be followed by an empty line.
 
 These rules are enforced by the commit-msg hook (`util/git-commit-msg.py`) when pre-commit is installed.
-
