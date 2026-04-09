@@ -3,5 +3,5 @@
  * All rights reserved.
  */
 
-#define DMA_PANIC_CASE staged_transpose_unsupported
+#define DMA_PANIC_CASE staged_transpose_aliasing
 #include "../../../utils/dma_panic_cases.hh"
