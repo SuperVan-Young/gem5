@@ -260,6 +260,19 @@ vpu_cmd_init_raw(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
 }
 
 static inline void
+vpu_cmd_set_sync_indicator(NpuCmd *cmd, uint32_t sync_indicator)
+{
+    const uint32_t header = npuBuildHeaderWord(
+        cmd->getDeviceType(),
+        cmd->getDeviceId(),
+        cmd->getOpCode(),
+        sync_indicator,
+        sync_indicator != 0U ? 1U : 0U,
+        0U);
+    cmd->setWord(0U, header);
+}
+
+static inline void
 vpu_cmd_set_format(NpuCmd *cmd, uint32_t dst_dtype, uint32_t src0_dtype,
                    uint32_t src1_dtype, uint32_t w_layout_log2,
                    uint32_t c_layout_log2, uint32_t layout_order)
@@ -292,6 +305,24 @@ vpu_cmd_set_extra_word(NpuCmd *cmd, uint32_t word_index, uint32_t value)
 }
 
 static inline void
+vpu_cmd_init_compute(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
+                     uint32_t sync_indicator, uint32_t dst_dtype,
+                     uint32_t src0_dtype, uint32_t src1_dtype,
+                     uint32_t w_layout_log2, uint32_t c_layout_log2,
+                     uint32_t layout_order, const VpuTensorDesc *dst,
+                     const VpuTensorDesc *src0, const VpuTensorDesc *src1,
+                     uint32_t extra0)
+{
+    vpu_cmd_init_raw(cmd, device_id, op_code, sync_indicator);
+    vpu_cmd_set_format(cmd, dst_dtype, src0_dtype, src1_dtype,
+                       w_layout_log2, c_layout_log2, layout_order);
+    vpu_cmd_set_tensor(cmd, VPU_CMD_WORD_DST_ADDR, dst);
+    vpu_cmd_set_tensor(cmd, VPU_CMD_WORD_SRC0_ADDR, src0);
+    vpu_cmd_set_tensor(cmd, VPU_CMD_WORD_SRC1_ADDR, src1);
+    vpu_cmd_set_extra_word(cmd, VPU_CMD_WORD_EXTRA0, extra0);
+}
+
+static inline void
 vpu_cmd_launch_compute_at(uint64_t port_base, uint32_t device_id,
                           uint32_t op_code, uint32_t sync_indicator,
                           uint32_t dst_dtype, uint32_t src0_dtype,
@@ -301,13 +332,9 @@ vpu_cmd_launch_compute_at(uint64_t port_base, uint32_t device_id,
                           const VpuTensorDesc *src1, uint32_t extra0)
 {
     NpuCmd cmd;
-    vpu_cmd_init_raw(&cmd, device_id, op_code, sync_indicator);
-    vpu_cmd_set_format(&cmd, dst_dtype, src0_dtype, src1_dtype,
-                       w_layout_log2, c_layout_log2, layout_order);
-    vpu_cmd_set_tensor(&cmd, VPU_CMD_WORD_DST_ADDR, dst);
-    vpu_cmd_set_tensor(&cmd, VPU_CMD_WORD_SRC0_ADDR, src0);
-    vpu_cmd_set_tensor(&cmd, VPU_CMD_WORD_SRC1_ADDR, src1);
-    vpu_cmd_set_extra_word(&cmd, VPU_CMD_WORD_EXTRA0, extra0);
+    vpu_cmd_init_compute(&cmd, device_id, op_code, sync_indicator, dst_dtype,
+                         src0_dtype, src1_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, dst, src0, src1, extra0);
     cmd.launchCmdAt(port_base);
 }
 
@@ -368,10 +395,10 @@ vpu_default_spm_tensor(uint32_t port, uint32_t elem_count, uint32_t data_type)
 }
 
 static inline void
-vpu_cmd_launch_load_one_at(uint64_t port_base, uint32_t device_id,
-                           uint32_t sync_indicator, uint32_t port,
-                           uint32_t elem_count, uint32_t src_stride_bytes,
-                           uint32_t data_type, uint32_t input_buffer_index)
+vpu_cmd_init_load_one(NpuCmd *cmd, uint32_t device_id, uint32_t sync_indicator,
+                      uint32_t port, uint32_t elem_count,
+                      uint32_t src_stride_bytes, uint32_t data_type,
+                      uint32_t input_buffer_index)
 {
     (void)src_stride_bytes;
     uint32_t w_layout_log2 = 0U;
@@ -386,10 +413,21 @@ vpu_cmd_launch_load_one_at(uint64_t port_base, uint32_t device_id,
     VpuTensorDesc dst = vpu_tensor_desc(
         vpu_local_addr(VPU_LOCAL_INPUT_BASE, input_buffer_index), shape, stride);
     const VpuTensorDesc src1 = {0U, 0U, 0U};
-    vpu_cmd_launch_compute_at(port_base, device_id, VPU_OP_VLOAD,
-                              sync_indicator, data_type, data_type, data_type,
-                              w_layout_log2, c_layout_log2, layout_order, &dst,
-                              &src0, &src1, 0U);
+    vpu_cmd_init_compute(cmd, device_id, VPU_OP_VLOAD, sync_indicator,
+                         data_type, data_type, data_type, w_layout_log2,
+                         c_layout_log2, layout_order, &dst, &src0, &src1, 0U);
+}
+
+static inline void
+vpu_cmd_launch_load_one_at(uint64_t port_base, uint32_t device_id,
+                           uint32_t sync_indicator, uint32_t port,
+                           uint32_t elem_count, uint32_t src_stride_bytes,
+                           uint32_t data_type, uint32_t input_buffer_index)
+{
+    NpuCmd cmd;
+    vpu_cmd_init_load_one(&cmd, device_id, sync_indicator, port, elem_count,
+                          src_stride_bytes, data_type, input_buffer_index);
+    cmd.launchCmdAt(port_base);
 }
 
 static inline void
@@ -404,11 +442,10 @@ vpu_cmd_launch_load_one(uint32_t device_id, uint32_t sync_indicator,
 }
 
 static inline void
-vpu_cmd_launch_store_one_at(uint64_t port_base, uint32_t device_id,
-                            uint32_t sync_indicator, uint32_t port,
-                            uint32_t elem_count, uint32_t dst_stride_bytes,
-                            uint32_t data_type, uint32_t source_local_base,
-                            uint32_t buffer_index)
+vpu_cmd_init_store_one(NpuCmd *cmd, uint32_t device_id, uint32_t sync_indicator,
+                       uint32_t port, uint32_t elem_count,
+                       uint32_t dst_stride_bytes, uint32_t data_type,
+                       uint32_t source_local_base, uint32_t buffer_index)
 {
     (void)dst_stride_bytes;
     uint32_t w_layout_log2 = 0U;
@@ -423,10 +460,23 @@ vpu_cmd_launch_store_one_at(uint64_t port_base, uint32_t device_id,
     VpuTensorDesc dst = vpu_tensor_desc(
         0x60000000U + (port * VPU_LOCAL_SLOT_STRIDE), shape, stride);
     const VpuTensorDesc src1 = {0U, 0U, 0U};
-    vpu_cmd_launch_compute_at(port_base, device_id, VPU_OP_VSTORE,
-                              sync_indicator, data_type, data_type, data_type,
-                              w_layout_log2, c_layout_log2, layout_order, &dst,
-                              &src0, &src1, 0U);
+    vpu_cmd_init_compute(cmd, device_id, VPU_OP_VSTORE, sync_indicator,
+                         data_type, data_type, data_type, w_layout_log2,
+                         c_layout_log2, layout_order, &dst, &src0, &src1, 0U);
+}
+
+static inline void
+vpu_cmd_launch_store_one_at(uint64_t port_base, uint32_t device_id,
+                            uint32_t sync_indicator, uint32_t port,
+                            uint32_t elem_count, uint32_t dst_stride_bytes,
+                            uint32_t data_type, uint32_t source_local_base,
+                            uint32_t buffer_index)
+{
+    NpuCmd cmd;
+    vpu_cmd_init_store_one(&cmd, device_id, sync_indicator, port, elem_count,
+                           dst_stride_bytes, data_type, source_local_base,
+                           buffer_index);
+    cmd.launchCmdAt(port_base);
 }
 
 static inline void

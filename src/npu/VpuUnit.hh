@@ -174,6 +174,11 @@ class VpuUnit : public SpecializedExecutionUnit
     const Addr localOutputBase;
     const uint32_t localBufferStride;
     const uint32_t dlenBytes;
+    const Cycles int8CyclesPerDlen;
+    const Cycles int16CyclesPerDlen;
+    const Cycles int32CyclesPerDlen;
+    const Cycles float16CyclesPerDlen;
+    const Cycles float32CyclesPerDlen;
 
     std::vector<LocalBufferSlot> inputBuffers;
     std::vector<LocalBufferSlot> outputBuffers;
@@ -206,6 +211,8 @@ class VpuUnit : public SpecializedExecutionUnit
     PortID decodeSpmPort(Addr addr, size_t accessSize) const;
     uint32_t layoutLowestDim(const DecodedVectorOp &op) const;
     size_t tileElems(const DecodedVectorOp &op) const;
+    Cycles dtypeCyclesPerDlen(DataType dataType) const;
+    uint32_t workDlenChunks(const VpuMacroState &state) const;
     size_t tensorSpanBytes(const TensorDesc &tensor, size_t elemSize,
                            const DecodedVectorOp &op) const;
     size_t tensorElemOffset(const TensorDesc &tensor, const DecodedVectorOp &op,

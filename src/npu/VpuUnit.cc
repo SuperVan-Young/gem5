@@ -64,7 +64,13 @@ VpuUnit::VpuUnit(const VpuUnitParams &params)
       localInputBase(params.local_input_base),
       localOutputBase(params.local_output_base),
       localBufferStride(params.local_buffer_stride),
-      dlenBytes(params.dlen_bytes), inputBuffers(inputBufferCount),
+      dlenBytes(params.dlen_bytes),
+      int8CyclesPerDlen(params.int8_cycles_per_dlen),
+      int16CyclesPerDlen(params.int16_cycles_per_dlen),
+      int32CyclesPerDlen(params.int32_cycles_per_dlen),
+      float16CyclesPerDlen(params.float16_cycles_per_dlen),
+      float32CyclesPerDlen(params.float32_cycles_per_dlen),
+      inputBuffers(inputBufferCount),
       outputBuffers(outputBufferCount)
 {
     panic_if(lut == nullptr, "%s: lut must not be null", name());
@@ -401,6 +407,43 @@ VpuUnit::tileElems(const DecodedVectorOp &op) const
     return static_cast<size_t>(op.wLayoutElems) * op.cLayoutElems;
 }
 
+Cycles
+VpuUnit::dtypeCyclesPerDlen(DataType dataType) const
+{
+    switch (dataType) {
+      case DataType::Int8:
+      case DataType::UInt8:
+        return int8CyclesPerDlen;
+      case DataType::Int16:
+      case DataType::UInt16:
+        return int16CyclesPerDlen;
+      case DataType::Int32:
+      case DataType::UInt32:
+        return int32CyclesPerDlen;
+      case DataType::Float16:
+        return float16CyclesPerDlen;
+      case DataType::Float32:
+        return float32CyclesPerDlen;
+    }
+
+    panic("%s: unreachable dtypeCyclesPerDlen", name());
+}
+
+uint32_t
+VpuUnit::workDlenChunks(const VpuMacroState &state) const
+{
+    size_t workBytes = static_cast<size_t>(state.dst.shape.w) *
+        state.dst.shape.c * state.op.dstElemSize;
+
+    if (state.op.isReduce) {
+        workBytes = static_cast<size_t>(state.src0.shape.w) *
+            state.src0.shape.c * state.op.src0ElemSize;
+    }
+
+    return std::max<uint32_t>(
+        1U, static_cast<uint32_t>((workBytes + dlenBytes - 1U) / dlenBytes));
+}
+
 size_t
 VpuUnit::tensorSpanBytes(const TensorDesc &tensor, size_t elemSize,
                          const DecodedVectorOp &op) const
@@ -589,6 +632,14 @@ VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
 Tick
 VpuUnit::computeExecLatency(const VpuMacroState &state)
 {
+    const uint32_t dlenChunks = workDlenChunks(state);
+    Cycles perDlenCycles = dtypeCyclesPerDlen(state.op.dstType);
+    perDlenCycles = std::max(perDlenCycles, dtypeCyclesPerDlen(state.op.src0Type));
+    if (state.op.hasSrc1) {
+        perDlenCycles = std::max(perDlenCycles,
+                                 dtypeCyclesPerDlen(state.op.src1Type));
+    }
+
     Tick extraLatency = 0;
     if (isLutOpcode(state.op.opcode)) {
         const uint32_t requests =
@@ -597,7 +648,8 @@ VpuUnit::computeExecLatency(const VpuMacroState &state)
                                     curTick());
     }
 
-    const Tick totalLatency = debugProcessLatency + extraLatency;
+    const Tick totalLatency = debugProcessLatency +
+        (clockPeriod() * (perDlenCycles * dlenChunks)) + extraLatency;
     if (isLinearOpcode(state.op.opcode)) {
         lastLinearExecuteLatencyValue = totalLatency;
     }
@@ -1265,6 +1317,14 @@ VpuUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
     os << ",\"src1_addr\":" << state.src1.addr;
     os << ",\"src1_shape_w\":" << state.src1.shape.w;
     os << ",\"src1_shape_c\":" << state.src1.shape.c;
+    os << ",\"work_dlen_chunks\":" << workDlenChunks(state);
+    os << ",\"dst_cycles_per_dlen\":" <<
+        static_cast<uint64_t>(dtypeCyclesPerDlen(state.op.dstType));
+    os << ",\"src0_cycles_per_dlen\":" <<
+        static_cast<uint64_t>(dtypeCyclesPerDlen(state.op.src0Type));
+    os << ",\"src1_cycles_per_dlen\":" <<
+        (state.op.hasSrc1 ?
+             static_cast<uint64_t>(dtypeCyclesPerDlen(state.op.src1Type)) : 0);
     os << ",\"completed_exec_uops\":" << state.completedExecUops;
 }
 

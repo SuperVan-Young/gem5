@@ -44,6 +44,21 @@ class VpuUnit(SpecializedExecutionUnit):
         "Logical dlen in bytes; the innermost layout dimension times dtype "
         "width must equal this value",
     )
+    int8_cycles_per_dlen = Param.Cycles(
+        1, "Linear VPU cycles needed to process one dlen chunk of int8/uint8"
+    )
+    int16_cycles_per_dlen = Param.Cycles(
+        1, "Linear VPU cycles needed to process one dlen chunk of int16/uint16"
+    )
+    int32_cycles_per_dlen = Param.Cycles(
+        2, "Linear VPU cycles needed to process one dlen chunk of int32/uint32"
+    )
+    float16_cycles_per_dlen = Param.Cycles(
+        2, "Linear VPU cycles needed to process one dlen chunk of float16"
+    )
+    float32_cycles_per_dlen = Param.Cycles(
+        4, "Linear VPU cycles needed to process one dlen chunk of float32"
+    )
 
     cxx_exports = [
         PyBindMethod("lutRequestCount"),
