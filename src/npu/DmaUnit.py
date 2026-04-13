@@ -1,5 +1,6 @@
 from m5.objects.SpecializedExecutionUnit import SpecializedExecutionUnit
 from m5.params import *
+from m5.SimObject import *
 
 
 class DmaUnit(SpecializedExecutionUnit):
@@ -15,3 +16,7 @@ class DmaUnit(SpecializedExecutionUnit):
     transpose_unit_latency = Param.Latency(
         "1ns", "Per-element transpose unit latency"
     )
+
+    cxx_exports = SpecializedExecutionUnit.cxx_exports + [
+        PyBindMethod("observedBatchOverlapCount")
+    ]

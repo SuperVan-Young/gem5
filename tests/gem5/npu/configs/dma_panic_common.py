@@ -117,6 +117,10 @@ DMA_PANIC_CASES = {
         scenario="fill_reserved_fill_value_bits",
         stderr_regex=r".*DmaUnit: fill requires Word 15\[31:8\] == 0.*",
     ),
+    "reject_staged_fill_unsupported": DmaPanicCaseSpec(
+        scenario="staged_fill_unsupported",
+        stderr_regex=r".*DmaUnit: staged fill is unsupported.*",
+    ),
     "reject_transpose_same_bank": DmaPanicCaseSpec(
         scenario="transpose_same_bank",
         stderr_regex=(
@@ -143,6 +147,27 @@ DMA_PANIC_CASES = {
         stderr_regex=(
             r".*DmaUnit: transpose required_bytes=4097 exceeds "
             r"bank_size=4096.*"
+        ),
+    ),
+    "reject_staged_transpose_interleaving": DmaPanicCaseSpec(
+        scenario="staged_transpose_interleaving",
+        stderr_regex=(
+            r".*DmaUnit: active staged DMA sequence does not allow "
+            r"interleaved DMA commands.*"
+        ),
+    ),
+    "reject_staged_transpose_mismatch": DmaPanicCaseSpec(
+        scenario="staged_transpose_mismatch",
+        stderr_regex=(
+            r".*DmaUnit: staged transpose command does not match the "
+            r"active staged sequence.*"
+        ),
+    ),
+    "reject_staged_transpose_aliasing": DmaPanicCaseSpec(
+        scenario="staged_transpose_aliasing",
+        stderr_regex=(
+            r".*DmaUnit: staged transpose requires source/destination "
+            r"cache-line disjointness.*"
         ),
     ),
 }
@@ -250,9 +275,15 @@ def register_dma_panic_test(reference_file, case_name):
 
 
 def build_dma_panic_system(binary, scenario):
+    from m5.objects import AddrRange
     from npu_test_system import NPUTestSystemBuilder
 
-    builder = NPUTestSystemBuilder()
+    builder = NPUTestSystemBuilder(
+        mem_ranges=[
+            AddrRange(0, size=0x60000000),
+            AddrRange(0x60000000, size=64 * 1024),
+        ]
+    )
     builder.build_base_system()
     builder.add_default_physmem()
     builder.add_spm()

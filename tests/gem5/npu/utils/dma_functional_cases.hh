@@ -9,6 +9,11 @@
 #define DMA_MODE_TRANSPOSE 0x1U
 #define DMA_MODE_FILL 0x2U
 
+#define DMA_STAGE_LEGACY 0x0U
+#define DMA_STAGE_LOAD 0x1U
+#define DMA_STAGE_COMPUTE 0x2U
+#define DMA_STAGE_STORE 0x3U
+
 #define DMA_MEM_SPACE_DRAM 0x0U
 #define DMA_MEM_SPACE_SPM 0x1U
 #define DMA_MEM_SPACE_DMA_BANK 0x2U
@@ -232,15 +237,17 @@ fill_bank_cfg(uint32_t dst_bank_id)
 }
 
 static void
-build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base,
-                  uintptr_t dst_base, Layout src_layout,
-                  Layout dst_layout, uint32_t data_type,
-                  uint32_t mode, uint32_t mode_cfg,
-                  uint32_t bank_cfg, uint32_t sync_idx,
-                  uint32_t set_completion_sync, uint32_t word15)
+build_dma_cmd_raw_with_stage(NpuCmd *cmd, uintptr_t src_base,
+                             uintptr_t dst_base, Layout src_layout,
+                             Layout dst_layout, uint32_t data_type,
+                             uint32_t mode, uint32_t stage,
+                             uint32_t mode_cfg, uint32_t bank_cfg,
+                             uint32_t sync_idx,
+                             uint32_t set_completion_sync, uint32_t word15)
 {
     const uint32_t op =
-        ((data_type & 0x7U) << 5) | ((mode & 0x7U) << 2);
+        ((data_type & 0x7U) << 5) | ((mode & 0x7U) << 2) |
+        (stage & 0x3U);
 
     cmd->clear();
     cmd->setDeviceType(NPU_DEVICE_TYPE_DMA);
@@ -265,6 +272,20 @@ build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base,
     cmd->setWord(13U, mode_cfg);
     cmd->setWord(14U, bank_cfg);
     cmd->setWord(15U, word15);
+}
+
+static void
+build_dma_cmd_raw(NpuCmd *cmd, uintptr_t src_base,
+                  uintptr_t dst_base, Layout src_layout,
+                  Layout dst_layout, uint32_t data_type,
+                  uint32_t mode, uint32_t mode_cfg,
+                  uint32_t bank_cfg, uint32_t sync_idx,
+                  uint32_t set_completion_sync, uint32_t word15)
+{
+    build_dma_cmd_raw_with_stage(
+        cmd, src_base, dst_base, src_layout, dst_layout, data_type, mode,
+        DMA_STAGE_LEGACY, mode_cfg, bank_cfg, sync_idx,
+        set_completion_sync, word15);
 }
 
 static void
@@ -319,6 +340,35 @@ launch_move_layout_with_data_type(uintptr_t src_base, uintptr_t dst_base,
 }
 
 static void
+build_staged_move_layout_cmd(NpuCmd *cmd, uintptr_t src_base,
+                             uintptr_t dst_base, Layout src_layout,
+                             Layout dst_layout, uint32_t stage,
+                             uint32_t sync_idx,
+                             uint32_t set_completion_sync)
+{
+    build_dma_cmd_raw_with_stage(
+        cmd, src_base, dst_base, src_layout, dst_layout, 0U,
+        DMA_MODE_MOVE_LAYOUT, stage,
+        move_layout_mode_cfg(src_base, dst_base, src_layout.cut_dim,
+                             dst_layout.cut_dim),
+        0U, sync_idx, set_completion_sync, 0U);
+}
+
+static void
+launch_staged_move_layout(uintptr_t src_base, uintptr_t dst_base,
+                          Layout src_layout, Layout dst_layout,
+                          uint32_t stage, uint32_t sync_idx,
+                          uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+
+    build_staged_move_layout_cmd(
+        &cmd, src_base, dst_base, src_layout, dst_layout, stage, sync_idx,
+        set_completion_sync);
+    cmd.launchCmd();
+}
+
+static void
 build_transpose_cmd(NpuCmd *cmd, uintptr_t src_base, uintptr_t dst_base,
                     Layout src_layout, Layout dst_layout, uint32_t dim_a,
                     uint32_t dim_b, uint32_t src_bank_id,
@@ -343,6 +393,39 @@ launch_transpose(uintptr_t src_base, uintptr_t dst_base, Layout src_layout,
     build_transpose_cmd(&cmd, src_base, dst_base, src_layout, dst_layout,
                         dim_a, dim_b, src_bank_id, dst_bank_id, sync_idx,
                         set_completion_sync);
+    cmd.launchCmd();
+}
+
+static void
+build_staged_transpose_cmd(NpuCmd *cmd, uintptr_t src_base,
+                           uintptr_t dst_base, Layout src_layout,
+                           Layout dst_layout, uint32_t dim_a,
+                           uint32_t dim_b, uint32_t src_bank_id,
+                           uint32_t dst_bank_id, uint32_t stage,
+                           uint32_t sync_idx,
+                           uint32_t set_completion_sync)
+{
+    build_dma_cmd_raw_with_stage(
+        cmd, src_base, dst_base, src_layout, dst_layout, 0U,
+        DMA_MODE_TRANSPOSE, stage,
+        transpose_mode_cfg(src_base, dst_base, dim_a, dim_b),
+        transpose_bank_cfg(src_bank_id, dst_bank_id), sync_idx,
+        set_completion_sync, 0U);
+}
+
+static void
+launch_staged_transpose(uintptr_t src_base, uintptr_t dst_base,
+                        Layout src_layout, Layout dst_layout,
+                        uint32_t dim_a, uint32_t dim_b,
+                        uint32_t src_bank_id, uint32_t dst_bank_id,
+                        uint32_t stage, uint32_t sync_idx,
+                        uint32_t set_completion_sync)
+{
+    NpuCmd cmd;
+
+    build_staged_transpose_cmd(
+        &cmd, src_base, dst_base, src_layout, dst_layout, dim_a, dim_b,
+        src_bank_id, dst_bank_id, stage, sync_idx, set_completion_sync);
     cmd.launchCmd();
 }
 
@@ -535,6 +618,42 @@ scenario_bank_size_forces_batching(void)
 }
 
 static int
+scenario_staged_move_layout_basic(void)
+{
+    Layout layout = make_layout(2, 4, 8, 0);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    fill_tensor(SRC_DRAM0, layout);
+
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_LOAD, 61, 0);
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_COMPUTE, 62, 0);
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_STORE, 63, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
+scenario_overlap_move_layout_multibatch(void)
+{
+    Layout layout = make_layout(4, 8, 8, 0);
+    clear_region(DST_SPM0, tensor_bytes(layout));
+    fill_tensor(SRC_DRAM0, layout);
+
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_LOAD, 64, 0);
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_COMPUTE, 65, 0);
+    launch_staged_move_layout(SRC_DRAM0, DST_SPM0, layout, layout,
+                              DMA_STAGE_STORE, 66, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_match(DST_SPM0, layout) ? 0 : 1;
+}
+
+static int
 scenario_sync_completion(void)
 {
     Layout layout = make_layout(2, 4, 8, 0);
@@ -698,6 +817,66 @@ scenario_transpose_wc(void)
     npu_cmd_sync_done();
     return poll_until_transposed_match(DST_DRAM1, src, dst,
                                        DMA_CUT_DIM_W, DMA_CUT_DIM_C) ? 0 : 1;
+}
+
+static int
+scenario_staged_transpose_basic(void)
+{
+    Layout src = make_layout(2, 4, 1, 0);
+    Layout dst = make_layout(4, 2, 1, 0);
+    clear_region(DST_SPM0, tensor_bytes(dst));
+    fill_tensor(SRC_DRAM0, src);
+
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_LOAD, 67, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_COMPUTE, 68, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_STORE, 69, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_transposed_match(DST_SPM0, src, dst,
+                                       DMA_CUT_DIM_H, DMA_CUT_DIM_W) ? 0 : 1;
+}
+
+static int
+scenario_overlap_transpose_multiplane(void)
+{
+    Layout src = make_layout(8, 8, 8, 0);
+    Layout dst = make_layout(8, 8, 8, 0);
+    clear_region(DST_SPM0, tensor_bytes(dst));
+    fill_tensor(SRC_DRAM0, src);
+
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_W,
+                            DMA_CUT_DIM_C, 0U, 1U, DMA_STAGE_LOAD, 70, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_W,
+                            DMA_CUT_DIM_C, 0U, 1U, DMA_STAGE_COMPUTE, 71, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_W,
+                            DMA_CUT_DIM_C, 0U, 1U, DMA_STAGE_STORE, 72, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_transposed_match(DST_SPM0, src, dst,
+                                       DMA_CUT_DIM_W, DMA_CUT_DIM_C) ? 0 : 1;
+}
+
+static int
+scenario_transpose_overlap_hazard_gated(void)
+{
+    Layout src = make_layout(2, 2, 2, 0);
+    Layout dst = make_layout(2, 2, 2, 0);
+    clear_region(DST_SPM0, tensor_bytes(dst));
+    fill_tensor(SRC_DRAM0, src);
+
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_LOAD, 73, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_COMPUTE, 74, 0);
+    launch_staged_transpose(SRC_DRAM0, DST_SPM0, src, dst, DMA_CUT_DIM_H,
+                            DMA_CUT_DIM_W, 0U, 1U, DMA_STAGE_STORE, 75, 0);
+    npu_cmd_sync_done();
+
+    return poll_until_transposed_match(DST_SPM0, src, dst,
+                                       DMA_CUT_DIM_H, DMA_CUT_DIM_W) ? 0 : 1;
 }
 
 static int
@@ -1040,6 +1219,12 @@ dma_functional_cases_dispatch(int argc, char **argv)
     if (strcmp(argv[1], "bank_size_forces_batching") == 0) {
         return scenario_bank_size_forces_batching();
     }
+    if (strcmp(argv[1], "staged_move_layout_basic") == 0) {
+        return scenario_staged_move_layout_basic();
+    }
+    if (strcmp(argv[1], "overlap_move_layout_multibatch") == 0) {
+        return scenario_overlap_move_layout_multibatch();
+    }
     if (strcmp(argv[1], "sync_completion") == 0) {
         return scenario_sync_completion();
     }
@@ -1081,6 +1266,15 @@ dma_functional_cases_dispatch(int argc, char **argv)
     }
     if (strcmp(argv[1], "transpose_wc") == 0) {
         return scenario_transpose_wc();
+    }
+    if (strcmp(argv[1], "staged_transpose_basic") == 0) {
+        return scenario_staged_transpose_basic();
+    }
+    if (strcmp(argv[1], "overlap_transpose_multiplane") == 0) {
+        return scenario_overlap_transpose_multiplane();
+    }
+    if (strcmp(argv[1], "transpose_overlap_hazard_gated") == 0) {
+        return scenario_transpose_overlap_hazard_gated();
     }
     if (strcmp(argv[1], "transpose_same_bank") == 0) {
         return scenario_transpose_same_bank();
