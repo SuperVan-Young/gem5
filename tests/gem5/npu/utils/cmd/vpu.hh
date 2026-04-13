@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include <vector>
+
 #include "../npu_sync.hh"
 #include "common.hh"
 
@@ -320,6 +322,87 @@ vpu_cmd_init_compute(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
     vpu_cmd_set_tensor(cmd, VPU_CMD_WORD_SRC0_ADDR, src0);
     vpu_cmd_set_tensor(cmd, VPU_CMD_WORD_SRC1_ADDR, src1);
     vpu_cmd_set_extra_word(cmd, VPU_CMD_WORD_EXTRA0, extra0);
+}
+
+static inline std::vector<NpuCmd>
+vpu_cmd_make_unary_pipeline_template(uint32_t device_id, uint32_t op_code,
+                                     uint32_t dst_dtype, uint32_t src0_dtype,
+                                     uint32_t src1_dtype,
+                                     uint32_t w_layout_log2,
+                                     uint32_t c_layout_log2,
+                                     uint32_t layout_order,
+                                     const VpuTensorDesc *dst,
+                                     const VpuTensorDesc *src0,
+                                     const VpuTensorDesc *src1,
+                                     const VpuTensorDesc *local_dst,
+                                     const VpuTensorDesc *local_src0,
+                                     uint32_t extra0)
+{
+    std::vector<NpuCmd> commands(3);
+    vpu_cmd_init_compute(&commands[0], device_id, VPU_OP_VLOAD, 0U, src0_dtype,
+                         src0_dtype, src0_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, local_src0, src0, src1, 0U);
+    vpu_cmd_init_compute(&commands[1], device_id, op_code, 0U, dst_dtype,
+                         src0_dtype, src1_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, local_dst, local_src0, local_src0, extra0);
+    vpu_cmd_init_compute(&commands[2], device_id, VPU_OP_VSTORE, 0U, dst_dtype,
+                         dst_dtype, dst_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, dst, local_dst, src1, 0U);
+    return commands;
+}
+
+static inline std::vector<NpuCmd>
+vpu_cmd_make_binary_pipeline_template(uint32_t device_id, uint32_t op_code,
+                                      uint32_t dst_dtype,
+                                      uint32_t src0_dtype,
+                                      uint32_t src1_dtype,
+                                      uint32_t w_layout_log2,
+                                      uint32_t c_layout_log2,
+                                      uint32_t layout_order,
+                                      const VpuTensorDesc *dst,
+                                      const VpuTensorDesc *src0,
+                                      const VpuTensorDesc *src1,
+                                      const VpuTensorDesc *local_dst,
+                                      const VpuTensorDesc *local_src0,
+                                      const VpuTensorDesc *local_src1)
+{
+    std::vector<NpuCmd> commands(4);
+    const VpuTensorDesc zero = {0U, 0U, 0U};
+    vpu_cmd_init_compute(&commands[0], device_id, VPU_OP_VLOAD, 0U,
+                         src0_dtype, src0_dtype, src0_dtype, w_layout_log2,
+                         c_layout_log2, layout_order, local_src0, src0, &zero,
+                         0U);
+    vpu_cmd_init_compute(&commands[1], device_id, VPU_OP_VLOAD, 0U,
+                         src1_dtype, src1_dtype, src1_dtype, w_layout_log2,
+                         c_layout_log2, layout_order, local_src1, src1, &zero,
+                         0U);
+    vpu_cmd_init_compute(&commands[2], device_id, op_code, 0U, dst_dtype,
+                         src0_dtype, src1_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, local_dst, local_src0, local_src1, 0U);
+    vpu_cmd_init_compute(&commands[3], device_id, VPU_OP_VSTORE, 0U, dst_dtype,
+                         dst_dtype, dst_dtype, w_layout_log2, c_layout_log2,
+                         layout_order, dst, local_dst, &zero, 0U);
+    return commands;
+}
+
+static inline std::vector<NpuCmd>
+vpu_cmd_make_reduce_pipeline_template(uint32_t device_id, uint32_t op_code,
+                                      uint32_t dst_dtype,
+                                      uint32_t src0_dtype,
+                                      uint32_t src1_dtype,
+                                      uint32_t w_layout_log2,
+                                      uint32_t c_layout_log2,
+                                      uint32_t layout_order,
+                                      const VpuTensorDesc *dst,
+                                      const VpuTensorDesc *src0,
+                                      const VpuTensorDesc *src1,
+                                      const VpuTensorDesc *local_dst,
+                                      const VpuTensorDesc *local_src0)
+{
+    return vpu_cmd_make_unary_pipeline_template(
+        device_id, op_code, dst_dtype, src0_dtype, src1_dtype, w_layout_log2,
+        c_layout_log2, layout_order, dst, src0, src1, local_dst, local_src0,
+        0U);
 }
 
 static inline void

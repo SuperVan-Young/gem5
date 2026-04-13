@@ -7,7 +7,7 @@ npu_vars.AddVariables(
     BoolVariable(
         'NPU_PROFILE',
         'Enable compile-time NPU profiling support',
-        False,
+        True,
     ),
 )
 npu_vars.Update(main)

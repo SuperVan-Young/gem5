@@ -37,16 +37,22 @@ sys.path.insert(0, str(repo_root / "tests"))
 sys.path.insert(0, str(repo_root / "tests" / "gem5" / "npu" / "configs"))
 
 from runner_common import (  # noqa: E402
+    GenerateProfileArtifacts,
     NpuRunnerSpec,
     NpuScenarioSpec,
     build_verifiers,
     make_binary_config_args,
     make_named_regex_verifier,
+    make_profile_artifact_verifier,
+    make_profile_gem5_args,
     make_testcase_build_fixture,
     register_npu_scenarios,
     register_npu_test,
     resolve_binary_path,
     resolve_config_path,
+    resolve_testcase_profile_html_path,
+    resolve_testcase_profile_json_path,
+    resolve_testcase_profile_path,
     resolve_testcase_root,
     testcase_dir,
 )
@@ -67,6 +73,18 @@ class NpuRunnerCommonTestCase(unittest.TestCase):
         self.assertEqual(
             resolve_binary_path(reference, "seu_mmio_riscv"),
             Path("/tmp/example/bin/seu_mmio_riscv"),
+        )
+        self.assertEqual(
+            resolve_testcase_profile_path(reference),
+            Path("/tmp/example/profile/example.npu_profile.log"),
+        )
+        self.assertEqual(
+            resolve_testcase_profile_json_path(reference),
+            Path("/tmp/example/profile/example.npu_profile.json"),
+        )
+        self.assertEqual(
+            resolve_testcase_profile_html_path(reference),
+            Path("/tmp/example/profile/example.npu_profile.html"),
         )
 
     def test_make_binary_config_args(self):
@@ -100,6 +118,32 @@ class NpuRunnerCommonTestCase(unittest.TestCase):
         mock_make_target.assert_called_once_with(
             "all",
             make_fixture=mock_make_fixture.return_value,
+        )
+
+    def test_make_profile_gem5_args(self):
+        self.assertEqual(
+            make_profile_gem5_args("/tmp/example/test.py"),
+            (
+                "--debug-flags=NPUProfile",
+                "--debug-file=/tmp/example/profile/example.npu_profile.log",
+            ),
+        )
+
+    def test_make_profile_artifact_verifier(self):
+        verifier = make_profile_artifact_verifier("/tmp/example/test.py")
+
+        self.assertIsInstance(verifier, GenerateProfileArtifacts)
+        self.assertEqual(
+            verifier.raw_profile,
+            Path("/tmp/example/profile/example.npu_profile.log"),
+        )
+        self.assertEqual(
+            verifier.parsed_profile,
+            Path("/tmp/example/profile/example.npu_profile.json"),
+        )
+        self.assertEqual(
+            verifier.html_profile,
+            Path("/tmp/example/profile/example.npu_profile.html"),
         )
 
     def test_make_named_regex_verifier(self):

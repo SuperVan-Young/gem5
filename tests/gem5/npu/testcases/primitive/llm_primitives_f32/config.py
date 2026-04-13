@@ -23,7 +23,7 @@ binary = os.path.abspath(args.binary)
 builder = NPUTestSystemBuilder()
 builder.build_base_system()
 builder.add_default_physmem()
-builder.add_spm()
+builder.add_spm(size=8 * 1024 * 1024)
 builder.add_cpu(cpu_id=0)
 process = builder.set_workload(binary, cpu_id=0)
 builder.add_megacmdqueue()
@@ -32,6 +32,7 @@ builder.add_vpu(
     num_mem_side_ports=32,
     input_buffer_count=40,
     output_buffer_count=32,
+    local_buffer_stride=128 * 128 * 4,
     dlen_bytes=8,
     float32_cycles_per_dlen=4,
     float16_cycles_per_dlen=2,

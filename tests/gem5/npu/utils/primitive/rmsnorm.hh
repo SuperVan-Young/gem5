@@ -54,23 +54,28 @@ vpu_primitive_rmsnorm_f32(uint32_t device_id, const PrimitiveTensorDesc &src,
     for (uint64_t i = 0U; i < slices; ++i) {
         const PrimitiveTensorDesc src2d = primitivePeelTo2D(src, i);
         const PrimitiveTensorDesc dst2d = primitivePeelTo2D(dst, i);
-        const PrimitiveTensorDesc weight2d = primitiveReplicatedWeightSlice(
-            scratch_base_slot + 6U, weight, src2d.dim(0));
-        const PrimitiveTensorDesc square =
-            primitivePackedLike(scratch_base_slot + 0U, src2d);
-        const PrimitiveTensorDesc sum =
-            primitivePackedReduceLike(scratch_base_slot + 1U, src2d);
-        const PrimitiveTensorDesc eps =
-            primitivePackedScalar(scratch_base_slot + 2U);
-        const PrimitiveTensorDesc one =
-            primitivePackedScalar(scratch_base_slot + 3U);
+        uint32_t slot = scratch_base_slot;
+        const PrimitiveTensorDesc square = primitivePackedLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(square);
+        const PrimitiveTensorDesc sum = primitivePackedReduceLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(sum);
+        const PrimitiveTensorDesc eps = primitivePackedScalar(slot);
+        slot += primitiveTensorSlotSpan(eps);
+        const PrimitiveTensorDesc one = primitivePackedScalar(slot);
+        slot += primitiveTensorSlotSpan(one);
         const PrimitiveTensorDesc inv_rms =
-            primitivePackedReduceLike(scratch_base_slot + 4U, src2d);
+            primitivePackedReduceLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(inv_rms);
         const PrimitiveTensorDesc normalized =
-            primitivePackedLike(scratch_base_slot + 5U, src2d);
+            primitivePackedLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(normalized);
+        const PrimitiveTensorDesc weight2d =
+            primitiveReplicatedWeightSlice(slot, weight, src2d.dim(0));
 
-        primitiveStoreScalar(scratch_base_slot + 2U, epsilon);
-        primitiveStoreScalar(scratch_base_slot + 3U, 1.0f);
+        primitiveStoreScalar((eps.baseAddr - 0x60000000U) / VPU_LOCAL_SLOT_STRIDE,
+                             epsilon);
+        primitiveStoreScalar((one.baseAddr - 0x60000000U) / VPU_LOCAL_SLOT_STRIDE,
+                             1.0f);
 
         command_count += vpu_primitive_binary(
             device_id, VPU_OP_VMUL, src2d, src2d, square,

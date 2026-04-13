@@ -154,6 +154,18 @@ class VpuUnit : public SpecializedExecutionUnit
         size_t dstSpanBytes = 0;
         size_t src0SpanBytes = 0;
         size_t src1SpanBytes = 0;
+        bool src0InSpm = false;
+        bool src1InSpm = false;
+        bool dstInSpm = false;
+        bool src0Loaded = false;
+        bool src1Loaded = false;
+        bool src0Requested = false;
+        bool src1Requested = false;
+        bool resultReady = false;
+        bool storeIssued = false;
+        std::vector<uint8_t> src0Bytes;
+        std::vector<uint8_t> src1Bytes;
+        std::vector<uint8_t> resultBytes;
         uint32_t completedExecUops = 0;
     };
 
@@ -161,6 +173,8 @@ class VpuUnit : public SpecializedExecutionUnit
     {
         WaitStoreData = 1,
         RunCompute = 2,
+        LoadSrc0 = 3,
+        LoadSrc1 = 4,
     };
 
     const uint8_t deviceId;
@@ -229,6 +243,8 @@ class VpuUnit : public SpecializedExecutionUnit
     const std::vector<uint8_t> &sourceBytes(const TensorDesc &tensor,
                                             const DecodedVectorOp &op,
                                             size_t spanBytes) const;
+    const std::vector<uint8_t> &macroSourceBytes(const VpuMacroState &state,
+                                                 bool secondSource) const;
     bool sourceReady(const TensorDesc &tensor, BufferRole role,
                      size_t spanBytes) const;
     bool storeSourceReady(const VpuMacroState &state) const;
@@ -246,9 +262,9 @@ class VpuUnit : public SpecializedExecutionUnit
                           int64_t value, size_t elemSize) const;
     void storeFloatValue(std::vector<uint8_t> &bytes, size_t offset,
                          double value, DataType dataType) const;
-    void executeBinary(const VpuMacroState &state) const;
-    void executeUnary(const VpuMacroState &state) const;
-    void executeReduce(const VpuMacroState &state) const;
+    void executeBinary(VpuMacroState &state) const;
+    void executeUnary(VpuMacroState &state) const;
+    void executeReduce(VpuMacroState &state) const;
     void executeLoadStoreBypass(const VpuMacroState &state) const;
     void executeVectorOp(VpuMacroState &state) const;
 

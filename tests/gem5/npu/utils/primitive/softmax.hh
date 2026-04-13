@@ -19,14 +19,14 @@ vpu_primitive_softmax_f32(uint32_t device_id, const PrimitiveTensorDesc &src,
     for (uint64_t i = 0U; i < slices; ++i) {
         const PrimitiveTensorDesc src2d = primitivePeelTo2D(src, i);
         const PrimitiveTensorDesc dst2d = primitivePeelTo2D(dst, i);
-        const PrimitiveTensorDesc max =
-            primitivePackedReduceLike(scratch_base_slot + 0U, src2d);
-        const PrimitiveTensorDesc shifted =
-            primitivePackedLike(scratch_base_slot + 1U, src2d);
-        const PrimitiveTensorDesc exp =
-            primitivePackedLike(scratch_base_slot + 2U, src2d);
-        const PrimitiveTensorDesc sum =
-            primitivePackedReduceLike(scratch_base_slot + 3U, src2d);
+        uint32_t slot = scratch_base_slot;
+        const PrimitiveTensorDesc max = primitivePackedReduceLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(max);
+        const PrimitiveTensorDesc shifted = primitivePackedLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(shifted);
+        const PrimitiveTensorDesc exp = primitivePackedLike(slot, src2d);
+        slot += primitiveTensorSlotSpan(exp);
+        const PrimitiveTensorDesc sum = primitivePackedReduceLike(slot, src2d);
 
         command_count += vpu_primitive_reduce(
             device_id, VPU_OP_VREDUCE_MAX, src2d, max,

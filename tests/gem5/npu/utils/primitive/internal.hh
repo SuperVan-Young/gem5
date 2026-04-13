@@ -18,6 +18,7 @@ struct PrimitiveBufferAssignment
 enum
 {
     PRIMITIVE_DLEN_BYTES = 8U,
+    PRIMITIVE_LOCAL_BUFFER_STRIDE = 128U * 128U * sizeof(uint32_t),
 };
 
 static inline uint32_t
@@ -112,11 +113,20 @@ primitivePackedScalar(uint32_t slot, uint32_t data_type = VPU_DATA_F32)
     return PrimitiveTensorDesc::denseSpm(slot, data_type, {1U});
 }
 
+static inline uint32_t
+primitiveTensorSlotSpan(const PrimitiveTensorDesc &tensor)
+{
+    const uint64_t bytes = tensor.bytes();
+    return static_cast<uint32_t>(
+        (bytes + VPU_LOCAL_SLOT_STRIDE - 1U) / VPU_LOCAL_SLOT_STRIDE);
+}
+
 static inline VpuTensorDesc
 primitiveLocalTensor(uint32_t base, uint32_t buffer_index,
                      const PrimitiveVpu2DDesc &desc)
 {
-    return vpu_tensor_desc(vpu_local_addr(base, buffer_index), desc.tensor.shape,
+    return vpu_tensor_desc(base + (buffer_index * PRIMITIVE_LOCAL_BUFFER_STRIDE),
+                           desc.tensor.shape,
                            desc.tensor.stride);
 }
 
@@ -135,25 +145,13 @@ primitiveUnaryTemplate(uint32_t device_id, uint32_t op_code,
                        const PrimitiveBufferAssignment &buffers,
                        uint32_t extra0)
 {
-    std::vector<NpuCmd> commands(3);
+    (void)buffers;
     const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
-    const VpuTensorDesc local_src =
-        primitiveLocalTensor(VPU_LOCAL_INPUT_BASE, buffers.input0, src);
-    const VpuTensorDesc local_dst =
-        primitiveLocalTensor(VPU_LOCAL_OUTPUT_BASE, buffers.output, dst);
-
-    vpu_cmd_init_compute(&commands[0], device_id, VPU_OP_VLOAD, 0U, src.dataType,
-                         src.dataType, src.dataType, src.wLayoutLog2,
-                         src.cLayoutLog2, src.layoutOrder, &local_src, &src.tensor,
-                         &zero, 0U);
-    vpu_cmd_init_compute(&commands[1], device_id, op_code, 0U, dst.dataType,
+    std::vector<NpuCmd> commands(1);
+    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
                          src.dataType, src.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &local_dst, &local_src,
-                         &local_src, extra0);
-    vpu_cmd_init_compute(&commands[2], device_id, VPU_OP_VSTORE, 0U, dst.dataType,
-                         dst.dataType, dst.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor, &local_dst,
-                         &zero, 0U);
+                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
+                         &src.tensor, &zero, extra0);
     return commands;
 }
 
@@ -164,31 +162,12 @@ primitiveBinaryTemplate(uint32_t device_id, uint32_t op_code,
                         const PrimitiveVpu2DDesc &dst,
                         const PrimitiveBufferAssignment &buffers)
 {
-    std::vector<NpuCmd> commands(4);
-    const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
-    const VpuTensorDesc local_src0 =
-        primitiveLocalTensor(VPU_LOCAL_INPUT_BASE, buffers.input0, src0);
-    const VpuTensorDesc local_src1 =
-        primitiveLocalTensor(VPU_LOCAL_INPUT_BASE, buffers.input1, src1);
-    const VpuTensorDesc local_dst =
-        primitiveLocalTensor(VPU_LOCAL_OUTPUT_BASE, buffers.output, dst);
-
-    vpu_cmd_init_compute(&commands[0], device_id, VPU_OP_VLOAD, 0U,
-                         src0.dataType, src0.dataType, src0.dataType,
-                         src0.wLayoutLog2, src0.cLayoutLog2, src0.layoutOrder,
-                         &local_src0, &src0.tensor, &zero, 0U);
-    vpu_cmd_init_compute(&commands[1], device_id, VPU_OP_VLOAD, 0U,
-                         src1.dataType, src1.dataType, src1.dataType,
-                         src1.wLayoutLog2, src1.cLayoutLog2, src1.layoutOrder,
-                         &local_src1, &src1.tensor, &zero, 0U);
-    vpu_cmd_init_compute(&commands[2], device_id, op_code, 0U, dst.dataType,
+    (void)buffers;
+    std::vector<NpuCmd> commands(1);
+    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
                          src0.dataType, src1.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &local_dst, &local_src0,
-                         &local_src1, 0U);
-    vpu_cmd_init_compute(&commands[3], device_id, VPU_OP_VSTORE, 0U, dst.dataType,
-                         dst.dataType, dst.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor, &local_dst,
-                         &zero, 0U);
+                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
+                         &src0.tensor, &src1.tensor, 0U);
     return commands;
 }
 
@@ -198,7 +177,14 @@ primitiveReduceTemplate(uint32_t device_id, uint32_t op_code,
                         const PrimitiveVpu2DDesc &dst,
                         const PrimitiveBufferAssignment &buffers)
 {
-    return primitiveUnaryTemplate(device_id, op_code, src, dst, buffers, 0U);
+    (void)buffers;
+    const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
+    std::vector<NpuCmd> commands(1);
+    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
+                         src.dataType, src.dataType, dst.wLayoutLog2,
+                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
+                         &src.tensor, &zero, 0U);
+    return commands;
 }
 
 #endif

@@ -13,6 +13,34 @@ llm_packed_last_axis_tensor(uint32_t slot, uint32_t rows, uint32_t cols)
         .permute({1U, 0U});
 }
 
+static inline uint32_t
+llm_slot_span_bytes(uint64_t bytes)
+{
+    return static_cast<uint32_t>(
+        (bytes + VPU_LOCAL_SLOT_STRIDE - 1U) / VPU_LOCAL_SLOT_STRIDE);
+}
+
+static inline uint32_t
+llm_matrix_slot_span(uint32_t rows, uint32_t cols)
+{
+    return llm_slot_span_bytes(
+        static_cast<uint64_t>(rows) * cols * sizeof(uint32_t));
+}
+
+static inline uint32_t
+llm_vector_slot_span(uint32_t elems)
+{
+    return llm_slot_span_bytes(static_cast<uint64_t>(elems) * sizeof(uint32_t));
+}
+
+static inline void
+llm_clear_slot_span(uint32_t base_slot, uint32_t slot_span)
+{
+    for (uint32_t slot = 0U; slot < slot_span; ++slot) {
+        npu_spm_clear_slot(base_slot + slot);
+    }
+}
+
 static inline void
 llm_store_logical_matrix_last_axis_front(uint32_t slot, const uint32_t *src_bits,
                                          uint32_t rows, uint32_t cols)

@@ -103,10 +103,39 @@ Prefer `tests/gem5/npu/configs/runner_common.py` helpers:
 
 - `resolve_config_path(...)`
 - `resolve_binary_path(...)`
+- `resolve_testcase_profile_path(...)`
 - `make_binary_config_args(...)`
+- `make_profile_gem5_args(...)`
 - `make_testcase_build_fixture(...)`
 - `register_npu_test(...)`
 - `register_npu_scenarios(...)`
+
+#### Primitive testcase profiling rule
+
+All testcase directories under `tests/gem5/npu/testcases/primitive/` must
+export NPU profiling artifacts by default.
+
+Required pattern:
+
+1. In `test.py`, set `gem5_args=make_profile_gem5_args(__file__)`.
+2. In `test.py`, include `make_profile_artifact_verifier(__file__)` in
+   `verifier_specs` so the raw log is always converted to JSON and HTML after
+   the run.
+3. The artifact set must land in testcase-local `profile/` as:
+   - `<testcase>.npu_profile.log`
+   - `<testcase>.npu_profile.json`
+   - `<testcase>.npu_profile.html`
+4. Generated profiling artifacts must stay gitignored.
+5. Reuse `tests/gem5/npu/tools/parse_npu_profile.py` and
+   `tests/gem5/npu/tools/render_npu_profile.py`; do not invent a second parse
+   or render path for primitive tests.
+6. These tests assume gem5 was built with the default NPU profiling support
+   enabled (`NPU_PROFILE`); do not add a second primitive-specific build mode.
+7. Prefer a meaningful 2D workload shape for primitive tests; default to at
+   least `128 x 128` unless runtime becomes prohibitive, and size SPM / local
+   buffer configuration to match the chosen tensor footprint.
+
+Treat this as part of the primitive testcase template, not an optional add-on.
 
 ### `config.py`
 

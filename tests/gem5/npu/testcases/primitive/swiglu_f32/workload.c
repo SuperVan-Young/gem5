@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <vector>
+
 #include "golden/llm_f32.hh"
 #include "llm_test_utils.hh"
 #include "npu_assert.hh"
@@ -13,51 +15,52 @@
 #include "npu_sync.hh"
 #include "swiglu.hh"
 
-enum SwiGluLayout
+enum
 {
     VPU_DEVICE_ID = 0U,
-    ROWS = 2U,
-    COLS = 8U,
+    ROWS = 128U,
+    COLS = 128U,
+    MAT_SLOT_SPAN = ((ROWS * COLS * sizeof(uint32_t)) +
+                     VPU_LOCAL_SLOT_STRIDE - 1U) / VPU_LOCAL_SLOT_STRIDE,
     GATE_SLOT = 0U,
-    VALUE_SLOT = 1U,
-    DST_SLOT = 2U,
-    SCRATCH_BASE = 3U,
+    VALUE_SLOT = GATE_SLOT + MAT_SLOT_SPAN,
+    DST_SLOT = VALUE_SLOT + MAT_SLOT_SPAN,
+    SCRATCH_BASE = DST_SLOT + MAT_SLOT_SPAN,
     SYNC_INDICATOR = 0x71U,
 };
 
 int
 main(void)
 {
-    const uint32_t gate[ROWS * COLS] = {
-        npu_float_to_bits(-1.5f), npu_float_to_bits(-0.5f),
-        npu_float_to_bits(0.25f), npu_float_to_bits(1.0f),
-        npu_float_to_bits(1.5f),  npu_float_to_bits(-2.0f),
-        npu_float_to_bits(0.75f), npu_float_to_bits(-0.25f),
-        npu_float_to_bits(0.1f),  npu_float_to_bits(-0.2f),
-        npu_float_to_bits(0.3f),  npu_float_to_bits(-0.4f),
-        npu_float_to_bits(0.5f),  npu_float_to_bits(-0.6f),
-        npu_float_to_bits(0.7f),  npu_float_to_bits(-0.8f),
-    };
-    const uint32_t value[ROWS * COLS] = {
-        npu_float_to_bits(0.75f), npu_float_to_bits(1.5f),
-        npu_float_to_bits(-0.5f), npu_float_to_bits(2.0f),
-        npu_float_to_bits(-1.0f), npu_float_to_bits(0.25f),
-        npu_float_to_bits(1.25f), npu_float_to_bits(-0.75f),
-        npu_float_to_bits(1.0f),  npu_float_to_bits(-1.0f),
-        npu_float_to_bits(0.5f),  npu_float_to_bits(-0.5f),
-        npu_float_to_bits(1.5f),  npu_float_to_bits(-1.5f),
-        npu_float_to_bits(2.0f),  npu_float_to_bits(-2.0f),
-    };
-    uint32_t expected[ROWS * COLS];
-    uint32_t actual[ROWS * COLS];
+    std::vector<uint32_t> gate(ROWS * COLS);
+    std::vector<uint32_t> value(ROWS * COLS);
+    std::vector<uint32_t> expected(ROWS * COLS);
+    std::vector<uint32_t> actual(ROWS * COLS);
 
-    for (uint32_t slot = 0U; slot < 8U; ++slot) {
-        npu_spm_clear_slot(slot);
+    for (uint32_t row = 0U; row < ROWS; ++row) {
+        for (uint32_t col = 0U; col < COLS; ++col) {
+            const uint32_t index = row * COLS + col;
+            const float gate_value =
+                (static_cast<int32_t>(row % 21U) - 10) * 0.11f +
+                (static_cast<int32_t>(col % 17U) - 8) * 0.07f;
+            const float value_value =
+                (static_cast<int32_t>(row % 15U) - 7) * 0.09f -
+                (static_cast<int32_t>(col % 19U) - 9) * 0.05f;
+            gate[index] = npu_float_to_bits(gate_value);
+            value[index] = npu_float_to_bits(value_value);
+        }
     }
 
-    llm_store_logical_matrix_last_axis_front(GATE_SLOT, gate, ROWS, COLS);
-    llm_store_logical_matrix_last_axis_front(VALUE_SLOT, value, ROWS, COLS);
-    npu_golden_swiglu_lastdim_f32(gate, value, ROWS, COLS, expected);
+    llm_clear_slot_span(GATE_SLOT, MAT_SLOT_SPAN);
+    llm_clear_slot_span(VALUE_SLOT, MAT_SLOT_SPAN);
+    llm_clear_slot_span(DST_SLOT, MAT_SLOT_SPAN);
+    llm_clear_slot_span(SCRATCH_BASE, MAT_SLOT_SPAN * 5U + 8U);
+
+    llm_store_logical_matrix_last_axis_front(GATE_SLOT, gate.data(), ROWS, COLS);
+    llm_store_logical_matrix_last_axis_front(VALUE_SLOT, value.data(), ROWS,
+                                             COLS);
+    npu_golden_swiglu_lastdim_f32(gate.data(), value.data(), ROWS, COLS,
+                                  expected.data());
 
     const size_t macro_count = vpu_primitive_swiglu_f32(
         VPU_DEVICE_ID, llm_packed_last_axis_tensor(GATE_SLOT, ROWS, COLS),
@@ -67,8 +70,10 @@ main(void)
     npu_launch_sync_wait(VPU_DEVICE_ID, SYNC_INDICATOR, 0U, 0U, 0U);
     npu_cmd_sync_done();
 
-    llm_load_logical_matrix_last_axis_front(DST_SLOT, actual, ROWS, COLS);
-    if (npu_expect_float_vector_close("SWIGLU_F32", expected, actual,
+    llm_load_logical_matrix_last_axis_front(DST_SLOT, actual.data(), ROWS,
+                                            COLS);
+    if (npu_expect_float_vector_close("SWIGLU_F32", expected.data(),
+                                      actual.data(),
                                       ROWS * COLS, 0.03f, 0.03f) != 0) {
         printf("SWIGLU_F32_FAIL\n");
         return 1;

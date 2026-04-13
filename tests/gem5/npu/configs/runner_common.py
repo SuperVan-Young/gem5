@@ -15,10 +15,13 @@ encode testcase-specific simulation semantics.
 """
 
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from testlib import test_util
 from testlib.configuration import constants
 
 from gem5 import verifier
@@ -27,6 +30,10 @@ from gem5.fixture import (
     MakeTarget,
 )
 from gem5.suite import gem5_verify_config
+
+NPU_TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
+NPU_PROFILE_PARSE_TOOL = NPU_TOOLS_DIR / "parse_npu_profile.py"
+NPU_PROFILE_RENDER_TOOL = NPU_TOOLS_DIR / "render_npu_profile.py"
 
 
 def resolve_testcase_root(reference_file):
@@ -43,6 +50,112 @@ def resolve_config_path(reference_file, config_filename="config.py"):
 
 def resolve_binary_path(reference_file, binary_name):
     return resolve_testcase_root(reference_file) / "bin" / binary_name
+
+
+def resolve_testcase_profile_dir(reference_file):
+    profile_dir = resolve_testcase_root(reference_file) / "profile"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
+
+
+def resolve_testcase_profile_path(reference_file, artifact_name=None):
+    testcase_root = resolve_testcase_root(reference_file)
+    if artifact_name is None:
+        artifact_name = f"{testcase_root.name}.npu_profile.log"
+    return resolve_testcase_profile_dir(reference_file) / artifact_name
+
+
+def resolve_testcase_profile_json_path(reference_file, artifact_name=None):
+    testcase_root = resolve_testcase_root(reference_file)
+    if artifact_name is None:
+        artifact_name = f"{testcase_root.name}.npu_profile.json"
+    return resolve_testcase_profile_dir(reference_file) / artifact_name
+
+
+def resolve_testcase_profile_html_path(reference_file, artifact_name=None):
+    testcase_root = resolve_testcase_root(reference_file)
+    if artifact_name is None:
+        artifact_name = f"{testcase_root.name}.npu_profile.html"
+    return resolve_testcase_profile_dir(reference_file) / artifact_name
+
+
+def make_profile_gem5_args(
+    reference_file, artifact_name=None, debug_flags=("NPUProfile",)
+):
+    gem5_args = []
+    if debug_flags:
+        gem5_args.append(f"--debug-flags={','.join(debug_flags)}")
+    gem5_args.append(
+        f"--debug-file={resolve_testcase_profile_path(reference_file, artifact_name)}"
+    )
+    return tuple(gem5_args)
+
+
+class GenerateProfileArtifacts(verifier.Verifier):
+    def __init__(self, raw_profile, parsed_profile, html_profile):
+        super().__init__()
+        self.raw_profile = Path(raw_profile)
+        self.parsed_profile = Path(parsed_profile)
+        self.html_profile = Path(html_profile)
+
+    def _run_tool(self, argv, tool_name):
+        result = subprocess.run(
+            argv,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            test_util.fail(
+                "%s failed for %s:\nstdout:\n%s\nstderr:\n%s",
+                tool_name,
+                self.raw_profile,
+                result.stdout,
+                result.stderr,
+            )
+
+    def test(self, params):
+        del params
+        if not self.raw_profile.is_file():
+            test_util.fail("Missing raw profile log %s", self.raw_profile)
+        if self.raw_profile.stat().st_size == 0:
+            test_util.fail("Empty raw profile log %s", self.raw_profile)
+
+        self._run_tool(
+            [
+                sys.executable,
+                str(NPU_PROFILE_PARSE_TOOL),
+                "--input",
+                str(self.raw_profile),
+                "--output",
+                str(self.parsed_profile),
+            ],
+            "parse_npu_profile.py",
+        )
+        self._run_tool(
+            [
+                sys.executable,
+                str(NPU_PROFILE_RENDER_TOOL),
+                "--input",
+                str(self.parsed_profile),
+                "--output",
+                str(self.html_profile),
+            ],
+            "render_npu_profile.py",
+        )
+
+
+def make_profile_artifact_verifier(
+    reference_file,
+    raw_artifact_name=None,
+    parsed_artifact_name=None,
+    html_artifact_name=None,
+):
+    return GenerateProfileArtifacts(
+        resolve_testcase_profile_path(reference_file, raw_artifact_name),
+        resolve_testcase_profile_json_path(reference_file, parsed_artifact_name),
+        resolve_testcase_profile_html_path(reference_file, html_artifact_name),
+    )
 
 
 def make_testcase_build_fixture(reference_file, target="all", source_dir=None):
