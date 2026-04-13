@@ -138,6 +138,13 @@ class MegaCmdQueue : public ClockedObject
         std::vector<uint8_t> bytes;
     };
 
+    struct QueuedCmd
+    {
+        uint64_t seq = 0;
+        PortID ingressPort = InvalidPortID;
+        std::vector<uint8_t> bytes;
+    };
+
     struct CmdFields
     {
         uint8_t deviceType;
@@ -153,7 +160,7 @@ class MegaCmdQueue : public ClockedObject
     CPUSidePort syncIndicatorSidePort;
     MemSidePort memSidePort;
     std::vector<StagingBuffer> stagingBuffers;
-    std::deque<std::vector<uint8_t>> queue;
+    std::deque<QueuedCmd> queue;
 
     const uint32_t numInputPort;
     const uint32_t megaCmdWidth;
@@ -169,6 +176,7 @@ class MegaCmdQueue : public ClockedObject
     bool writeInFlight;
     bool writeAwaitingRetry;
     PacketPtr writePacket;
+    uint64_t nextQueuedCmdSeq = 1;
     EventFunctionWrapper clearEnqueueGateEvent;
 
     bool canPushMegaCmd() const;
@@ -184,7 +192,8 @@ class MegaCmdQueue : public ClockedObject
 
     bool writeDataBytes(PortID port_id, Addr offset, const uint8_t *src,
                         size_t size);
-    bool enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source);
+    bool enqueueMegaCmd(PortID port_id, std::vector<uint8_t> cmd,
+                        const char *source);
     bool validLaunchOffset(Addr offset, size_t size) const;
     bool validMmioOffset(Addr offset, size_t size) const;
 

@@ -287,6 +287,8 @@ class TimingSimpleCPU : public BaseSimpleCPU
     PacketPtr ifetch_pkt;
     PacketPtr dcache_pkt;
     PacketPtr npu_launch_pkt;
+    uint64_t activeNpuLaunchSeq = 0;
+    uint64_t nextNpuLaunchSeq = 1;
 
     Cycles previousCycle;
 

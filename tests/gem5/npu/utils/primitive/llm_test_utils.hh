@@ -13,6 +13,14 @@ llm_packed_last_axis_tensor(uint32_t slot, uint32_t rows, uint32_t cols)
         .permute({1U, 0U});
 }
 
+static inline PrimitiveTensorDesc
+llm_packed_last_axis_tensor_3d(uint32_t slot, uint32_t slices, uint32_t rows,
+                               uint32_t cols)
+{
+    return PrimitiveTensorDesc::denseSpm(slot, VPU_DATA_F32, {slices, cols, rows})
+        .permute({0U, 2U, 1U});
+}
+
 static inline uint32_t
 llm_slot_span_bytes(uint64_t bytes)
 {
@@ -61,6 +69,38 @@ llm_load_logical_matrix_last_axis_front(uint32_t slot, uint32_t *dst_bits,
     for (uint32_t row = 0U; row < rows; ++row) {
         for (uint32_t col = 0U; col < cols; ++col) {
             dst_bits[row * cols + col] = src[col * rows + row];
+        }
+    }
+}
+
+static inline void
+llm_store_logical_tensor3_last_axis_front(uint32_t slot, const uint32_t *src_bits,
+                                          uint32_t slices, uint32_t rows,
+                                          uint32_t cols)
+{
+    volatile uint32_t *dst = npu_spm_slot_word_ptr_default(slot);
+    for (uint32_t slice = 0U; slice < slices; ++slice) {
+        for (uint32_t row = 0U; row < rows; ++row) {
+            for (uint32_t col = 0U; col < cols; ++col) {
+                dst[(slice * rows * cols) + (col * rows) + row] =
+                    src_bits[(slice * rows * cols) + (row * cols) + col];
+            }
+        }
+    }
+}
+
+static inline void
+llm_load_logical_tensor3_last_axis_front(uint32_t slot, uint32_t *dst_bits,
+                                         uint32_t slices, uint32_t rows,
+                                         uint32_t cols)
+{
+    const volatile uint32_t *src = npu_spm_slot_word_ptr_default(slot);
+    for (uint32_t slice = 0U; slice < slices; ++slice) {
+        for (uint32_t row = 0U; row < rows; ++row) {
+            for (uint32_t col = 0U; col < cols; ++col) {
+                dst_bits[(slice * rows * cols) + (row * cols) + col] =
+                    src[(slice * rows * cols) + (col * rows) + row];
+            }
         }
     }
 }

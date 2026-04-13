@@ -63,12 +63,15 @@ main(void)
     npu_spm_store_u32_vector(WEIGHT_SLOT, weight.data(), COLS);
     npu_golden_rmsnorm_lastdim_f32(src.data(), weight.data(), ROWS, COLS,
                                    epsilon, expected.data());
+    PrimitiveSyncDesc sync = {};
+    sync.syncIndicator = SYNC_INDICATOR;
+    sync.setSnsIndicator = true;
 
     const size_t macro_count = vpu_primitive_rmsnorm_f32(
         VPU_DEVICE_ID, llm_packed_last_axis_tensor(SRC_SLOT, ROWS, COLS),
         PrimitiveTensorDesc::denseSpm(WEIGHT_SLOT, VPU_DATA_F32, {COLS}),
         llm_packed_last_axis_tensor(DST_SLOT, ROWS, COLS), SCRATCH_BASE, 0U,
-        epsilon, SYNC_INDICATOR);
+        epsilon, sync);
     npu_launch_sync_wait(VPU_DEVICE_ID, SYNC_INDICATOR, 0U, 0U, 0U);
     npu_cmd_sync_done();
 

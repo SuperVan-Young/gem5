@@ -8,7 +8,7 @@ from pathlib import Path
 
 import m5
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "configs"))
 
 from npu_test_system import NPUTestSystemBuilder  # noqa: E402
 
@@ -30,8 +30,8 @@ builder.add_megacmdqueue()
 builder.add_vpu(
     vpu_id=0,
     num_mem_side_ports=32,
-    input_buffer_count=16,
-    output_buffer_count=8,
+    input_buffer_count=24,
+    output_buffer_count=12,
     local_buffer_stride=128 * 128 * 4,
     dlen_bytes=8,
     float32_cycles_per_dlen=4,
@@ -50,4 +50,4 @@ if (
     exit_event.getCause() == EXPECTED_EXIT_CAUSE
     and exit_event.getCode() == EXPECTED_EXIT_CODE
 ):
-    print("BUILDER_SMOKE_F32_CONFIG_PASS")
+    print("SOFTMAX_128X128XF32_CONFIG_PASS")

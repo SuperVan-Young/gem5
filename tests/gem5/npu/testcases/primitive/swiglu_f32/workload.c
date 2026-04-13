@@ -61,12 +61,15 @@ main(void)
                                              COLS);
     npu_golden_swiglu_lastdim_f32(gate.data(), value.data(), ROWS, COLS,
                                   expected.data());
+    PrimitiveSyncDesc sync = {};
+    sync.syncIndicator = SYNC_INDICATOR;
+    sync.setSnsIndicator = true;
 
     const size_t macro_count = vpu_primitive_swiglu_f32(
         VPU_DEVICE_ID, llm_packed_last_axis_tensor(GATE_SLOT, ROWS, COLS),
         llm_packed_last_axis_tensor(VALUE_SLOT, ROWS, COLS),
         llm_packed_last_axis_tensor(DST_SLOT, ROWS, COLS), SCRATCH_BASE, 0U,
-        SYNC_INDICATOR);
+        sync);
     npu_launch_sync_wait(VPU_DEVICE_ID, SYNC_INDICATOR, 0U, 0U, 0U);
     npu_cmd_sync_done();
 

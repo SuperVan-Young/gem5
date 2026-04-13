@@ -80,7 +80,9 @@ def resolve_testcase_profile_html_path(reference_file, artifact_name=None):
 
 
 def make_profile_gem5_args(
-    reference_file, artifact_name=None, debug_flags=("NPUProfile",)
+    reference_file,
+    artifact_name=None,
+    debug_flags=("NPUProfile",),
 ):
     gem5_args = []
     if debug_flags:

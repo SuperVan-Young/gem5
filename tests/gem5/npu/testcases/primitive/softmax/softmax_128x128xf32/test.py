@@ -4,7 +4,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "configs"))
 
 from runner_common import (  # noqa: E402
     NpuRunnerSpec,
@@ -17,11 +17,11 @@ from runner_common import (  # noqa: E402
     resolve_config_path,
 )
 
-binary = resolve_binary_path(__file__, "llm_primitives_f32_riscv")
+binary = resolve_binary_path(__file__, "softmax_128x128xf32_riscv")
 
 register_npu_test(
     NpuRunnerSpec(
-        name="llm_primitives_f32",
+        name="softmax_128x128xf32",
         config=resolve_config_path(__file__),
         config_args=tuple(make_binary_config_args(binary)),
         gem5_args=make_profile_gem5_args(__file__),

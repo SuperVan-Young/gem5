@@ -42,6 +42,7 @@
 #include "cpu/simple/timing.hh"
 
 #include <cstring>
+#include <sstream>
 
 #include "arch/generic/decoder.hh"
 #include "base/compiler.hh"
@@ -51,6 +52,7 @@
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
 #include "debug/Mwait.hh"
+#include "debug/NPULaunchProfile.hh"
 #include "debug/SimpleCPU.hh"
 #include "mem/packet.hh"
 #include "mem/packet_access.hh"
@@ -61,6 +63,52 @@
 
 namespace gem5
 {
+
+namespace
+{
+
+uint32_t
+extractNpuLaunchHeader(const uint8_t *data, unsigned size)
+{
+    if (size < sizeof(uint32_t)) {
+        return 0U;
+    }
+
+    uint32_t header = 0U;
+    std::memcpy(&header, data, sizeof(header));
+    return header;
+}
+
+void
+appendNpuLaunchFieldsJson(std::ostream &os, uint32_t header_word)
+{
+    os << "\"header_word\":" << header_word;
+    os << ",\"device_type\":" << ((header_word >> 28) & 0xFU);
+    os << ",\"device_id\":" << ((header_word >> 24) & 0xFU);
+    os << ",\"opcode\":" << ((header_word >> 16) & 0xFFU);
+    os << ",\"sync_indicator\":" << ((header_word >> 8) & 0xFFU);
+}
+
+void
+emitNpuLaunchProfile(const std::string &cpu_name, const char *stage, Tick tick,
+                     uint64_t launch_seq, uint32_t header_word, unsigned size,
+                     Addr pc)
+{
+    std::ostringstream os;
+    os << '{';
+    os << "\"event\":\"" << stage << "\"";
+    os << ",\"tick\":" << tick;
+    os << ",\"cpu_name\":\"" << cpu_name << "\"";
+    os << ",\"launch_seq\":" << launch_seq;
+    os << ",\"packet_bytes\":" << size;
+    os << ",\"pc\":" << pc;
+    os << ',';
+    appendNpuLaunchFieldsJson(os, header_word);
+    os << '}';
+    DPRINTF(NPULaunchProfile, "NPU_LAUNCH_PROFILE %s\n", os.str().c_str());
+}
+
+} // namespace
 
 void
 TimingSimpleCPU::init()
@@ -608,6 +656,8 @@ TimingSimpleCPU::initiateNpuLaunch(const uint8_t *data, unsigned size)
 {
     SimpleExecContext &t_info = *threadInfo[curThread];
     SimpleThread *thread = t_info.thread;
+    const uint32_t header_word = extractNpuLaunchHeader(data, size);
+    const uint64_t launch_seq = nextNpuLaunchSeq++;
 
     auto *payload = new uint8_t[size];
     std::memcpy(payload, data, size);
@@ -620,12 +670,21 @@ TimingSimpleCPU::initiateNpuLaunch(const uint8_t *data, unsigned size)
     PacketPtr pkt = Packet::createWrite(req);
     pkt->dataDynamic<uint8_t>(payload);
 
+    activeNpuLaunchSeq = launch_seq;
+    emitNpuLaunchProfile(name(), "cpu_launch_request", curTick(), launch_seq,
+                         header_word, size, thread->pcState().instAddr());
+
     npu_launch_pkt = pkt;
     if (!npuLaunchPort.sendTimingReq(pkt)) {
+        emitNpuLaunchProfile(name(), "cpu_launch_retry_blocked", curTick(),
+                             launch_seq, header_word, size,
+                             thread->pcState().instAddr());
         _status = DcacheRetry;
         return NoFault;
     }
 
+    emitNpuLaunchProfile(name(), "cpu_launch_sent", curTick(), launch_seq,
+                         header_word, size, thread->pcState().instAddr());
     _status = DcacheWaitResponse;
     npu_launch_pkt = nullptr;
     return NoFault;
@@ -1256,6 +1315,11 @@ bool
 TimingSimpleCPU::NpuLaunchPort::recvTimingResp(PacketPtr pkt)
 {
     DPRINTF(SimpleCPU, "Received NPU launch response\n");
+    emitNpuLaunchProfile(cpu->name(), "cpu_launch_response", curTick(),
+                         cpu->activeNpuLaunchSeq,
+                         extractNpuLaunchHeader(pkt->getConstPtr<uint8_t>(),
+                                                pkt->getSize()),
+                         pkt->getSize(), 0);
 
     if (!tickEvent.scheduled()) {
         tickEvent.schedule(pkt, cpu->clockEdge());
@@ -1272,6 +1336,7 @@ void
 TimingSimpleCPU::NpuLaunchPort::NTickEvent::process()
 {
     cpu->completeDataAccess(pkt);
+    cpu->activeNpuLaunchSeq = 0;
 }
 
 void
@@ -1282,6 +1347,11 @@ TimingSimpleCPU::NpuLaunchPort::recvReqRetry()
 
     PacketPtr pkt = cpu->npu_launch_pkt;
     if (sendTimingReq(pkt)) {
+        emitNpuLaunchProfile(cpu->name(), "cpu_launch_retry_sent", curTick(),
+                             cpu->activeNpuLaunchSeq,
+                             extractNpuLaunchHeader(pkt->getConstPtr<uint8_t>(),
+                                                    pkt->getSize()),
+                             pkt->getSize(), 0);
         cpu->_status = DcacheWaitResponse;
         cpu->npu_launch_pkt = nullptr;
     }

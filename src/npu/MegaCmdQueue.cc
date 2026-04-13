@@ -31,10 +31,12 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <sstream>
 
 #include "base/cprintf.hh"
 #include "base/logging.hh"
 #include "debug/MegaCmdQueue.hh"
+#include "debug/NPULaunchProfile.hh"
 #include "mem/packet.hh"
 #include "sim/system.hh"
 
@@ -61,6 +63,36 @@ extractCmdWord(const std::vector<uint8_t> &cmd)
     uint32_t word = 0;
     std::memcpy(&word, cmd.data(), sizeof(word));
     return word;
+}
+
+void
+appendLaunchFieldsJson(std::ostream &os, uint32_t header_word)
+{
+    os << "\"header_word\":" << header_word;
+    os << ",\"device_type\":" << ((header_word >> 28) & 0xFU);
+    os << ",\"device_id\":" << ((header_word >> 24) & 0xFU);
+    os << ",\"opcode\":" << ((header_word >> 16) & 0xFFU);
+    os << ",\"sync_indicator\":" << ((header_word >> 8) & 0xFFU);
+}
+
+void
+emitLaunchProfile(const std::string &owner_name, const char *stage, Tick tick,
+                  uint64_t cmd_seq, PortID port_id, uint32_t header_word,
+                  uint64_t queue_depth, Addr target_addr = 0)
+{
+    std::ostringstream os;
+    os << '{';
+    os << "\"event\":\"" << stage << "\"";
+    os << ",\"tick\":" << tick;
+    os << ",\"owner\":\"" << owner_name << "\"";
+    os << ",\"cmd_seq\":" << cmd_seq;
+    os << ",\"port_id\":" << port_id;
+    os << ",\"queue_depth\":" << queue_depth;
+    os << ",\"target_addr\":" << target_addr;
+    os << ',';
+    appendLaunchFieldsJson(os, header_word);
+    os << '}';
+    DPRINTF(NPULaunchProfile, "NPU_LAUNCH_PROFILE %s\n", os.str().c_str());
 }
 
 } // anonymous namespace
@@ -406,7 +438,8 @@ MegaCmdQueue::canPushMegaCmd() const
 }
 
 bool
-MegaCmdQueue::enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source)
+MegaCmdQueue::enqueueMegaCmd(PortID port_id, std::vector<uint8_t> cmd,
+                             const char *source)
 {
     if (!canPushMegaCmd()) {
         DPRINTF(MegaCmdQueue,
@@ -417,7 +450,9 @@ MegaCmdQueue::enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source)
         return false;
     }
 
-    queue.emplace_back(std::move(cmd));
+    const uint32_t header_word = extractCmdWord(cmd);
+    const uint64_t cmd_seq = nextQueuedCmdSeq++;
+    queue.push_back({cmd_seq, port_id, std::move(cmd)});
     hasEnqueuedCmd = true;
     if (!clearEnqueueGateEvent.scheduled()) {
         schedule(clearEnqueueGateEvent, clockEdge(Cycles(1)));
@@ -428,6 +463,8 @@ MegaCmdQueue::enqueueMegaCmd(std::vector<uint8_t> cmd, const char *source)
             source,
             static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
             static_cast<unsigned long long>(clockEdge(Cycles(1))));
+    emitLaunchProfile(name(), "mcq_enqueue", curTick(), cmd_seq, port_id,
+                      header_word, queue.size());
 
     tryDispatchNext();
     return true;
@@ -482,7 +519,7 @@ MegaCmdQueue::recvTimingPushReq(PortID port_id)
                              stagingBuffers[port_id].bytes.end());
     std::fill(stagingBuffers[port_id].bytes.begin(),
               stagingBuffers[port_id].bytes.end(), 0);
-    return enqueueMegaCmd(std::move(cmd), "push");
+    return enqueueMegaCmd(port_id, std::move(cmd), "push");
 }
 
 bool
@@ -493,7 +530,7 @@ MegaCmdQueue::recvTimingLaunchReq(PortID port_id, PacketPtr pkt)
     DPRINTF(MegaCmdQueue,
             "launch write port=%d addr=%#llx size=%u\n",
             port_id, pkt->getAddr(), pkt->getSize());
-    return enqueueMegaCmd(std::move(cmd), "launch");
+    return enqueueMegaCmd(port_id, std::move(cmd), "launch");
 }
 
 bool
@@ -510,7 +547,7 @@ MegaCmdQueue::recvTimingLaunchSidebandReq(PortID port_id, PacketPtr pkt)
                              pkt->getConstPtr<uint8_t>() + megaCmdBytes);
     DPRINTF(MegaCmdQueue,
             "launch sideband port=%d size=%u\n", port_id, pkt->getSize());
-    return enqueueMegaCmd(std::move(cmd), "launch sideband");
+    return enqueueMegaCmd(port_id, std::move(cmd), "launch sideband");
 }
 
 void
@@ -519,12 +556,15 @@ MegaCmdQueue::popMegaCmd()
     panic_if(queue.empty(), "%s: pop requested on empty queue", name());
 
     const bool was_blocked = !canPushMegaCmd();
+    const uint64_t cmd_seq = queue.front().seq;
     queue.pop_front();
 
     DPRINTF(MegaCmdQueue,
             "pop executed: queue=%llu/%u hasEnqueued=%d\n",
             static_cast<unsigned long long>(queue.size()), cmdQueueDepth,
             hasEnqueuedCmd);
+    emitLaunchProfile(name(), "mcq_pop", curTick(), cmd_seq, InvalidPortID, 0U,
+                      queue.size());
 
     if (was_blocked && canPushMegaCmd()) {
         trySendRetries();
@@ -762,7 +802,8 @@ MegaCmdQueue::tryDispatchNext()
         return false;
     }
 
-    const auto &cmd = queue.front();
+    const auto &queued_cmd = queue.front();
+    const auto &cmd = queued_cmd.bytes;
     const CmdFields fields = parseCmdFields(cmd);
     if (fields.deviceType == 0x1 && fields.opCode == 0) {
         if (fields.syncIndicator >= numSyncIndicator) {
@@ -789,6 +830,9 @@ MegaCmdQueue::tryDispatchNext()
     }
 
     const Addr target_addr = buildTargetAddr(cmd);
+    emitLaunchProfile(name(), "mcq_dispatch_send", curTick(), queued_cmd.seq,
+                      queued_cmd.ingressPort, extractHeaderWord(cmd),
+                      queue.size(), target_addr);
 
     RequestPtr req = std::make_shared<Request>(
         target_addr, megaCmdBytes, Request::Flags(), Request::funcRequestorId);
@@ -851,6 +895,10 @@ MegaCmdQueue::handleMemResponse(PacketPtr pkt)
             "dispatch complete: target=%#llx queue=%llu\n",
             pkt->getAddr(),
             static_cast<unsigned long long>(queue.size()));
+    emitLaunchProfile(name(), "mcq_dispatch_complete", curTick(),
+                      queue.front().seq, queue.front().ingressPort,
+                      extractHeaderWord(queue.front().bytes), queue.size(),
+                      pkt->getAddr());
 
     queue.pop_front();
 

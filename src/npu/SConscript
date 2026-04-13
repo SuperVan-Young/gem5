@@ -12,6 +12,7 @@ DebugFlag('MpuUnit')
 DebugFlag('ScratchpadMemory')
 DebugFlag('VPU')
 DebugFlag('NPUProfile')
+DebugFlag('NPULaunchProfile')
 
 SimObject('LutUnit.py', sim_objects=['LutUnit'])
 SimObject('DmaUnit.py', sim_objects=['DmaUnit'])

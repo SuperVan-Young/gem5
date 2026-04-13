@@ -8,7 +8,7 @@ from pathlib import Path
 
 import m5
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "configs"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[4] / "configs"))
 
 from npu_test_system import NPUTestSystemBuilder  # noqa: E402
 
@@ -50,4 +50,4 @@ if (
     exit_event.getCause() == EXPECTED_EXIT_CAUSE
     and exit_event.getCode() == EXPECTED_EXIT_CODE
 ):
-    print("SOFTMAX_F32_CONFIG_PASS")
+    print("SOFTMAX_3X64X128XF32_CONFIG_PASS")

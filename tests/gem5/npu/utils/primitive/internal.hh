@@ -15,6 +15,16 @@ struct PrimitiveBufferAssignment
     uint32_t output = 0U;
 };
 
+struct PrimitiveSyncDesc
+{
+    uint32_t syncIndicator = 0U;
+    bool setSnsIndicator = false;
+    bool launchSyncWait = false;
+    uint32_t syncWaitWord1 = 0U;
+    uint32_t syncWaitWord2 = 0U;
+    uint32_t syncWaitWord3 = 0U;
+};
+
 enum
 {
     PRIMITIVE_DLEN_BYTES = 8U,
@@ -138,53 +148,109 @@ primitiveLaunchCommands(const std::vector<NpuCmd> &commands, uint64_t port_base)
     }
 }
 
-static inline std::vector<NpuCmd>
-primitiveUnaryTemplate(uint32_t device_id, uint32_t op_code,
-                       const PrimitiveVpu2DDesc &src,
-                       const PrimitiveVpu2DDesc &dst,
-                       const PrimitiveBufferAssignment &buffers,
-                       uint32_t extra0)
+static inline void
+primitiveSetSync(NpuCmd *cmd, const PrimitiveSyncDesc &sync)
 {
-    (void)buffers;
-    const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
-    std::vector<NpuCmd> commands(1);
-    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
-                         src.dataType, src.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
-                         &src.tensor, &zero, extra0);
-    return commands;
+    const uint32_t header = npuBuildHeaderWord(
+        cmd->getDeviceType(),
+        cmd->getDeviceId(),
+        cmd->getOpCode(),
+        sync.syncIndicator,
+        sync.setSnsIndicator ? 1U : 0U,
+        0U);
+    cmd->setWord(0U, header);
 }
 
-static inline std::vector<NpuCmd>
-primitiveBinaryTemplate(uint32_t device_id, uint32_t op_code,
-                        const PrimitiveVpu2DDesc &src0,
-                        const PrimitiveVpu2DDesc &src1,
-                        const PrimitiveVpu2DDesc &dst,
-                        const PrimitiveBufferAssignment &buffers)
+static inline void
+primitiveInitExecCmdFast(NpuCmd *cmd, uint32_t device_id, uint32_t op_code,
+                         const PrimitiveVpu2DDesc &src0,
+                         const PrimitiveVpu2DDesc &src1,
+                         const PrimitiveVpu2DDesc &dst, uint32_t extra0)
 {
-    (void)buffers;
-    std::vector<NpuCmd> commands(1);
-    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
-                         src0.dataType, src1.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
-                         &src0.tensor, &src1.tensor, 0U);
-    return commands;
+    cmd->clear();
+    cmd->setWord(0U, npuBuildHeaderWord(
+                         NPU_DEVICE_TYPE_VPU, device_id, op_code, 0U, 0U, 0U));
+    cmd->setWord(1U, vpu_pack_format_word(dst.dataType, src0.dataType,
+                                          src1.dataType, dst.wLayoutLog2,
+                                          dst.cLayoutLog2, dst.layoutOrder));
+    cmd->setWord(VPU_CMD_WORD_DST_ADDR, dst.tensor.addr);
+    cmd->setWord(VPU_CMD_WORD_DST_SHAPE, dst.tensor.shape);
+    cmd->setWord(VPU_CMD_WORD_DST_STRIDE, dst.tensor.stride);
+    cmd->setWord(VPU_CMD_WORD_SRC0_ADDR, src0.tensor.addr);
+    cmd->setWord(VPU_CMD_WORD_SRC0_SHAPE, src0.tensor.shape);
+    cmd->setWord(VPU_CMD_WORD_SRC0_STRIDE, src0.tensor.stride);
+    cmd->setWord(VPU_CMD_WORD_SRC1_ADDR, src1.tensor.addr);
+    cmd->setWord(VPU_CMD_WORD_SRC1_SHAPE, src1.tensor.shape);
+    cmd->setWord(VPU_CMD_WORD_SRC1_STRIDE, src1.tensor.stride);
+    cmd->setWord(VPU_CMD_WORD_EXTRA0, extra0);
 }
 
-static inline std::vector<NpuCmd>
-primitiveReduceTemplate(uint32_t device_id, uint32_t op_code,
-                        const PrimitiveVpu2DDesc &src,
-                        const PrimitiveVpu2DDesc &dst,
-                        const PrimitiveBufferAssignment &buffers)
+static inline void
+primitivePatchTensorAddr(NpuCmd *cmd, uint32_t addr_word_index, uint32_t addr)
 {
-    (void)buffers;
+    cmd->setWord(addr_word_index, addr);
+}
+
+static inline void
+primitivePatchTensor(NpuCmd *cmd, uint32_t addr_word_index,
+                     const VpuTensorDesc &desc)
+{
+    cmd->setWord(addr_word_index, desc.addr);
+    cmd->setWord(addr_word_index + 1U, desc.shape);
+    cmd->setWord(addr_word_index + 2U, desc.stride);
+}
+
+static inline void
+primitiveMaybeLaunchSyncWait(uint32_t device_id, const PrimitiveSyncDesc &sync,
+                             uint64_t port_base)
+{
+    if (!sync.launchSyncWait) {
+        return;
+    }
+
+    if (sync.syncIndicator == 0U) {
+        __builtin_trap();
+    }
+
+    npu_launch_sync_wait_at(device_id, sync.syncIndicator,
+                            sync.syncWaitWord1, sync.syncWaitWord2,
+                            sync.syncWaitWord3, port_base);
+}
+
+static inline NpuCmd
+primitiveBuildUnaryExecCmd(uint32_t device_id, uint32_t op_code,
+                           const PrimitiveVpu2DDesc &src,
+                           const PrimitiveVpu2DDesc &dst, uint32_t extra0)
+{
     const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
-    std::vector<NpuCmd> commands(1);
-    vpu_cmd_init_compute(&commands[0], device_id, op_code, 0U, dst.dataType,
-                         src.dataType, src.dataType, dst.wLayoutLog2,
-                         dst.cLayoutLog2, dst.layoutOrder, &dst.tensor,
-                         &src.tensor, &zero, 0U);
-    return commands;
+    NpuCmd cmd;
+    primitiveInitExecCmdFast(&cmd, device_id, op_code, src,
+                             PrimitiveVpu2DDesc{zero, src.dataType}, dst,
+                             extra0);
+    return cmd;
+}
+
+static inline NpuCmd
+primitiveBuildBinaryExecCmd(uint32_t device_id, uint32_t op_code,
+                            const PrimitiveVpu2DDesc &src0,
+                            const PrimitiveVpu2DDesc &src1,
+                            const PrimitiveVpu2DDesc &dst)
+{
+    NpuCmd cmd;
+    primitiveInitExecCmdFast(&cmd, device_id, op_code, src0, src1, dst, 0U);
+    return cmd;
+}
+
+static inline NpuCmd
+primitiveBuildReduceExecCmd(uint32_t device_id, uint32_t op_code,
+                            const PrimitiveVpu2DDesc &src,
+                            const PrimitiveVpu2DDesc &dst)
+{
+    const VpuTensorDesc zero = vpu_tensor_desc(0U, 0U, 0U);
+    NpuCmd cmd;
+    primitiveInitExecCmdFast(&cmd, device_id, op_code, src,
+                             PrimitiveVpu2DDesc{zero, src.dataType}, dst, 0U);
+    return cmd;
 }
 
 #endif

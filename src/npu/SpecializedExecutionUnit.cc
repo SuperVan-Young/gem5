@@ -33,6 +33,7 @@
 #include <sstream>
 
 #include "base/trace.hh"
+#include "debug/NPULaunchProfile.hh"
 #include "debug/NPUProfile.hh"
 #include "debug/SpecializedExecutionUnit.hh"
 
@@ -69,6 +70,36 @@ packWord(uint32_t value)
     std::vector<uint8_t> bytes(sizeof(value), 0);
     std::memcpy(bytes.data(), &value, sizeof(value));
     return bytes;
+}
+
+void
+appendLaunchFieldsJson(std::ostream &os,
+                       const SpecializedExecutionUnit::CmdFields &fields)
+{
+    os << "\"device_type\":" << static_cast<uint32_t>(fields.deviceType);
+    os << ",\"device_id\":" << static_cast<uint32_t>(fields.deviceId);
+    os << ",\"opcode\":" << static_cast<uint32_t>(fields.opCode);
+    os << ",\"sync_indicator\":" << static_cast<uint32_t>(fields.syncIndicator);
+}
+
+void
+emitLaunchProfile(const std::string &owner_name, const char *stage, Tick tick,
+                  uint64_t macro_id,
+                  const SpecializedExecutionUnit::MacroCmdContext &macro_cmd,
+                  uint64_t dispatch_depth)
+{
+    std::ostringstream os;
+    os << '{';
+    os << "\"event\":\"" << stage << "\"";
+    os << ",\"tick\":" << tick;
+    os << ",\"owner\":\"" << owner_name << "\"";
+    os << ",\"macro_id\":" << macro_id;
+    os << ",\"issue_queue\":" << macro_cmd.targetIssueQueueId;
+    os << ",\"dispatch_depth\":" << dispatch_depth;
+    os << ',';
+    appendLaunchFieldsJson(os, macro_cmd.fields);
+    os << '}';
+    DPRINTF(NPULaunchProfile, "NPU_LAUNCH_PROFILE %s\n", os.str().c_str());
 }
 
 } // anonymous namespace
@@ -326,6 +357,9 @@ SpecializedExecutionUnit::launchStagedCmd()
 
     macroCmdContexts.emplace(macro_cmd.macroCmdId, std::move(macro_cmd));
     dispatchQueue.push_back(nextMacroCmdId - 1);
+    emitLaunchProfile(name(), "seu_accept", curTick(), nextMacroCmdId - 1,
+                      macroCmdContexts.find(nextMacroCmdId - 1)->second,
+                      dispatchQueue.size());
 
     DPRINTF(SpecializedExecutionUnit,
             "Launched macro command id=%llu dispatch=%llu occupancy=%llu\n",
@@ -464,6 +498,8 @@ SpecializedExecutionUnit::runMacroCmdPrologue(MacroCmdContext &macroCmd)
     macroCmd.phase = Phase::Prologue;
     prologueCountValue++;
     onMacroCmdBegin(macroCmd);
+    emitLaunchProfile(name(), "seu_begin", curTick(), macroCmd.macroCmdId,
+                      macroCmd, dispatchQueue.size());
     emitProfileBegin(macroCmd);
     buildUops(macroCmd);
 

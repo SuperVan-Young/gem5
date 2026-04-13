@@ -51,24 +51,27 @@ main(void)
 
     llm_store_logical_matrix_last_axis_front(SRC_SLOT, src.data(), ROWS, COLS);
     npu_golden_softmax_lastdim_f32(src.data(), ROWS, COLS, expected.data());
+    PrimitiveSyncDesc sync = {};
+    sync.syncIndicator = SYNC_INDICATOR;
+    sync.setSnsIndicator = true;
 
     const size_t macro_count = vpu_primitive_softmax_f32(
         VPU_DEVICE_ID, llm_packed_last_axis_tensor(SRC_SLOT, ROWS, COLS),
         llm_packed_last_axis_tensor(DST_SLOT, ROWS, COLS), SCRATCH_BASE, 0U,
-        SYNC_INDICATOR);
+        sync);
     npu_launch_sync_wait(VPU_DEVICE_ID, SYNC_INDICATOR, 0U, 0U, 0U);
     npu_cmd_sync_done();
 
     llm_load_logical_matrix_last_axis_front(DST_SLOT, actual.data(), ROWS,
                                             COLS);
-    if (npu_expect_float_vector_close("SOFTMAX_F32", expected.data(),
-                                      actual.data(),
-                                      ROWS * COLS, 0.03f, 0.03f) != 0) {
-        printf("SOFTMAX_F32_FAIL\n");
+    if (npu_expect_float_vector_close("SOFTMAX_128X128XF32", expected.data(),
+                                      actual.data(), ROWS * COLS, 0.03f,
+                                      0.03f) != 0) {
+        printf("SOFTMAX_128X128XF32_FAIL\n");
         return 1;
     }
 
-    printf("SOFTMAX_F32_CACHED_CMDS=%u\n", (unsigned)macro_count);
-    printf("SOFTMAX_F32_PASS\n");
+    printf("SOFTMAX_128X128XF32_CACHED_CMDS=%u\n", (unsigned)macro_count);
+    printf("SOFTMAX_128X128XF32_PASS\n");
     return 0;
 }
