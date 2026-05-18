@@ -19,6 +19,10 @@ void npu_golden_vpu_unary_f2i(const uint32_t *src_bits, int32_t *dst,
                               uint32_t count);
 void npu_golden_vpu_unary_sqrt(const uint32_t *src_bits, uint32_t *dst_bits,
                                uint32_t count);
+void npu_golden_vpu_unary_abs_i32(const int32_t *src, int32_t *dst,
+                                  uint32_t count);
+void npu_golden_vpu_unary_abs_f32(const uint32_t *src_bits, uint32_t *dst_bits,
+                                  uint32_t count);
 void npu_golden_vpu_unary_exp(const uint32_t *src_bits, uint32_t *dst_bits,
                               uint32_t count);
 

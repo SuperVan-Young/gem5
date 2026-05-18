@@ -18,6 +18,7 @@ enum VpuOpcode
     VPU_OP_VCVT_I2F = 0x6U,
     VPU_OP_VCVT_F2I = 0x7U,
     VPU_OP_VSQRT = 0x8U,
+    VPU_OP_VABS = 0x9U,
     VPU_OP_VREDUCE_SUM = 0xAU,
     VPU_OP_VREDUCE_MAX = 0xBU,
     VPU_OP_VLOAD = 0xCU,

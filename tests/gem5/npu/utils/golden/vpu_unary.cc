@@ -59,6 +59,24 @@ npu_golden_vpu_unary_sqrt(const uint32_t *src_bits, uint32_t *dst_bits,
 }
 
 void
+npu_golden_vpu_unary_abs_i32(const int32_t *src, int32_t *dst, uint32_t count)
+{
+    for (uint32_t idx = 0U; idx < count; ++idx) {
+        dst[idx] = src[idx] < 0 ? -src[idx] : src[idx];
+    }
+}
+
+void
+npu_golden_vpu_unary_abs_f32(const uint32_t *src_bits, uint32_t *dst_bits,
+                             uint32_t count)
+{
+    for (uint32_t idx = 0U; idx < count; ++idx) {
+        dst_bits[idx] = npu_float_to_bits(
+            fabsf(npu_bits_to_float(src_bits[idx])));
+    }
+}
+
+void
 npu_golden_vpu_unary_exp(const uint32_t *src_bits, uint32_t *dst_bits,
                          uint32_t count)
 {

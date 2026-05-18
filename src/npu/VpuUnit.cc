@@ -45,6 +45,7 @@ namespace
 {
 
 constexpr uint32_t LocalRegionTagMask = 0xFF000000U;
+constexpr uint8_t VAbsOpcodeValue = 0x9U;
 
 inline uint32_t
 divCeil(uint32_t value, uint32_t divisor)
@@ -122,6 +123,8 @@ VpuUnit::decodeOpcode(uint8_t opCode) const
         return Opcode::VCvtF2I;
       case static_cast<uint8_t>(Opcode::VSqrt):
         return Opcode::VSqrt;
+      case VAbsOpcodeValue:
+        return static_cast<Opcode>(VAbsOpcodeValue);
       case static_cast<uint8_t>(Opcode::VReduceSum):
         return Opcode::VReduceSum;
       case static_cast<uint8_t>(Opcode::VReduceMax):
@@ -230,6 +233,10 @@ VpuUnit::isSignedType(DataType dataType) const
 const char *
 VpuUnit::opcodeName(Opcode opcode) const
 {
+    if (opcode == static_cast<Opcode>(VAbsOpcodeValue)) {
+        return "VAbs";
+    }
+
     switch (opcode) {
       case Opcode::VAdd:
         return "VAdd";
@@ -595,9 +602,15 @@ VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
     } else if (state.op.opcode == Opcode::VCvtF2I) {
         panic_if(isFloatType(state.op.dstType) || !isFloatType(state.op.src0Type),
                  "%s: VCvtF2I requires floating src0 and integer dst", name());
-    } else if (state.op.opcode == Opcode::VSqrt || state.op.opcode == Opcode::VExp) {
-        panic_if(!isFloatType(state.op.dstType) || !isFloatType(state.op.src0Type),
+    } else if (state.op.opcode == Opcode::VSqrt ||
+               state.op.opcode == Opcode::VExp) {
+        panic_if(!isFloatType(state.op.dstType) ||
+                     !isFloatType(state.op.src0Type),
                  "%s: VSQRT/VEXP require floating operands", name());
+    } else if (state.op.opcode == static_cast<Opcode>(VAbsOpcodeValue)) {
+        panic_if(state.op.dstType != state.op.src0Type,
+                 "%s: VABS requires dst/src0 dtype match",
+                 name());
     } else {
         panic_if(state.op.dstType != state.op.src0Type,
                  "%s: dst and src0 dtypes must match", name());
@@ -956,6 +969,29 @@ VpuUnit::executeUnary(VpuMacroState &state) const
             const size_t dstOffset = tensorElemOffset(
                 state.dst, state.op, w, c, state.op.dstElemSize);
 
+            if (state.op.opcode == static_cast<Opcode>(VAbsOpcodeValue)) {
+                if (isFloatType(state.op.dstType)) {
+                    storeFloatValue(dstBytes, dstOffset,
+                                    std::fabs(loadFloatValue(
+                                        src0Bytes, srcOffset,
+                                        state.op.src0Type)),
+                                    state.op.dstType);
+                } else if (isSignedType(state.op.dstType)) {
+                    const int64_t value = loadSignedValue(
+                        src0Bytes, srcOffset, state.op.src0ElemSize);
+                    storeSignedValue(dstBytes, dstOffset,
+                                     value < 0 ? -value : value,
+                                     state.op.dstElemSize);
+                } else {
+                    storeUnsignedValue(dstBytes, dstOffset,
+                                       loadUnsignedValue(
+                                           src0Bytes, srcOffset,
+                                           state.op.src0ElemSize),
+                                       state.op.dstElemSize);
+                }
+                continue;
+            }
+
             switch (state.op.opcode) {
               case Opcode::VScale:
                 if (isFloatType(state.op.dstType)) {
@@ -1141,6 +1177,11 @@ VpuUnit::executeLoadStoreBypass(const VpuMacroState &state) const
 void
 VpuUnit::executeVectorOp(VpuMacroState &state) const
 {
+    if (state.op.opcode == static_cast<Opcode>(VAbsOpcodeValue)) {
+        executeUnary(state);
+        return;
+    }
+
     switch (state.op.opcode) {
       case Opcode::VAdd:
       case Opcode::VSub:
