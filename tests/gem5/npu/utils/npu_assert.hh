@@ -1,10 +1,10 @@
 #ifndef TESTS_GEM5_NPU_UTILS_NPU_ASSERT_H_
 #define TESTS_GEM5_NPU_UTILS_NPU_ASSERT_H_
 
-#include <math.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <string.h>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 
 static inline uint32_t
 npu_float_to_bits(float value)
@@ -152,6 +152,36 @@ npu_wait_u32_vector_match(const char *label, const volatile uint32_t *actual,
         printf("%s timeout\n", label);
         npu_dump_u32_vector("  expected", expected, count);
         npu_dump_u32_vector_from_volatile("  actual", actual, count);
+    }
+    return -1;
+}
+
+static inline int
+npu_wait_i32_vector_not_value(const char *label,
+                              const volatile int32_t *actual,
+                              int32_t forbidden, uint32_t count,
+                              uint64_t timeout)
+{
+    for (uint64_t spin = 0ULL; spin < timeout; ++spin) {
+        int ready = 1;
+
+        for (uint32_t idx = 0U; idx < count; ++idx) {
+            if (actual[idx] == forbidden) {
+                ready = 0;
+                break;
+            }
+        }
+
+        if (ready) {
+            return 0;
+        }
+    }
+
+    if (label != NULL) {
+        printf("%s timeout forbidden=%d\n", label, forbidden);
+        for (uint32_t idx = 0U; idx < count; ++idx) {
+            printf("  actual[%u]=%d\n", idx, actual[idx]);
+        }
     }
     return -1;
 }

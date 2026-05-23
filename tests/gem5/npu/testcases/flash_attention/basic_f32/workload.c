@@ -190,8 +190,12 @@ main(int argc, char **argv)
     std::array<int8_t, Dim * SeqK> k_t_i8 = {};
     std::array<int8_t, SeqK * DimV> v_i8 = {};
     std::array<int8_t, SeqQ * SeqK> p_i8 = {};
+    std::array<int8_t, Dim * QkTileN> k_t_tile_i8 = {};
+    std::array<int8_t, PvTileM * PvTileK> p_tile_i8 = {};
+    std::array<int8_t, PvTileK * PvTileN> v_tile_i8 = {};
     std::array<int32_t, SeqQ * SeqK> scores_i32 = {};
     std::array<int32_t, SeqQ * DimV> out_i32 = {};
+    std::array<int32_t, QkTileM * QkTileN> tile_i32 = {};
     std::array<float, SeqQ * SeqK> scores_f32 = {};
     std::array<float, SeqQ> m_state = {};
     std::array<float, SeqQ> l_state = {};
@@ -338,6 +342,10 @@ main(int argc, char **argv)
         k_metadata.data(),
         p_metadata.data(),
         v_metadata.data(),
+        k_t_tile_i8.data(),
+        p_tile_i8.data(),
+        v_tile_i8.data(),
+        tile_i32.data(),
     };
 
     const int status =
