@@ -73,7 +73,8 @@ primitiveLowerLastAxis2D(const PrimitiveTensorDesc &tensor)
         __builtin_trap();
     }
 
-    const uint32_t dlen_elems = PRIMITIVE_DLEN_BYTES / elem_bytes;
+    const uint32_t dlen_elems = slice.layoutSizeElems != 0U ?
+        slice.layoutSizeElems : (PRIMITIVE_DLEN_BYTES / elem_bytes);
     if (dlen_elems == 0U) {
         __builtin_trap();
     }
@@ -107,6 +108,7 @@ primitivePackedReduceLike(uint32_t slot, const PrimitiveTensorDesc &tensor)
     PrimitiveTensorDesc out;
     out.baseAddr = 0x60000000U + (slot * VPU_LOCAL_SLOT_STRIDE);
     out.dataType = tensor.dataType;
+    out.layoutSizeElems = tensor.layoutSizeElems;
     out.shape = dims;
     out.strideElems.resize(dims.size(), 1U);
     uint32_t running = 1U;
@@ -120,7 +122,10 @@ primitivePackedReduceLike(uint32_t slot, const PrimitiveTensorDesc &tensor)
 static inline PrimitiveTensorDesc
 primitivePackedScalar(uint32_t slot, uint32_t data_type = VPU_DATA_F32)
 {
-    return PrimitiveTensorDesc::denseSpm(slot, data_type, {1U});
+    return PrimitiveTensorDesc::denseSpm(
+        slot, data_type, {1U},
+        PRIMITIVE_DLEN_BYTES / vpu_dtype_size_bytes(data_type)
+    );
 }
 
 static inline uint32_t

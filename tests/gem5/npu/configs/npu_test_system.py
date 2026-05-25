@@ -533,6 +533,8 @@ class NPUTestSystemBuilder:
             "debug_process_latency": debug_process_latency,
             "sync_enqueue_on_data_write": sync_enqueue_on_data_write,
         }
+        if lut is None and LutUnit is not None:
+            lut = LutUnit(dlen_bytes=dlen_bytes)
         if lut is not None:
             kwargs["lut"] = lut
         vpu = VpuUnit(
@@ -554,6 +556,7 @@ class NPUTestSystemBuilder:
         lookup_latency="30ns",
         interpolation_latency="20ns",
         normalize_latency="20ns",
+        dlen_bytes=4,
         table_entries=257,
         attr_name="lut",
         parent=None,
@@ -569,6 +572,7 @@ class NPUTestSystemBuilder:
             lookup_latency=lookup_latency,
             interpolation_latency=interpolation_latency,
             normalize_latency=normalize_latency,
+            dlen_bytes=dlen_bytes,
             table_entries=table_entries,
         )
         return self._attach_component(
@@ -620,6 +624,7 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         vpu_num_mem_side_ports=1,
+        dlen_bytes=4,
         vpu_debug_process_latency="50ns",
         vpu_sync_enqueue_on_data_write=True,
         dma_buffer_size=4096,
@@ -648,6 +653,7 @@ class NPUTestSystemBuilder:
             lookup_latency=lut_lookup_latency,
             interpolation_latency=lut_interpolation_latency,
             normalize_latency=lut_normalize_latency,
+            dlen_bytes=dlen_bytes,
             table_entries=lut_table_entries,
             attr_name="lut",
             parent=seu,
@@ -678,6 +684,7 @@ class NPUTestSystemBuilder:
                 macro_cmd_bytes=macro_cmd_bytes,
                 cmd_queue_depth=cmd_queue_depth,
                 num_mem_side_ports=vpu_num_mem_side_ports,
+                dlen_bytes=dlen_bytes,
                 base_addr=base_addr + (vpu_id << 20),
                 debug_process_latency=vpu_debug_process_latency,
                 sync_enqueue_on_data_write=vpu_sync_enqueue_on_data_write,

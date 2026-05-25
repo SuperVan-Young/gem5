@@ -29,6 +29,7 @@
 #ifndef __NPU_LUT_UNIT_HH__
 #define __NPU_LUT_UNIT_HH__
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -61,6 +62,7 @@ class LutUnit : public SimObject
     const Tick lookupLatency;
     const Tick interpolationLatency;
     const Tick normalizeLatency;
+    const uint32_t dlenBytes;
     const uint32_t tableEntries;
     std::vector<float> sqrtTable;
     std::vector<float> expTable;
@@ -77,11 +79,12 @@ class LutUnit : public SimObject
   public:
     LutUnit(const LutUnitParams &params);
 
-    Tick reserve(Operation op, uint32_t requestCount, Tick now);
+    Tick reserve(Operation op, size_t workBytes, Tick now);
     void noteCompletion(Operation op, Tick tick);
     float evaluateSqrt(float value) const;
     float evaluateExp(float value) const;
 
+    uint32_t dlenBytesValue() const;
     uint64_t requestCount() const;
     uint64_t commandCount() const;
     Tick lastExecuteLatency() const;

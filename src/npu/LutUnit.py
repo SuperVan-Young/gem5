@@ -25,7 +25,12 @@ class LutUnit(SimObject):
     normalize_latency = Param.Latency(
         "20ns",
         "Per-request latency for nonlinear post-processing or normalization "
-        "in the current single-resource LUT model",
+        "in the current dlen-batched LUT model",
+    )
+    dlen_bytes = Param.Unsigned(
+        4,
+        "Logical dlen in bytes; one LUT request processes one dlen-sized "
+        "batch, matching the tile VPU lane width",
     )
     table_entries = Param.Unsigned(
         257,

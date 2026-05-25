@@ -89,6 +89,9 @@ VpuUnit::VpuUnit(const VpuUnitParams &params)
              "%s: local buffer stride must contain an integer number of dlen "
              "chunks",
              name());
+    panic_if(lut->dlenBytesValue() != dlenBytes,
+             "%s: lut dlen_bytes (%u) must match VPU dlen_bytes (%u)",
+             name(), lut->dlenBytesValue(), dlenBytes);
 }
 
 uint32_t
@@ -659,9 +662,9 @@ VpuUnit::computeExecLatency(const VpuMacroState &state)
 
     Tick extraLatency = 0;
     if (isLutOpcode(state.op.opcode)) {
-        const uint32_t requests =
-            static_cast<uint32_t>(state.dst.shape.w * state.dst.shape.c);
-        extraLatency = lut->reserve(lutOperation(state.op.opcode), requests,
+        const size_t workBytes = static_cast<size_t>(state.src0.shape.w) *
+            state.src0.shape.c * state.op.src0ElemSize;
+        extraLatency = lut->reserve(lutOperation(state.op.opcode), workBytes,
                                     curTick());
     }
 

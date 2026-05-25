@@ -26,16 +26,19 @@ struct PrimitiveTensorDesc
 {
     uint32_t baseAddr = 0U;
     uint32_t dataType = VPU_DATA_F32;
+    uint32_t layoutSizeElems = 0U;
     std::vector<uint32_t> shape;
     std::vector<uint32_t> strideElems;
 
     static PrimitiveTensorDesc
     dense(uint32_t base_addr, uint32_t data_type,
-          std::initializer_list<uint32_t> dims)
+          std::initializer_list<uint32_t> dims,
+          uint32_t layout_size_elems = 0U)
     {
         PrimitiveTensorDesc desc;
         desc.baseAddr = base_addr;
         desc.dataType = data_type;
+        desc.layoutSizeElems = layout_size_elems;
         desc.shape.assign(dims.begin(), dims.end());
         desc.strideElems.resize(desc.shape.size(), 1U);
         uint32_t running = 1U;
@@ -48,10 +51,11 @@ struct PrimitiveTensorDesc
 
     static PrimitiveTensorDesc
     denseSpm(uint32_t slot, uint32_t data_type,
-             std::initializer_list<uint32_t> dims)
+             std::initializer_list<uint32_t> dims,
+             uint32_t layout_size_elems = 0U)
     {
         return dense(0x60000000U + (slot * VPU_LOCAL_SLOT_STRIDE), data_type,
-                     dims);
+                     dims, layout_size_elems);
     }
 
     uint32_t
@@ -141,7 +145,10 @@ struct PrimitiveTensorDesc
         PrimitiveTensorDesc out;
         out.baseAddr = baseAddr;
         out.dataType = dataType;
-        out.shape.insert(out.shape.end(), shape.begin(), shape.begin() + begin);
+        out.layoutSizeElems = layoutSizeElems;
+        out.shape.insert(
+            out.shape.end(), shape.begin(), shape.begin() + begin
+        );
         out.strideElems.insert(
             out.strideElems.end(), strideElems.begin(), strideElems.begin() + begin);
 
@@ -182,7 +189,10 @@ struct PrimitiveTensorDesc
         PrimitiveTensorDesc out;
         out.baseAddr = baseAddr + (offset_elems * elemBytes());
         out.dataType = dataType;
-        out.shape.insert(out.shape.end(), shape.end() - keep_dims, shape.end());
+        out.layoutSizeElems = layoutSizeElems;
+        out.shape.insert(
+            out.shape.end(), shape.end() - keep_dims, shape.end()
+        );
         out.strideElems.insert(
             out.strideElems.end(), strideElems.end() - keep_dims, strideElems.end());
         return out;
@@ -197,6 +207,7 @@ struct PrimitiveTensorDesc
         PrimitiveTensorDesc out;
         out.baseAddr = baseAddr;
         out.dataType = dataType;
+        out.layoutSizeElems = layoutSizeElems;
         out.shape = {shape[0], 1U};
         out.strideElems = {1U, shape[0]};
         return out;
@@ -211,6 +222,7 @@ struct PrimitiveTensorDesc
         PrimitiveTensorDesc out;
         out.baseAddr = baseAddr;
         out.dataType = dataType;
+        out.layoutSizeElems = layoutSizeElems;
         out.shape = {1U, 1U};
         out.strideElems = {1U, 1U};
         return out;

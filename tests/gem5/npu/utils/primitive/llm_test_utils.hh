@@ -7,17 +7,23 @@
 #include "../tensor.hh"
 
 static inline PrimitiveTensorDesc
-llm_packed_last_axis_tensor(uint32_t slot, uint32_t rows, uint32_t cols)
+llm_packed_last_axis_tensor(uint32_t slot, uint32_t rows, uint32_t cols,
+                            uint32_t layout_size_elems = 0U)
 {
-    return PrimitiveTensorDesc::denseSpm(slot, VPU_DATA_F32, {cols, rows})
+    return PrimitiveTensorDesc::denseSpm(
+        slot, VPU_DATA_F32, {cols, rows}, layout_size_elems
+    )
         .permute({1U, 0U});
 }
 
 static inline PrimitiveTensorDesc
 llm_packed_last_axis_tensor_3d(uint32_t slot, uint32_t slices, uint32_t rows,
-                               uint32_t cols)
+                               uint32_t cols,
+                               uint32_t layout_size_elems = 0U)
 {
-    return PrimitiveTensorDesc::denseSpm(slot, VPU_DATA_F32, {slices, cols, rows})
+    return PrimitiveTensorDesc::denseSpm(
+        slot, VPU_DATA_F32, {slices, cols, rows}, layout_size_elems
+    )
         .permute({0U, 2U, 1U});
 }
 

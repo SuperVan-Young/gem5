@@ -50,7 +50,11 @@ def _ticks_to_cycles(ticks):
 
 def emit_profile_summary():
     if not PROFILE_LOG.is_file():
-        raise FileNotFoundError(f"Missing raw profile log: {PROFILE_LOG}")
+        print(
+            "FLASH_ATTENTION_FAST_ONLINE_SOFTMAX_PROFILE "
+            "status=FAIL reason=missing_profile_log"
+        )
+        return False
 
     events = [
         event
@@ -58,9 +62,11 @@ def emit_profile_summary():
         if event["sync_indicator_int"] == SYNC_INDICATOR
     ]
     if not events:
-        raise RuntimeError(
-            f"Missing profile events for sync_indicator={SYNC_INDICATOR}"
+        print(
+            "FLASH_ATTENTION_FAST_ONLINE_SOFTMAX_PROFILE "
+            "status=FAIL reason=missing_profile_events"
         )
+        return False
 
     opcode_counts = Counter(event["opcode_int"] for event in events)
     total_span_ticks = (
@@ -80,6 +86,7 @@ def emit_profile_summary():
         f"abs={opcode_counts[9]} reduce_sum={opcode_counts[10]} "
         f"exp={opcode_counts[14]} status=PASS"
     )
+    return True
 
 
 def build_system(binary, scenario):
@@ -93,16 +100,24 @@ def build_system(binary, scenario):
     builder.add_cpu(cpu_id=0)
     process = builder.set_workload(os.path.abspath(binary), argv=[scenario])
     builder.add_megacmdqueue()
+    lut = builder.add_lut(
+        range_reduction_latency="1ns",
+        lookup_latency="1ns",
+        interpolation_latency="1ns",
+        normalize_latency="1ns",
+        dlen_bytes=128,
+    )
     builder.add_vpu(
         vpu_id=0,
         num_mem_side_ports=32,
         input_buffer_count=24,
         output_buffer_count=12,
         local_buffer_stride=128 * 128 * 4,
-        dlen_bytes=8,
-        float32_cycles_per_dlen=4,
+        dlen_bytes=128,
+        float32_cycles_per_dlen=1,
         float16_cycles_per_dlen=2,
         int32_cycles_per_dlen=2,
+        lut=lut,
     )
     builder.instantiate_root()
     return builder, process

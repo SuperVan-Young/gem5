@@ -56,8 +56,10 @@ LutUnit::LutUnit(const LutUnitParams &params)
       lookupLatency(params.lookup_latency),
       interpolationLatency(params.interpolation_latency),
       normalizeLatency(params.normalize_latency),
+      dlenBytes(params.dlen_bytes),
       tableEntries(params.table_entries)
 {
+    panic_if(dlenBytes == 0, "%s: dlen_bytes must be non-zero", name());
     panic_if(tableEntries < 2,
              "%s: table_entries must be at least 2 (got %u)",
              name(), tableEntries);
@@ -92,9 +94,9 @@ LutUnit::interpolateTableValue(const std::vector<float> &table,
 }
 
 Tick
-LutUnit::reserve(Operation op, uint32_t requestCount, Tick now)
+LutUnit::reserve(Operation op, size_t workBytes, Tick now)
 {
-    if (requestCount == 0) {
+    if (workBytes == 0) {
         lastExecuteLatencyValue = 0;
         if (op == Operation::Softmax) {
             lastSoftmaxExecuteLatencyValue = 0;
@@ -104,13 +106,11 @@ LutUnit::reserve(Operation op, uint32_t requestCount, Tick now)
 
     const Tick perRequestLatency = rangeReductionLatency + lookupLatency +
         interpolationLatency + normalizeLatency;
-    Tick completion = now;
-
-    for (uint32_t idx = 0; idx < requestCount; ++idx) {
-        const Tick start = std::max(resource.availableTick, now);
-        completion = start + perRequestLatency;
-        resource.availableTick = completion;
-    }
+    const uint32_t requestCount = std::max<uint32_t>(
+        1U, static_cast<uint32_t>((workBytes + dlenBytes - 1U) / dlenBytes));
+    const Tick start = std::max(resource.availableTick, now);
+    const Tick completion = start + (perRequestLatency * requestCount);
+    resource.availableTick = completion;
 
     resource.requestCount += requestCount;
     resource.commandCount++;
@@ -176,6 +176,12 @@ LutUnit::evaluateExp(float value) const
     const double position = reduced / Ln2;
     const float normalized = interpolateTableValue(expTable, position);
     return std::ldexp(normalized, exponent);
+}
+
+uint32_t
+LutUnit::dlenBytesValue() const
+{
+    return dlenBytes;
 }
 
 uint64_t

@@ -12,6 +12,7 @@ typedef struct
     uint32_t device_id;
     uint32_t sync_indicator;
     uint32_t set_completion_sync;
+    uint32_t vpu_dlen_bytes;
     uint64_t port_base;
 } NpuFastOnlineSoftmaxLaunchConfig;
 
@@ -59,6 +60,39 @@ npu_fast_online_softmax_validate_launch_config(
         printf("FAST_ONLINE_SOFTMAX_VALIDATE_FAIL=missing_sync_indicator\n");
         return -1;
     }
+    if (config->vpu_dlen_bytes == 0U) {
+        printf("FAST_ONLINE_SOFTMAX_VALIDATE_FAIL=missing_vpu_dlen\n");
+        return -1;
+    }
+    return 0;
+}
+
+static inline int
+npu_fast_online_softmax_validate_layout_size(
+    const char *label, const PrimitiveTensorDesc &tensor,
+    uint32_t required_dlen_bytes)
+{
+    const PrimitiveTensorDesc tensor2d = primitivePeelTo2D(tensor, 0U);
+    const uint32_t elem_bytes = tensor2d.elemBytes();
+
+    if (elem_bytes == 0U || (PRIMITIVE_DLEN_BYTES % elem_bytes) != 0U ||
+        (required_dlen_bytes % elem_bytes) != 0U) {
+        printf("FAST_ONLINE_SOFTMAX_VALIDATE_FAIL=%s_invalid_layout_unit\n",
+               label);
+        return -1;
+    }
+
+    const uint32_t primitive_layout_size = tensor2d.layoutSizeElems != 0U ?
+        tensor2d.layoutSizeElems : (PRIMITIVE_DLEN_BYTES / elem_bytes);
+    const uint32_t required_layout_size = required_dlen_bytes / elem_bytes;
+    if (primitive_layout_size != required_layout_size) {
+        printf(
+            "FAST_ONLINE_SOFTMAX_VALIDATE_FAIL=%s_layout_size_mismatch "
+            "primitive=%u required=%u\n",
+            label, primitive_layout_size, required_layout_size);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -66,7 +100,8 @@ static inline int
 npu_fast_online_softmax_validate_tensor_descs(
     const PrimitiveTensorDesc &scores_block, const PrimitiveTensorDesc &m_prev,
     const PrimitiveTensorDesc &l_prev, const PrimitiveTensorDesc &m_next,
-    const PrimitiveTensorDesc &l_next, const PrimitiveTensorDesc &p_block)
+    const PrimitiveTensorDesc &l_next, const PrimitiveTensorDesc &p_block,
+    uint32_t required_dlen_bytes)
 {
     const PrimitiveTensorDesc scores2d = primitivePeelTo2D(scores_block, 0U);
     const PrimitiveTensorDesc m_prev2d = primitivePeelTo2D(m_prev, 0U);
@@ -110,6 +145,20 @@ npu_fast_online_softmax_validate_tensor_descs(
         m_next2d.dim(0) != scores2d.dim(0) || m_next2d.dim(1) != 1U ||
         l_next2d.dim(0) != scores2d.dim(0) || l_next2d.dim(1) != 1U) {
         printf("FAST_ONLINE_SOFTMAX_VALIDATE_FAIL=state_shape_mismatch\n");
+        return -1;
+    }
+    if (npu_fast_online_softmax_validate_layout_size(
+            "scores", scores_block, required_dlen_bytes) != 0 ||
+        npu_fast_online_softmax_validate_layout_size(
+            "m_prev", m_prev, required_dlen_bytes) != 0 ||
+        npu_fast_online_softmax_validate_layout_size(
+            "l_prev", l_prev, required_dlen_bytes) != 0 ||
+        npu_fast_online_softmax_validate_layout_size(
+            "m_next", m_next, required_dlen_bytes) != 0 ||
+        npu_fast_online_softmax_validate_layout_size(
+            "l_next", l_next, required_dlen_bytes) != 0 ||
+        npu_fast_online_softmax_validate_layout_size(
+            "p_block", p_block, required_dlen_bytes) != 0) {
         return -1;
     }
 
@@ -267,7 +316,9 @@ vpu_fast_online_softmax_f32(
     if (npu_fast_online_softmax_validate_launch_config(&config) != 0 ||
         npu_fast_online_softmax_validate_tensor_descs(scores_block, m_prev,
                                                       l_prev, m_next, l_next,
-                                                      p_block) != 0) {
+                                                      p_block,
+                                                      config.vpu_dlen_bytes) !=
+            0) {
         return 0U;
     }
 

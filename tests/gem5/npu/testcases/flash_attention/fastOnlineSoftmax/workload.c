@@ -21,6 +21,7 @@ namespace
 
 static constexpr uint32_t Rows = 256U;
 static constexpr uint32_t Cols = 1024U;
+static constexpr uint32_t LayoutSizeElems = 32U;
 static constexpr uint32_t MatrixSlotSpan =
     (Rows * Cols * sizeof(uint32_t) + VPU_LOCAL_SLOT_STRIDE - 1U) /
     VPU_LOCAL_SLOT_STRIDE;
@@ -171,21 +172,34 @@ main(int argc, char **argv)
 {
     const char *scenario = argc > 1 ? argv[1] : ExpectedScenario;
     const PrimitiveTensorDesc scores_desc =
-        llm_packed_last_axis_tensor(ScoresSlot, Rows, Cols);
+        llm_packed_last_axis_tensor(
+            ScoresSlot, Rows, Cols, LayoutSizeElems
+        );
     const PrimitiveTensorDesc m_prev_desc =
-        PrimitiveTensorDesc::denseSpm(MPrevSlot, VPU_DATA_F32, {Rows});
+        PrimitiveTensorDesc::denseSpm(
+            MPrevSlot, VPU_DATA_F32, {Rows}, LayoutSizeElems
+        );
     const PrimitiveTensorDesc l_prev_desc =
-        PrimitiveTensorDesc::denseSpm(LPrevSlot, VPU_DATA_F32, {Rows});
+        PrimitiveTensorDesc::denseSpm(
+            LPrevSlot, VPU_DATA_F32, {Rows}, LayoutSizeElems
+        );
     const PrimitiveTensorDesc m_next_desc =
-        PrimitiveTensorDesc::denseSpm(MNextSlot, VPU_DATA_F32, {Rows});
+        PrimitiveTensorDesc::denseSpm(
+            MNextSlot, VPU_DATA_F32, {Rows}, LayoutSizeElems
+        );
     const PrimitiveTensorDesc l_next_desc =
-        PrimitiveTensorDesc::denseSpm(LNextSlot, VPU_DATA_F32, {Rows});
+        PrimitiveTensorDesc::denseSpm(
+            LNextSlot, VPU_DATA_F32, {Rows}, LayoutSizeElems
+        );
     const PrimitiveTensorDesc p_block_desc =
-        llm_packed_last_axis_tensor(PBlockSlot, Rows, Cols);
+        llm_packed_last_axis_tensor(
+            PBlockSlot, Rows, Cols, LayoutSizeElems
+        );
     const NpuFastOnlineSoftmaxLaunchConfig config = {
         VpuDeviceId,
         SyncIndicator,
         1U,
+        128U,
         0U,
     };
     NpuFastOnlineSoftmaxStats stats = {};
