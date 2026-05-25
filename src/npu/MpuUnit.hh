@@ -281,6 +281,7 @@ class MpuUnit : public SpecializedExecutionUnit
     uint32_t expectedCols(const ParsedCmd &cmd) const;
     uint32_t expectedRowBytes(const ParsedCmd &cmd) const;
     uint32_t requiredBytes(const ParsedCmd &cmd) const;
+    bool isContiguousSpmWindow(const ParsedCmd &cmd) const;
     PortID mvinPortId() const;
     PortID mvoutPortId() const;
     void validateSpmWindow(const ParsedCmd &cmd) const;
@@ -304,6 +305,7 @@ class MpuUnit : public SpecializedExecutionUnit
     void releaseConsumedInputBuffers();
     std::vector<uint8_t> serializeCRow(const CBufferSlot &slot,
                                        uint32_t row) const;
+    std::vector<uint8_t> serializeCTile(const CBufferSlot &slot) const;
 
   protected:
     MacroCmdKind classifyMacroCmd(

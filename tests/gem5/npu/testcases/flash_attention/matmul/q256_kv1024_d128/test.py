@@ -91,6 +91,26 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail(
                 "Unexpected fast template count in %s", PERF_SUMMARY
             )
+        if summary["baseline"]["profile"]["contiguous_load_macro_count"] == 0:
+            test_util.fail(
+                "Baseline phase should contain contiguous load macros in %s",
+                PERF_SUMMARY,
+            )
+        if summary["baseline"]["profile"]["contiguous_load_max_uops"] != 1:
+            test_util.fail(
+                "Baseline contiguous loads should issue one uop in %s",
+                PERF_SUMMARY,
+            )
+        if summary["fast"]["profile"]["contiguous_load_macro_count"] == 0:
+            test_util.fail(
+                "Fast phase should contain contiguous load macros in %s",
+                PERF_SUMMARY,
+            )
+        if summary["fast"]["profile"]["contiguous_load_max_uops"] != 1:
+            test_util.fail(
+                "Fast contiguous loads should issue one uop in %s",
+                PERF_SUMMARY,
+            )
         if (
             summary["compare"]["baseline_checksum"]
             != summary["compare"]["fast_checksum"]

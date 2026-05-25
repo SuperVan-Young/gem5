@@ -19,6 +19,11 @@ PROFILE_FAST_PREFIX = "FLASH_ATTENTION_MATMUL_PROFILE_FAST"
 PROFILE_COMPARE_PREFIX = "FLASH_ATTENTION_MATMUL_PROFILE_COMPARE"
 MPU_SUMMARY_PREFIX = "MPU_SUMMARY"
 KEY_VALUE_PATTERN = re.compile(r"([A-Za-z0-9_]+)=([^ ]+)")
+BUFFER_WORD = 5
+M_WORD = 6
+N_WORD = 7
+K_WORD = 8
+STRIDE_WORD = 11
 
 
 def parse_args():
@@ -88,6 +93,76 @@ def parse_profile_from_raw(profile_log_path):
     }
 
 
+def parse_profile_end_events(profile_log_path):
+    events = []
+    for line in profile_log_path.read_text(encoding="utf-8").splitlines():
+        if "NPU_PROFILE " not in line:
+            continue
+        payload = json.loads(line.split("NPU_PROFILE ", 1)[1])
+        if payload.get("event") != "end":
+            continue
+        events.append(payload)
+    return events
+
+
+def summarize_mem_uops(events, sync_indicator):
+    phase_events = [
+        event
+        for event in events
+        if int(event.get("sync_indicator", -1)) == sync_indicator
+    ]
+    mvin_load_uops = [
+        int(event.get("issued_load_uops", 0))
+        for event in phase_events
+        if int(event.get("opcode", -1)) == 0
+    ]
+    mvout_store_uops = [
+        int(event.get("issued_store_uops", 0))
+        for event in phase_events
+        if int(event.get("opcode", -1)) == 1
+    ]
+    contiguous_load_uops = []
+    contiguous_store_uops = []
+    for event in phase_events:
+        raw_words = event.get("raw_words", [])
+        if len(raw_words) <= STRIDE_WORD:
+            continue
+        opcode = int(event.get("opcode", -1))
+        buffer_kind = int(raw_words[BUFFER_WORD]) & 0x3
+        n = int(raw_words[N_WORD])
+        k = int(raw_words[K_WORD])
+        stride = int(raw_words[STRIDE_WORD])
+        if opcode == 0:
+            if buffer_kind == 0:
+                row_bytes = k
+            elif buffer_kind == 1:
+                row_bytes = n
+            else:
+                continue
+            if stride == row_bytes:
+                contiguous_load_uops.append(
+                    int(event.get("issued_load_uops", 0))
+                )
+        elif opcode == 1:
+            if buffer_kind != 2:
+                continue
+            row_bytes = n * 4
+            if stride == row_bytes:
+                contiguous_store_uops.append(
+                    int(event.get("issued_store_uops", 0))
+                )
+    return {
+        "mvin_macro_count": len(mvin_load_uops),
+        "mvout_macro_count": len(mvout_store_uops),
+        "mvin_max_load_uops": max(mvin_load_uops, default=0),
+        "mvout_max_store_uops": max(mvout_store_uops, default=0),
+        "contiguous_load_macro_count": len(contiguous_load_uops),
+        "contiguous_store_macro_count": len(contiguous_store_uops),
+        "contiguous_load_max_uops": max(contiguous_load_uops, default=0),
+        "contiguous_store_max_uops": max(contiguous_store_uops, default=0),
+    }
+
+
 def main():
     args = parse_args()
     simout_path = Path(args.simout)
@@ -125,6 +200,9 @@ def main():
         profiling = parse_profile_from_json(profile_json_path)
     else:
         profiling = parse_profile_from_raw(profile_log_path)
+    profile_events = parse_profile_end_events(profile_log_path)
+    baseline_sync_indicator = require_int(baseline, "sync_indicator")
+    fast_sync_indicator = require_int(fast, "sync_indicator")
 
     summary = {
         "m": require_int(shape, "m"),
@@ -147,12 +225,15 @@ def main():
                     profile_baseline, "compute_cycles"
                 ),
                 "macro_count": require_int(profile_baseline, "macro_count"),
+                **summarize_mem_uops(
+                    profile_events, baseline_sync_indicator
+                ),
             },
         },
         "fast": {
             "cmds": require_int(fast, "cmds"),
             "template_builds": require_int(fast, "template_builds"),
-            "sync_indicator": require_int(fast, "sync_indicator"),
+            "sync_indicator": fast_sync_indicator,
             "profile": {
                 "total_span_cycles": require_int(
                     profile_fast, "total_span_cycles"
@@ -160,6 +241,7 @@ def main():
                 "busy_cycles": require_int(profile_fast, "busy_cycles"),
                 "compute_cycles": require_int(profile_fast, "compute_cycles"),
                 "macro_count": require_int(profile_fast, "macro_count"),
+                **summarize_mem_uops(profile_events, fast_sync_indicator),
             },
         },
         "compare": {

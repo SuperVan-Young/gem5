@@ -293,6 +293,12 @@ MpuUnit::requiredBytes(const ParsedCmd &cmd) const
     return expectedRows(cmd) * expectedRowBytes(cmd);
 }
 
+bool
+MpuUnit::isContiguousSpmWindow(const ParsedCmd &cmd) const
+{
+    return cmd.strideBytes == expectedRowBytes(cmd);
+}
+
 void
 MpuUnit::validateMvin(const ParsedCmd &cmd) const
 {
@@ -771,6 +777,14 @@ MpuUnit::serializeCRow(const CBufferSlot &slot, uint32_t row) const
     return bytes;
 }
 
+std::vector<uint8_t>
+MpuUnit::serializeCTile(const CBufferSlot &slot) const
+{
+    std::vector<uint8_t> bytes(slot.data.size() * sizeof(int32_t), 0);
+    std::memcpy(bytes.data(), slot.data.data(), bytes.size());
+    return bytes;
+}
+
 void
 MpuUnit::pushQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd)
 {
@@ -836,6 +850,14 @@ MpuUnit::appendMvinRowUop(MacroCmdContext &macroCmd,
         beginMemWindow(runtime);
     }
 
+    if (isContiguousSpmWindow(cmd)) {
+        appendLoadUop(macroCmd, cmd.spmAddr, requiredBytes(cmd));
+        macroCmd.uopQueue.back().portId = mvinPortId();
+        macroCmd.uopQueue.back().token = 0;
+        runtime.nextMemRow = expectedRows(cmd);
+        return;
+    }
+
     appendLoadUop(macroCmd,
                   cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes,
                   expectedRowBytes(cmd));
@@ -854,6 +876,15 @@ MpuUnit::appendMvoutRowUop(MacroCmdContext &macroCmd,
              name(), row);
     if (row == 0) {
         beginMemWindow(runtime);
+    }
+
+    if (isContiguousSpmWindow(cmd)) {
+        appendStoreUop(macroCmd, cmd.spmAddr, requiredBytes(cmd),
+                       serializeCTile(selectedCBuffer(cmd.bufferIndex)));
+        macroCmd.uopQueue.back().portId = mvoutPortId();
+        macroCmd.uopQueue.back().token = 0;
+        runtime.nextMemRow = cmd.m;
+        return;
     }
 
     appendStoreUop(macroCmd,
@@ -1020,50 +1051,78 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
     switch (cmd.kind) {
       case CmdKind::Mvin: {
         observeMemResponse(runtime);
-        const uint32_t row = static_cast<uint32_t>(txn.token);
-        const uint32_t rowBytes = expectedRowBytes(cmd);
         const uint8_t *src = pkt->getConstPtr<uint8_t>();
         ABBufferSlot &slot = selectedABuffer(cmd.bufferKind, cmd.bufferIndex);
-        const size_t offset = static_cast<size_t>(row) * rowBytes;
-        panic_if(offset + rowBytes > slot.data.size(),
-                 "%s: mvin row write overflows destination buffer", name());
-        std::memcpy(reinterpret_cast<uint8_t *>(slot.data.data()) + offset,
-                    src, rowBytes);
-
-        if (cmd.bufferKind == BufferKind::A) {
-            stats.totalABytesIn += rowBytes;
-        } else {
-            stats.totalBBytesIn += rowBytes;
-        }
-
-        DPRINTF(MpuUnit,
-                "mvin response row=%u addr=%#llx size=%u buffer=%u idx=%u\n",
-                row, static_cast<unsigned long long>(txn.addr), txn.size,
-                static_cast<unsigned>(cmd.bufferKind), cmd.bufferIndex);
-
-        if (runtime.nextMemRow < expectedRows(cmd)) {
-            appendMvinRowUop(macroCmd, runtime);
-        } else {
+        if (isContiguousSpmWindow(cmd)) {
+            const size_t totalBytes = requiredBytes(cmd);
+            panic_if(totalBytes > slot.data.size(),
+                     "%s: contiguous mvin write exceeds destination buffer",
+                     name());
+            panic_if(pkt->getSize() != totalBytes,
+                     "%s: contiguous mvin response size=%u expected=%zu",
+                     name(), pkt->getSize(), totalBytes);
+            std::memcpy(reinterpret_cast<uint8_t *>(slot.data.data()), src,
+                        totalBytes);
+            if (cmd.bufferKind == BufferKind::A) {
+                stats.totalABytesIn += totalBytes;
+            } else {
+                stats.totalBBytesIn += totalBytes;
+            }
             transitionABufferToFull(slot, cmd);
             finalizeMemWindow(runtime);
             refreshScoreboard();
             markEpiloguePending(macroCmd);
+        } else {
+            const uint32_t row = static_cast<uint32_t>(txn.token);
+            const uint32_t rowBytes = expectedRowBytes(cmd);
+            const size_t offset = static_cast<size_t>(row) * rowBytes;
+            panic_if(offset + rowBytes > slot.data.size(),
+                     "%s: mvin row write overflows destination buffer",
+                     name());
+            std::memcpy(reinterpret_cast<uint8_t *>(slot.data.data()) + offset,
+                        src, rowBytes);
+
+            if (cmd.bufferKind == BufferKind::A) {
+                stats.totalABytesIn += rowBytes;
+            } else {
+                stats.totalBBytesIn += rowBytes;
+            }
+
+            DPRINTF(MpuUnit,
+                    "mvin response row=%u addr=%#llx size=%u "
+                    "buffer=%u idx=%u\n",
+                    row, static_cast<unsigned long long>(txn.addr), txn.size,
+                    static_cast<unsigned>(cmd.bufferKind), cmd.bufferIndex);
+
+            if (runtime.nextMemRow < expectedRows(cmd)) {
+                appendMvinRowUop(macroCmd, runtime);
+            } else {
+                transitionABufferToFull(slot, cmd);
+                finalizeMemWindow(runtime);
+                refreshScoreboard();
+                markEpiloguePending(macroCmd);
+            }
         }
         break;
       }
       case CmdKind::Mvout:
         observeMemResponse(runtime);
         stats.totalCBytesOut += txn.size;
-        DPRINTF(MpuUnit,
-                "mvout response row=%llu addr=%#llx size=%u idx=%u\n",
-                static_cast<unsigned long long>(txn.token),
-                static_cast<unsigned long long>(txn.addr), txn.size,
-                cmd.bufferIndex);
-        if (runtime.nextMemRow < cmd.m) {
-            appendMvoutRowUop(macroCmd, runtime);
-        } else {
+        if (isContiguousSpmWindow(cmd)) {
             finalizeMemWindow(runtime);
             markEpiloguePending(macroCmd);
+        } else {
+            DPRINTF(MpuUnit,
+                    "mvout response row=%llu addr=%#llx size=%u idx=%u\n",
+                    static_cast<unsigned long long>(txn.token),
+                    static_cast<unsigned long long>(txn.addr), txn.size,
+                    cmd.bufferIndex);
+            if (runtime.nextMemRow < cmd.m) {
+                appendMvoutRowUop(macroCmd, runtime);
+            } else {
+                finalizeMemWindow(runtime);
+                markEpiloguePending(macroCmd);
+            }
         }
         break;
       case CmdKind::Load:
