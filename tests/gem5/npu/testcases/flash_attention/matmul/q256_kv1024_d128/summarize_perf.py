@@ -163,6 +163,80 @@ def summarize_mem_uops(events, sync_indicator):
     }
 
 
+def summarize_macro_start_gaps(profile_json_path, sync_indicator):
+    if profile_json_path is None or not profile_json_path.is_file():
+        return {
+            "macro_count": 0,
+            "avg_start_gap_cycles": 0,
+            "max_start_gap_cycles": 0,
+            "p50_start_gap_cycles": 0,
+        }
+
+    profile_data = json.loads(profile_json_path.read_text(encoding="utf-8"))
+    events = [
+        event
+        for event in profile_data.get("events", [])
+        if event.get("begin", {}).get("sync_indicator") == sync_indicator
+    ]
+    events.sort(key=lambda event: int(event["start_tick"]))
+    if len(events) < 2:
+        return {
+            "macro_count": len(events),
+            "avg_start_gap_cycles": 0,
+            "max_start_gap_cycles": 0,
+            "p50_start_gap_cycles": 0,
+        }
+
+    gaps = [
+        (
+            int(events[idx]["start_tick"]) -
+            int(events[idx - 1]["start_tick"])
+        )
+        // 1000
+        for idx in range(1, len(events))
+    ]
+    gaps.sort()
+    return {
+        "macro_count": len(events),
+        "avg_start_gap_cycles": sum(gaps) // len(gaps),
+        "max_start_gap_cycles": gaps[-1],
+        "p50_start_gap_cycles": gaps[len(gaps) // 2],
+    }
+
+
+def parse_launch_profile(profile_log_path):
+    launches = {}
+    for line in profile_log_path.read_text(encoding="utf-8").splitlines():
+        if "NPU_LAUNCH_PROFILE " not in line:
+            continue
+        payload = json.loads(line.split("NPU_LAUNCH_PROFILE ", 1)[1])
+        if "launch_seq" not in payload:
+            continue
+        seq = int(payload["launch_seq"])
+        launches.setdefault(seq, {})[payload["event"]] = payload
+
+    latencies = []
+    for stages in launches.values():
+        if "cpu_launch_request" not in stages:
+            continue
+        if "cpu_launch_response" not in stages:
+            continue
+        latencies.append(
+            (
+                int(stages["cpu_launch_response"]["tick"]) -
+                int(stages["cpu_launch_request"]["tick"])
+            )
+            // 1000
+        )
+    latencies.sort()
+    return {
+        "count": len(latencies),
+        "avg_cycles": sum(latencies) // len(latencies) if latencies else 0,
+        "max_cycles": latencies[-1] if latencies else 0,
+        "p50_cycles": latencies[len(latencies) // 2] if latencies else 0,
+    }
+
+
 def main():
     args = parse_args()
     simout_path = Path(args.simout)
@@ -203,6 +277,13 @@ def main():
     profile_events = parse_profile_end_events(profile_log_path)
     baseline_sync_indicator = require_int(baseline, "sync_indicator")
     fast_sync_indicator = require_int(fast, "sync_indicator")
+    total_flops = require_int(shape, "total_flops")
+    fast_span_cycles = require_int(profile_fast, "total_span_cycles")
+    fast_effective_tops = (
+        total_flops / (fast_span_cycles / 1_000_000_000) /
+        1_000_000_000_000
+    )
+    fast_utilization_16tops = fast_effective_tops / 16.0
 
     summary = {
         "m": require_int(shape, "m"),
@@ -211,7 +292,9 @@ def main():
         "tile_m": require_int(shape, "tile_m"),
         "tile_n": require_int(shape, "tile_n"),
         "tile_k": require_int(shape, "tile_k"),
-        "total_flops": require_int(shape, "total_flops"),
+        "total_flops": total_flops,
+        "fast_effective_tops": fast_effective_tops,
+        "fast_utilization_16tops": fast_utilization_16tops,
         "baseline": {
             "cmds": require_int(baseline, "cmds"),
             "build_cmd_calls": require_int(baseline, "build_cmd_calls"),
@@ -271,6 +354,10 @@ def main():
             "busy": require_int(mpu_summary, "busy"),
             "idle": require_int(mpu_summary, "idle"),
         },
+        "fast_issue_gaps": summarize_macro_start_gaps(
+            profile_json_path, fast_sync_indicator
+        ),
+        "launch_profile": parse_launch_profile(profile_log_path),
         "profiling": profiling,
         "artifacts": {
             "simout": str(simout_source_path),

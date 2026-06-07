@@ -54,19 +54,19 @@ npu_fast_matmul_validate_launch_config(
 }
 
 static inline void
-npu_fast_matmul_patch_cmd(NpuCmd *cmd, uint32_t m, uint32_t n, uint32_t k,
-                          uintptr_t spm_addr, uint32_t stride_bytes,
-                          uint32_t sync_indicator,
-                          uint32_t set_completion_sync)
+npu_fast_matmul_set_addr(NpuCmd *cmd, uintptr_t spm_addr)
 {
-    cmd->setSyncIndicator(sync_indicator);
-    cmd->setSetIndicatorSns(set_completion_sync ? 1U : 0U);
+    cmd->setWord(MPU_WORD_SPM_ADDR_LO,
+                 (uint32_t)(spm_addr & 0xffffffffULL));
+    cmd->setWord(MPU_WORD_SPM_ADDR_HI, (uint32_t)(spm_addr >> 32));
+}
+
+static inline void
+npu_fast_matmul_set_dims(NpuCmd *cmd, uint32_t m, uint32_t n, uint32_t k)
+{
     cmd->setWord(MPU_WORD_M, m);
     cmd->setWord(MPU_WORD_N, n);
     cmd->setWord(MPU_WORD_K, k);
-    cmd->setWord(MPU_WORD_SPM_ADDR_LO, (uint32_t)(spm_addr & 0xffffffffULL));
-    cmd->setWord(MPU_WORD_SPM_ADDR_HI, (uint32_t)(spm_addr >> 32));
-    cmd->setWord(MPU_WORD_STRIDE, stride_bytes);
 }
 
 static inline void
@@ -141,6 +141,9 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
     }
 
     npu_fast_matmul_build_cmd_templates(tile, config, &templates);
+    templates.mvin_a.setWord(MPU_WORD_STRIDE, a_matrix->row_stride_bytes);
+    templates.mvin_b.setWord(MPU_WORD_STRIDE, b_matrix->row_stride_bytes);
+    templates.mvout.setWord(MPU_WORD_STRIDE, c_matrix->row_stride_bytes);
 
     if (stats != NULL) {
         *stats = {};
@@ -163,6 +166,9 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
                  tile_ordinal == tile_count - 1U) ?
                     1U :
                     0U;
+            const bool edge_tile =
+                rows != tile->tile_m || cols != tile->tile_n ||
+                problem->k != tile->tile_k;
 
             npu_fast_matmul_patch_buffer(&templates.mvin_a, MPU_BUFFER_A,
                                          config->a_buffer_index ^
@@ -182,31 +188,28 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
             npu_fast_matmul_patch_buffer(&templates.mvout, MPU_BUFFER_C,
                                          config->c_buffer_index ^
                                              buffer_index);
-            npu_fast_matmul_patch_cmd(&templates.mvin_a, rows, cols,
-                                      problem->k, a_addr,
-                                      a_matrix->row_stride_bytes,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.mvin_b, rows, cols,
-                                      problem->k, b_addr,
-                                      b_matrix->row_stride_bytes,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.load_a, rows, cols,
-                                      problem->k, 0U, 0U,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.load_b, rows, cols,
-                                      problem->k, 0U, 0U,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.compute, rows, cols,
-                                      problem->k, 0U, 0U,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.drain, rows, cols,
-                                      problem->k, 0U, 0U,
-                                      config->sync_indicator, 0U);
-            npu_fast_matmul_patch_cmd(&templates.mvout, rows, cols,
-                                      problem->k, c_addr,
-                                      c_matrix->row_stride_bytes,
-                                      config->sync_indicator,
-                                      set_completion_sync);
+            if (edge_tile) {
+                npu_fast_matmul_set_dims(&templates.mvin_a, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.mvin_b, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.load_a, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.load_b, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.compute, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.drain, rows, cols,
+                                         problem->k);
+                npu_fast_matmul_set_dims(&templates.mvout, rows, cols,
+                                         problem->k);
+            }
+            npu_fast_matmul_set_addr(&templates.mvin_a, a_addr);
+            npu_fast_matmul_set_addr(&templates.mvin_b, b_addr);
+            npu_fast_matmul_set_addr(&templates.mvout, c_addr);
+            if (set_completion_sync != 0U) {
+                templates.mvout.setSetIndicatorSns(1U);
+            }
 
             templates.mvin_a.launchCmdAt(port_base);
             templates.mvin_b.launchCmdAt(port_base);
@@ -215,6 +218,9 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
             templates.compute.launchCmdAt(port_base);
             templates.drain.launchCmdAt(port_base);
             templates.mvout.launchCmdAt(port_base);
+            if (set_completion_sync != 0U) {
+                templates.mvout.setSetIndicatorSns(0U);
+            }
 
             if (stats != NULL) {
                 stats->launched_cmd_count += 7U;

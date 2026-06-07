@@ -37,6 +37,15 @@ binary = resolve_binary_path(
 )
 
 
+def make_matmul_profile_gem5_args():
+    args = list(make_profile_gem5_args(__file__))
+    for idx, arg in enumerate(args):
+        if arg.startswith("--debug-flags="):
+            args[idx] = arg + ",NPULaunchProfile"
+            return tuple(args)
+    return tuple(args + ["--debug-flags=NPUProfile,NPULaunchProfile"])
+
+
 class GeneratePerformanceSummary(verifier.Verifier):
     def __init__(self):
         super().__init__()
@@ -116,6 +125,29 @@ class GeneratePerformanceSummary(verifier.Verifier):
             != summary["compare"]["fast_checksum"]
         ):
             test_util.fail("Output checksum mismatch in %s", PERF_SUMMARY)
+        if "fast_issue_gaps" not in summary:
+            test_util.fail("Missing fast_issue_gaps in %s", PERF_SUMMARY)
+        if summary["fast_issue_gaps"]["macro_count"] != 112:
+            test_util.fail(
+                "Expected 112 fast macro events, got %s",
+                summary["fast_issue_gaps"]["macro_count"],
+            )
+        if "launch_profile" not in summary:
+            test_util.fail("Missing launch_profile in %s", PERF_SUMMARY)
+        if summary["launch_profile"]["count"] != 224:
+            test_util.fail(
+                "Expected 224 launch profile events, got %s",
+                summary["launch_profile"]["count"],
+            )
+        if summary["fast_effective_tops"] <= 0.0:
+            test_util.fail(
+                "Expected positive fast_effective_tops in %s", PERF_SUMMARY
+            )
+        if summary["fast_utilization_16tops"] <= 0.0:
+            test_util.fail(
+                "Expected positive fast_utilization_16tops in %s",
+                PERF_SUMMARY,
+            )
 
 
 register_npu_test(
@@ -125,7 +157,7 @@ register_npu_test(
         config_args=tuple(
             make_binary_config_args(binary, "--scenario", SCENARIO)
         ),
-        gem5_args=make_profile_gem5_args(__file__),
+        gem5_args=make_matmul_profile_gem5_args(),
         verifier_specs=(
             rf"FLASH_ATTENTION_MATMUL_SCENARIO={SCENARIO}",
             r"FLASH_ATTENTION_MATMUL_SHAPE "
