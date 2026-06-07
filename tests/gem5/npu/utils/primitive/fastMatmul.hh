@@ -30,9 +30,7 @@ typedef struct
 {
     NpuCmd mvin_a;
     NpuCmd mvin_b;
-    NpuCmd load_a;
-    NpuCmd load_b;
-    NpuCmd compute;
+    NpuCmd compute_fused;
     NpuCmd drain;
     NpuCmd mvout;
 } NpuFastMatmulCmdTemplates;
@@ -123,18 +121,12 @@ npu_fast_matmul_build_cmd_templates(
                   MPU_BUFFER_B, config->b_buffer_index, tile->tile_m,
                   tile->tile_n, tile->tile_k, 0U, 0U,
                   config->sync_indicator, 0U);
-    mpu_build_cmd(&templates->load_a, config->device_id,
-                  mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_LOAD), MPU_BUFFER_A,
-                  config->a_buffer_index, tile->tile_m, tile->tile_n,
-                  tile->tile_k, 0U, 0U, config->sync_indicator, 0U);
-    mpu_build_cmd(&templates->load_b, config->device_id,
-                  mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_LOAD), MPU_BUFFER_B,
-                  config->b_buffer_index, tile->tile_m, tile->tile_n,
-                  tile->tile_k, 0U, 0U, config->sync_indicator, 0U);
-    mpu_build_cmd(&templates->compute, config->device_id,
-                  mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_COMPUTE),
+    mpu_build_cmd(&templates->compute_fused, config->device_id,
+                  mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_COMPUTE_FUSED),
                   MPU_BUFFER_RESERVED, 0U, tile->tile_m, tile->tile_n,
                   tile->tile_k, 0U, 0U, config->sync_indicator, 0U);
+    templates->compute_fused.setWord(MPU_WORD_FLAGS,
+                                     MPU_FLAG_LAST_K_BLOCK);
     mpu_build_cmd(&templates->drain, config->device_id,
                   mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_DRAIN), MPU_BUFFER_C,
                   config->c_buffer_index, tile->tile_m, tile->tile_n,
@@ -176,7 +168,7 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
 
     if (stats != NULL) {
         *stats = {};
-        stats->template_build_count = 7U;
+        stats->template_build_count = 5U;
         stats->tile_count = tile_count;
     }
 
@@ -206,11 +198,14 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
             const uint32_t c_buffer =
                 config->c_buffer_index ^ buffer_index;
             const uint32_t cmd_m =
-                edge_tile ? rows : templates.compute.getWord(MPU_WORD_M);
+                edge_tile ? rows :
+                    templates.compute_fused.getWord(MPU_WORD_M);
             const uint32_t cmd_n =
-                edge_tile ? cols : templates.compute.getWord(MPU_WORD_N);
+                edge_tile ? cols :
+                    templates.compute_fused.getWord(MPU_WORD_N);
             const uint32_t cmd_k =
-                edge_tile ? problem->k : templates.compute.getWord(MPU_WORD_K);
+                edge_tile ? problem->k :
+                    templates.compute_fused.getWord(MPU_WORD_K);
 
             NPU_FAST_MATMUL_LAUNCH_RAW(
                 templates.mvin_a, mpu_buffer_word(MPU_BUFFER_A, a_buffer),
@@ -219,14 +214,7 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
                 templates.mvin_b, mpu_buffer_word(MPU_BUFFER_B, b_buffer),
                 b_addr, cmd_m, cmd_n, cmd_k, 0U);
             NPU_FAST_MATMUL_LAUNCH_RAW(
-                templates.load_a, mpu_buffer_word(MPU_BUFFER_A, a_buffer),
-                0U, cmd_m, cmd_n, cmd_k, 0U);
-            NPU_FAST_MATMUL_LAUNCH_RAW(
-                templates.load_b, mpu_buffer_word(MPU_BUFFER_B, b_buffer),
-                0U, cmd_m, cmd_n, cmd_k, 0U);
-            NPU_FAST_MATMUL_LAUNCH_RAW(
-                templates.compute,
-                mpu_buffer_word(MPU_BUFFER_RESERVED, 0U),
+                templates.compute_fused, mpu_fused_buffer_word(buffer_index),
                 0U, cmd_m, cmd_n, cmd_k, 0U);
             NPU_FAST_MATMUL_LAUNCH_RAW(
                 templates.drain, mpu_buffer_word(MPU_BUFFER_C, c_buffer),
@@ -236,7 +224,7 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
                 c_addr, cmd_m, cmd_n, cmd_k, set_completion_sync);
 
             if (stats != NULL) {
-                stats->launched_cmd_count += 7U;
+                stats->launched_cmd_count += 5U;
             }
             tile_ordinal += 1U;
         }

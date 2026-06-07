@@ -30,6 +30,11 @@
 #define MPU_OP_LOAD 0x2U
 #define MPU_OP_COMPUTE 0x3U
 #define MPU_OP_DRAIN 0x4U
+#define MPU_OP_COMPUTE_FUSED 0x5U
+
+#define MPU_FLAG_ACCUMULATE 0x00000001U
+#define MPU_FLAG_LAST_K_BLOCK 0x00000002U
+#define MPU_FLAG_CLEAR_OUTPUT 0x00000004U
 
 static inline uint32_t
 mpu_op_code(uint32_t data_type, uint32_t cmd_kind)
@@ -41,6 +46,12 @@ static inline uint32_t
 mpu_buffer_word(uint32_t buffer_kind, uint32_t buffer_index)
 {
     return (buffer_kind & 0x3U) | ((buffer_index & 0x1U) << 2);
+}
+
+static inline uint32_t
+mpu_fused_buffer_word(uint32_t buffer_index)
+{
+    return MPU_BUFFER_RESERVED | ((buffer_index & 0x1U) << 2);
 }
 
 static inline void

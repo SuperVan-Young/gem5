@@ -58,6 +58,15 @@ constexpr size_t ReservedWord14 = 14;
 constexpr size_t ReservedWord15 = 15;
 constexpr uint32_t ExecIssueQueueId = 0;
 constexpr uint32_t PrefetchIssueQueueId = 1;
+constexpr uint32_t MpuFlagAccumulate = 0x00000001U;
+constexpr uint32_t MpuFlagLastKBlock = 0x00000002U;
+constexpr uint32_t MpuFlagClearOutput = 0x00000004U;
+
+bool
+mpuFlagSet(uint32_t flags, uint32_t mask)
+{
+    return (flags & mask) != 0;
+}
 
 } // namespace
 
@@ -380,6 +389,63 @@ MpuUnit::validateCompute(const ParsedCmd &cmd) const
 }
 
 void
+MpuUnit::validateComputeFused(const ParsedCmd &cmd) const
+{
+    panic_if(cmd.bufferKind != BufferKind::Reserved,
+             "%s: fused compute expects reserved buffer kind", name());
+
+    const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
+    const bool clear = mpuFlagSet(cmd.flags, MpuFlagClearOutput);
+    panic_if(accumulate && clear,
+             "%s: fused compute cannot both accumulate and clear output",
+             name());
+}
+
+bool
+MpuUnit::fusedComputeReady(const ParsedCmd &cmd) const
+{
+    const uint8_t index = cmd.bufferIndex;
+    const ABBufferSlot &a = aBuffers[index];
+    const ABBufferSlot &b = bBuffers[index];
+
+    if (a.state == BufferState::Empty ||
+        a.state == BufferState::LoadingFromSpm ||
+        b.state == BufferState::Empty ||
+        b.state == BufferState::LoadingFromSpm) {
+        return false;
+    }
+
+    panic_if(a.state != BufferState::Full,
+             "%s: fused compute requires FULL A%u", name(), index);
+    panic_if(b.state != BufferState::Full,
+             "%s: fused compute requires FULL B%u", name(), index);
+    panic_if(a.rows != cmd.m || a.cols != cmd.k,
+             "%s: fused A metadata (%u,%u) does not match (%u,%u)",
+             name(), a.rows, a.cols, cmd.m, cmd.k);
+    panic_if(b.rows != cmd.k || b.cols != cmd.n,
+             "%s: fused B metadata (%u,%u) does not match (%u,%u)",
+             name(), b.rows, b.cols, cmd.k, cmd.n);
+    panic_if(a.data.size() != static_cast<size_t>(cmd.m) * cmd.k,
+             "%s: A buffer payload size mismatch for fused compute", name());
+    panic_if(b.data.size() != static_cast<size_t>(cmd.k) * cmd.n,
+             "%s: B buffer payload size mismatch for fused compute", name());
+
+    const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
+    if (!accumulate) {
+        panic_if(outputStorage.state != OutputStorageState::Empty,
+                 "%s: fused compute first block requires empty output",
+                 name());
+    } else {
+        panic_if(outputStorage.state == OutputStorageState::Empty,
+                 "%s: fused accumulate requires existing output", name());
+        panic_if(outputStorage.m != cmd.m || outputStorage.n != cmd.n,
+                 "%s: fused accumulate shape mismatch", name());
+    }
+
+    return true;
+}
+
+void
 MpuUnit::validateDrain(const ParsedCmd &cmd) const
 {
     panic_if(cmd.bufferKind != BufferKind::C,
@@ -440,7 +506,12 @@ MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
              name());
     panic_if(extractWord(rawCmd, ReservedWord) != 0,
              "%s: MPU commands require reserved word 4 == 0", name());
-    panic_if(cmd.flags != 0 || extractWord(rawCmd, ReservedWord13) != 0 ||
+    const uint32_t allowedFlags =
+        cmd.kind == CmdKind::ComputeFused ?
+            (MpuFlagAccumulate | MpuFlagLastKBlock | MpuFlagClearOutput) :
+            0U;
+    panic_if((cmd.flags & ~allowedFlags) != 0 ||
+                 extractWord(rawCmd, ReservedWord13) != 0 ||
                  extractWord(rawCmd, ReservedWord14) != 0 ||
                  extractWord(rawCmd, ReservedWord15) != 0,
              "%s: MPU command reserved words must be zero", name());
@@ -457,6 +528,9 @@ MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
         return;
       case CmdKind::Compute:
         validateCompute(cmd);
+        return;
+      case CmdKind::ComputeFused:
+        validateComputeFused(cmd);
         return;
       case CmdKind::Drain:
         validateDrain(cmd);
@@ -759,6 +833,48 @@ MpuUnit::performCompute(const ParsedCmd &cmd)
 }
 
 void
+MpuUnit::performComputeFused(const ParsedCmd &cmd)
+{
+    const uint8_t index = cmd.bufferIndex;
+    const ABBufferSlot &a = aBuffers[index];
+    const ABBufferSlot &b = bBuffers[index];
+    const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
+    const bool last = mpuFlagSet(cmd.flags, MpuFlagLastKBlock);
+
+    if (!accumulate || outputStorage.state == OutputStorageState::Empty) {
+        outputStorage.data.assign(static_cast<size_t>(cmd.m) * cmd.n, 0);
+        outputStorage.m = cmd.m;
+        outputStorage.n = cmd.n;
+        outputStorage.k = 0;
+    }
+
+    for (uint32_t row = 0; row < cmd.m; ++row) {
+        for (uint32_t col = 0; col < cmd.n; ++col) {
+            int32_t acc = outputStorage.data[row * cmd.n + col];
+            for (uint32_t depth = 0; depth < cmd.k; ++depth) {
+                const int32_t a_val =
+                    static_cast<int32_t>(a.data[row * cmd.k + depth]);
+                const int32_t b_val =
+                    static_cast<int32_t>(b.data[depth * cmd.n + col]);
+                acc += a_val * b_val;
+            }
+            outputStorage.data[row * cmd.n + col] = acc;
+        }
+    }
+
+    outputStorage.k += cmd.k;
+    outputStorage.readyTick = curTick();
+    outputStorage.state = last ?
+        OutputStorageState::ReadyToDrain :
+        OutputStorageState::Active;
+    stats.totalMacOps +=
+        static_cast<uint64_t>(cmd.m) * cmd.n * cmd.k;
+
+    aBuffers[index].reset();
+    bBuffers[index].reset();
+}
+
+void
 MpuUnit::performDrain(const ParsedCmd &cmd)
 {
     CBufferSlot &slot = selectedCBuffer(cmd.bufferIndex);
@@ -807,6 +923,7 @@ MpuUnit::pushQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd)
         break;
       case CmdKind::Load:
       case CmdKind::Compute:
+      case CmdKind::ComputeFused:
         panic_if(execUopQueue.size() >= execUopQueueDepth,
                  "%s: exec uop queue overflow", name());
         execUopQueue.emplace(macroCmdId, entry);
@@ -829,6 +946,7 @@ MpuUnit::popQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd)
         break;
       case CmdKind::Load:
       case CmdKind::Compute:
+      case CmdKind::ComputeFused:
         execUopQueue.erase(macroCmdId);
         break;
       case CmdKind::Drain:
@@ -912,6 +1030,25 @@ MpuUnit::appendLoadProgressUop(MacroCmdContext &macroCmd,
     appendExecUop(macroCmd, clockPeriod());
 }
 
+void
+MpuUnit::appendFusedComputeProgressUop(MacroCmdContext &macroCmd,
+                                       MpuMacroRuntime &runtime)
+{
+    const ParsedCmd &cmd = runtime.parsed;
+    if (fusedComputeReady(cmd)) {
+        runtime.pendingExecAction = PendingExecAction::LoadCommit;
+        lastComputeLatencyCyclesValue = static_cast<uint64_t>(cmd.k);
+        lastOutputReadyLatencyCyclesValue =
+            static_cast<uint64_t>(cmd.k) + arrayDim;
+        appendExecUop(macroCmd,
+                      static_cast<Tick>(cmd.k) * clockPeriod());
+        return;
+    }
+
+    runtime.pendingExecAction = PendingExecAction::LoadRetry;
+    appendExecUop(macroCmd, clockPeriod());
+}
+
 MpuUnit::MacroCmdKind
 MpuUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
 {
@@ -922,6 +1059,7 @@ MpuUnit::classifyMacroCmd(const std::vector<uint8_t> &cmd) const
         return MacroCmdKind::Store;
       case CmdKind::Load:
       case CmdKind::Compute:
+      case CmdKind::ComputeFused:
       case CmdKind::Drain:
         return MacroCmdKind::Exec;
     }
@@ -975,6 +1113,8 @@ MpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
       case CmdKind::Compute:
         outputStorage.reset();
         break;
+      case CmdKind::ComputeFused:
+        break;
       case CmdKind::Drain:
         cBuffers[cmd.bufferIndex].reset();
         cBuffers[cmd.bufferIndex].state = BufferState::DrainingToBuffer;
@@ -1011,6 +1151,9 @@ MpuUnit::buildUops(MacroCmdContext &macroCmd)
         break;
       case CmdKind::Load:
         appendLoadProgressUop(macroCmd, runtime);
+        break;
+      case CmdKind::ComputeFused:
+        appendFusedComputeProgressUop(macroCmd, runtime);
         break;
       case CmdKind::Compute:
         outputStorage.reset();
@@ -1145,6 +1288,7 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
         break;
       case CmdKind::Load:
       case CmdKind::Compute:
+      case CmdKind::ComputeFused:
       case CmdKind::Drain:
         break;
     }
@@ -1180,6 +1324,20 @@ MpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
       case CmdKind::Compute:
         performCompute(cmd);
         break;
+      case CmdKind::ComputeFused:
+        if (runtime.pendingExecAction == PendingExecAction::LoadRetry) {
+            stats.stallCyclesBufferHazard++;
+            appendFusedComputeProgressUop(macroCmd, runtime);
+            return;
+        }
+        panic_if(runtime.pendingExecAction != PendingExecAction::LoadCommit,
+                 "%s: fused compute macro %llu completed without a committed "
+                 "uop",
+                 name(),
+                 static_cast<unsigned long long>(macroCmd.macroCmdId));
+        runtime.pendingExecAction = PendingExecAction::None;
+        performComputeFused(cmd);
+        break;
       case CmdKind::Drain:
         performDrain(cmd);
         break;
@@ -1212,6 +1370,7 @@ MpuUnit::onMacroCmdEnd(MacroCmdContext &macroCmd)
         stats.loadCmdCount++;
         break;
       case CmdKind::Compute:
+      case CmdKind::ComputeFused:
         stats.computeCmdCount++;
         break;
       case CmdKind::Drain:

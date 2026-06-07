@@ -100,7 +100,7 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail(
                 "Unexpected baseline build count in %s", PERF_SUMMARY
             )
-        if summary["fast"]["template_builds"] != 7:
+        if summary["fast"]["template_builds"] != 5:
             test_util.fail(
                 "Unexpected fast template count in %s", PERF_SUMMARY
             )
@@ -124,6 +124,10 @@ class GeneratePerformanceSummary(verifier.Verifier):
                 "Fast contiguous loads should issue one uop in %s",
                 PERF_SUMMARY,
             )
+        if summary["fast"]["profile"]["fused_compute_macro_count"] != 16:
+            test_util.fail(
+                "Expected 16 fast fused compute macros in %s", PERF_SUMMARY
+            )
         if (
             summary["compare"]["baseline_checksum"]
             != summary["compare"]["fast_checksum"]
@@ -131,28 +135,28 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Output checksum mismatch in %s", PERF_SUMMARY)
         if "fast_issue_gaps" not in summary:
             test_util.fail("Missing fast_issue_gaps in %s", PERF_SUMMARY)
-        if summary["fast_issue_gaps"]["macro_count"] != 112:
+        if summary["fast_issue_gaps"]["macro_count"] != 80:
             test_util.fail(
-                "Expected 112 fast macro events, got %s",
+                "Expected 80 fast macro events, got %s",
                 summary["fast_issue_gaps"]["macro_count"],
             )
         if "launch_profile" not in summary:
             test_util.fail("Missing launch_profile in %s", PERF_SUMMARY)
-        if summary["launch_profile"]["count"] != 224:
+        if summary["launch_profile"]["count"] != 192:
             test_util.fail(
-                "Expected 224 launch profile events, got %s",
+                "Expected 192 launch profile events, got %s",
                 summary["launch_profile"]["count"],
             )
         if "launch_request_gaps" not in summary:
             test_util.fail("Missing launch_request_gaps in %s", PERF_SUMMARY)
-        if summary["launch_request_gaps"]["count"] != 112:
+        if summary["launch_request_gaps"]["count"] != 80:
             test_util.fail(
-                "Expected 112 fast launch request events, got %s",
+                "Expected 80 fast launch request events, got %s",
                 summary["launch_request_gaps"]["count"],
             )
-        if summary["launch_request_gaps"]["gap_count"] != 111:
+        if summary["launch_request_gaps"]["gap_count"] != 79:
             test_util.fail(
-                "Expected 111 fast launch request gaps, got %s",
+                "Expected 79 fast launch request gaps, got %s",
                 summary["launch_request_gaps"]["gap_count"],
             )
         if summary["fast_effective_tops"] <= 0.0:
@@ -184,6 +188,26 @@ class VerifyFastMatmulLaunchPath(verifier.Verifier):
             )
 
 
+class VerifyFastMatmulFusedComputePath(verifier.Verifier):
+    def __init__(self):
+        super().__init__()
+
+    def test(self, params):
+        source = FAST_MATMUL_HEADER.read_text(encoding="utf-8")
+        if "MPU_OP_COMPUTE_FUSED" not in source:
+            test_util.fail("fastMatmul should use fused compute opcode")
+        forbidden = (
+            "templates.load_a,",
+            "templates.load_b,",
+            "templates.compute,",
+        )
+        for pattern in forbidden:
+            if pattern in source:
+                test_util.fail(
+                    "fastMatmul should not launch separate %s", pattern
+                )
+
+
 register_npu_test(
     NpuRunnerSpec(
         name="flash_attention_matmul_q256_kv1024_d128",
@@ -199,9 +223,9 @@ register_npu_test(
             r"total_flops=67108864",
             r"FLASH_ATTENTION_MATMUL_BASELINE cmds=112 build_cmd_calls=112 "
             r"sync_indicator=64 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_FAST cmds=112 template_builds=7 "
+            r"FLASH_ATTENTION_MATMUL_FAST cmds=80 template_builds=5 "
             r"sync_indicator=128 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=105 "
+            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=107 "
             r"baseline_checksum=-?[0-9]+ fast_checksum=-?[0-9]+ "
             r"ref_checksum=-?[0-9]+ status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_BASELINE "
@@ -210,8 +234,8 @@ register_npu_test(
             r"mvin=32 load=32 compute=16 drain=16 mvout=16 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_FAST "
             r"total_span_cycles=[0-9]+ busy_cycles=[0-9]+ "
-            r"compute_cycles=[0-9]+ macro_count=112 "
-            r"mvin=32 load=32 compute=16 drain=16 mvout=16 status=PASS",
+            r"compute_cycles=[0-9]+ macro_count=80 "
+            r"mvin=32 load=0 compute=16 drain=16 mvout=16 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_COMPARE "
             r"baseline_total_span_cycles=[0-9]+ "
             r"fast_total_span_cycles=[0-9]+ "
@@ -219,7 +243,7 @@ register_npu_test(
             r"baseline_compute_cycles=[0-9]+ fast_compute_cycles=[0-9]+ "
             r"status=PASS",
             r"FLASH_ATTENTION_MATMUL_PASS",
-            rf"MPU_SUMMARY scenario={SCENARIO} cmds=224 "
+            rf"MPU_SUMMARY scenario={SCENARIO} cmds=192 "
             r"compute_cycles=[0-9]+ drain_cycles=[0-9]+ "
             r"output_ready_cycles=[0-9]+ cmd_cycles=[0-9]+ "
             r"spm_wait=[0-9]+ "
@@ -228,6 +252,7 @@ register_npu_test(
             make_profile_artifact_verifier(__file__),
             GeneratePerformanceSummary(),
             VerifyFastMatmulLaunchPath(),
+            VerifyFastMatmulFusedComputePath(),
         ),
         fixtures=(make_testcase_build_fixture(__file__),),
     )

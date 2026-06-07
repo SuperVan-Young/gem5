@@ -154,6 +154,10 @@ def summarize_mem_uops(events, sync_indicator):
     return {
         "mvin_macro_count": len(mvin_load_uops),
         "mvout_macro_count": len(mvout_store_uops),
+        "fused_compute_macro_count": sum(
+            1 for event in phase_events
+            if int(event.get("opcode", -1)) == 5
+        ),
         "mvin_max_load_uops": max(mvin_load_uops, default=0),
         "mvout_max_store_uops": max(mvout_store_uops, default=0),
         "contiguous_load_macro_count": len(contiguous_load_uops),

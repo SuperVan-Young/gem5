@@ -54,6 +54,7 @@ class MpuUnit : public SpecializedExecutionUnit
         Load = 0x2,
         Compute = 0x3,
         Drain = 0x4,
+        ComputeFused = 0x5,
     };
 
     enum class BufferKind : uint8_t
@@ -262,9 +263,11 @@ class MpuUnit : public SpecializedExecutionUnit
     void validateMvin(const ParsedCmd &cmd) const;
     void validateLoadStatic(const ParsedCmd &cmd) const;
     void validateCompute(const ParsedCmd &cmd) const;
+    void validateComputeFused(const ParsedCmd &cmd) const;
     void validateDrain(const ParsedCmd &cmd) const;
     void validateMvout(const ParsedCmd &cmd) const;
     bool loadReady(const ParsedCmd &cmd) const;
+    bool fusedComputeReady(const ParsedCmd &cmd) const;
 
     void resetCommandStructures();
     void pushQueueEntry(uint64_t macroCmdId, const ParsedCmd &cmd);
@@ -298,12 +301,15 @@ class MpuUnit : public SpecializedExecutionUnit
                            MpuMacroRuntime &runtime);
     void appendLoadProgressUop(MacroCmdContext &macroCmd,
                                MpuMacroRuntime &runtime);
+    void appendFusedComputeProgressUop(MacroCmdContext &macroCmd,
+                                       MpuMacroRuntime &runtime);
 
     void transitionABufferToFull(ABBufferSlot &slot, const ParsedCmd &cmd);
     void transitionABufferToLoaded(ABBufferSlot &slot, const ParsedCmd &cmd);
     void transitionCBufferToFull(CBufferSlot &slot, const ParsedCmd &cmd);
     void clearLoadedContext(BufferKind kind);
     void performCompute(const ParsedCmd &cmd);
+    void performComputeFused(const ParsedCmd &cmd);
     void performDrain(const ParsedCmd &cmd);
     void releaseConsumedInputBuffers();
     std::vector<uint8_t> serializeCRow(const CBufferSlot &slot,
