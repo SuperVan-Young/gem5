@@ -204,8 +204,33 @@ def summarize_macro_start_gaps(profile_json_path, sync_indicator):
     }
 
 
-def parse_launch_profile(profile_log_path):
+def summarize_sorted_values(values):
+    values.sort()
+    return {
+        "avg_cycles": sum(values) // len(values) if values else 0,
+        "max_cycles": values[-1] if values else 0,
+        "p50_cycles": values[len(values) // 2] if values else 0,
+        "p90_cycles": values[(len(values) * 9) // 10] if values else 0,
+    }
+
+
+def summarize_tick_gaps(ticks):
+    ticks.sort()
+    gaps = [
+        (ticks[idx] - ticks[idx - 1]) // 1000
+        for idx in range(1, len(ticks))
+    ]
+    return {
+        "count": len(ticks),
+        "gap_count": len(gaps),
+        **summarize_sorted_values(gaps),
+    }
+
+
+def parse_launch_profile(profile_log_path, request_sync_indicator=None):
     launches = {}
+    request_ticks = []
+    request_ticks_all = []
     for line in profile_log_path.read_text(encoding="utf-8").splitlines():
         if "NPU_LAUNCH_PROFILE " not in line:
             continue
@@ -214,6 +239,15 @@ def parse_launch_profile(profile_log_path):
             continue
         seq = int(payload["launch_seq"])
         launches.setdefault(seq, {})[payload["event"]] = payload
+        if payload["event"] == "cpu_launch_request":
+            request_tick = int(payload["tick"])
+            request_ticks_all.append(request_tick)
+            if (
+                request_sync_indicator is None or
+                int(payload.get("sync_indicator", -1)) ==
+                request_sync_indicator
+            ):
+                request_ticks.append(request_tick)
 
     latencies = []
     for stages in launches.values():
@@ -228,12 +262,13 @@ def parse_launch_profile(profile_log_path):
             )
             // 1000
         )
-    latencies.sort()
     return {
-        "count": len(latencies),
-        "avg_cycles": sum(latencies) // len(latencies) if latencies else 0,
-        "max_cycles": latencies[-1] if latencies else 0,
-        "p50_cycles": latencies[len(latencies) // 2] if latencies else 0,
+        "response_latency": {
+            "count": len(latencies),
+            **summarize_sorted_values(latencies),
+        },
+        "request_gaps": summarize_tick_gaps(request_ticks),
+        "request_gaps_all": summarize_tick_gaps(request_ticks_all),
     }
 
 
@@ -284,6 +319,9 @@ def main():
         1_000_000_000_000
     )
     fast_utilization_16tops = fast_effective_tops / 16.0
+    launch_profile = parse_launch_profile(
+        profile_log_path, fast_sync_indicator
+    )
 
     summary = {
         "m": require_int(shape, "m"),
@@ -357,7 +395,9 @@ def main():
         "fast_issue_gaps": summarize_macro_start_gaps(
             profile_json_path, fast_sync_indicator
         ),
-        "launch_profile": parse_launch_profile(profile_log_path),
+        "launch_profile": launch_profile["response_latency"],
+        "launch_request_gaps": launch_profile["request_gaps"],
+        "launch_request_gaps_all": launch_profile["request_gaps_all"],
         "profiling": profiling,
         "artifacts": {
             "simout": str(simout_source_path),

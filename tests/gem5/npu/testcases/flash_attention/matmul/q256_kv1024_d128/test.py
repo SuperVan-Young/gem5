@@ -139,6 +139,18 @@ class GeneratePerformanceSummary(verifier.Verifier):
                 "Expected 224 launch profile events, got %s",
                 summary["launch_profile"]["count"],
             )
+        if "launch_request_gaps" not in summary:
+            test_util.fail("Missing launch_request_gaps in %s", PERF_SUMMARY)
+        if summary["launch_request_gaps"]["count"] != 112:
+            test_util.fail(
+                "Expected 112 fast launch request events, got %s",
+                summary["launch_request_gaps"]["count"],
+            )
+        if summary["launch_request_gaps"]["gap_count"] != 111:
+            test_util.fail(
+                "Expected 111 fast launch request gaps, got %s",
+                summary["launch_request_gaps"]["gap_count"],
+            )
         if summary["fast_effective_tops"] <= 0.0:
             test_util.fail(
                 "Expected positive fast_effective_tops in %s", PERF_SUMMARY
