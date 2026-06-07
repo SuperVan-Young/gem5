@@ -108,3 +108,11 @@ def format NpuLaunchOp(*flags) {{
     decode_block = BasicDecode.subst(iop)
     exec_output = NpuLaunchExecute.subst(iop)
 }};
+
+def format NpuStageOp(code, *opt_flags) {{
+    iop = InstObjParams(name, Name, 'RegOp', code, opt_flags)
+    header_output = BasicDeclare.subst(iop)
+    decoder_output = BasicConstructor.subst(iop)
+    decode_block = BasicDecode.subst(iop)
+    exec_output = BasicExecute.subst(iop)
+}};

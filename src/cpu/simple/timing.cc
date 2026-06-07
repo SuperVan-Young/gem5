@@ -92,7 +92,7 @@ appendNpuLaunchFieldsJson(std::ostream &os, uint32_t header_word)
 void
 emitNpuLaunchProfile(const std::string &cpu_name, const char *stage, Tick tick,
                      uint64_t launch_seq, uint32_t header_word, unsigned size,
-                     Addr pc)
+                     Addr pc, const uint8_t *data = nullptr)
 {
     std::ostringstream os;
     os << '{';
@@ -104,6 +104,18 @@ emitNpuLaunchProfile(const std::string &cpu_name, const char *stage, Tick tick,
     os << ",\"pc\":" << pc;
     os << ',';
     appendNpuLaunchFieldsJson(os, header_word);
+    if (data != nullptr && size % sizeof(uint32_t) == 0) {
+        os << ",\"raw_words\":[";
+        for (unsigned i = 0; i < size / sizeof(uint32_t); ++i) {
+            uint32_t word = 0;
+            std::memcpy(&word, data + i * sizeof(uint32_t), sizeof(word));
+            if (i != 0) {
+                os << ',';
+            }
+            os << word;
+        }
+        os << ']';
+    }
     os << '}';
     DPRINTF(NPULaunchProfile, "NPU_LAUNCH_PROFILE %s\n", os.str().c_str());
 }
@@ -672,7 +684,8 @@ TimingSimpleCPU::initiateNpuLaunch(const uint8_t *data, unsigned size)
 
     activeNpuLaunchSeq = launch_seq;
     emitNpuLaunchProfile(name(), "cpu_launch_request", curTick(), launch_seq,
-                         header_word, size, thread->pcState().instAddr());
+                         header_word, size, thread->pcState().instAddr(),
+                         payload);
 
     npu_launch_pkt = pkt;
     if (!npuLaunchPort.sendTimingReq(pkt)) {

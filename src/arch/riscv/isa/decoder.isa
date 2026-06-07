@@ -1336,19 +1336,19 @@ decode QUADRANT default Unknown::unknown() {
         0x02: decode FUNCT3 {
             0x0: decode FUNCT7 {
                 0x00: NpuLaunchOp::npu_launch();
-                0x01: ROp::npu_stage0({{
+                0x01: NpuStageOp::npu_stage0({{
                     xc->setMiscReg(MISCREG_NPU_CMD0, Rs1_ud);
                     xc->setMiscReg(MISCREG_NPU_CMD1, Rs2_ud);
                 }});
-                0x02: ROp::npu_stage1({{
+                0x02: NpuStageOp::npu_stage1({{
                     xc->setMiscReg(MISCREG_NPU_CMD2, Rs1_ud);
                     xc->setMiscReg(MISCREG_NPU_CMD3, Rs2_ud);
                 }});
-                0x03: ROp::npu_stage2({{
+                0x03: NpuStageOp::npu_stage2({{
                     xc->setMiscReg(MISCREG_NPU_CMD4, Rs1_ud);
                     xc->setMiscReg(MISCREG_NPU_CMD5, Rs2_ud);
                 }});
-                0x04: ROp::npu_stage3({{
+                0x04: NpuStageOp::npu_stage3({{
                     xc->setMiscReg(MISCREG_NPU_CMD6, Rs1_ud);
                     xc->setMiscReg(MISCREG_NPU_CMD7, Rs2_ud);
                 }});

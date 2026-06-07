@@ -20,6 +20,9 @@
 #define NPU_CMD_FAST_LAUNCH_ADDR(port_base) NPU_CMD_CTRL_ADDR(port_base)
 #define NPU_CMD_CTRL_PUSH 0U
 #define NPU_CMD_CTRL_POP 1U
+#ifndef NPU_CMD_INLINE_BLOCK_LAUNCH
+#define NPU_CMD_INLINE_BLOCK_LAUNCH 0
+#endif
 
 #define NPU_CMD_STAGE_CSR0 0x800U
 #define NPU_CMD_STAGE_CSR1 0x801U
@@ -79,6 +82,32 @@ npuBuildHeaderWord(uint32_t device_type, uint32_t device_id, uint32_t op_code,
     header.bits.setIndicatorSns = set_indicator_sns;
     header.bits.setIndicatorSnd = set_indicator_snd;
     return header.raw;
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
+npuCmdLaunchInlineBlockInsn(const uint64_t *pairs)
+{
+    (void)pairs;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        "ld t0, 0(a0)\n\t"
+        "ld t1, 8(a0)\n\t"
+        "ld t2, 16(a0)\n\t"
+        "ld t3, 24(a0)\n\t"
+        "ld t4, 32(a0)\n\t"
+        "ld t5, 40(a0)\n\t"
+        "ld t6, 48(a0)\n\t"
+        "ld a1, 56(a0)\n\t"
+        ".insn r 0x0b, 0, 1, x0, t0, t1\n\t"
+        ".insn r 0x0b, 0, 2, x0, t2, t3\n\t"
+        ".insn r 0x0b, 0, 3, x0, t4, t5\n\t"
+        ".insn r 0x0b, 0, 4, x0, t6, a1\n\t"
+        ".insn r 0x0b, 0, 0, x0, x0, x0\n\t"
+        "addi x0, x0, 0\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
 }
 
 __attribute__((naked, noinline, noclone, used))
@@ -335,7 +364,11 @@ class NpuCmd
 
     void launchCmdViaStage2At(uint64_t port_base) const
     {
+#if NPU_CMD_INLINE_BLOCK_LAUNCH
+        launchBinaryPairsInlineBlockAt(storage.pairs, port_base);
+#else
         launchBinaryPairsUnrolledAt(storage.pairs, port_base);
+#endif
     }
 
     void launchCmdViaStage2() const
@@ -371,6 +404,15 @@ class NpuCmd
         stageBinaryPairsUnrolled(pairs);
         asm volatile("" ::: "memory");
         launchStagedOnlyAt(port_base);
+    }
+
+    static void
+    launchBinaryPairsInlineBlockAt(const uint64_t *pairs, uint64_t port_base)
+    {
+        (void)port_base;
+        asm volatile("" ::: "memory");
+        npuCmdLaunchInlineBlockInsn(pairs);
+        asm volatile("" ::: "memory");
     }
 
     static void launchStagedOnlyAt(uint64_t port_base)
