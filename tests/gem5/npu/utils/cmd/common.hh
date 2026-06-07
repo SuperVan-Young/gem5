@@ -335,7 +335,7 @@ class NpuCmd
 
     void launchCmdViaStage2At(uint64_t port_base) const
     {
-        launchBinaryPairsAt(storage.pairs, port_base);
+        launchBinaryPairsUnrolledAt(storage.pairs, port_base);
     }
 
     void launchCmdViaStage2() const
@@ -354,6 +354,22 @@ class NpuCmd
     static void launchBinaryPairsAt(const uint64_t *pairs, uint64_t port_base)
     {
         stageBinaryPairs(pairs);
+        launchStagedOnlyAt(port_base);
+    }
+
+    static void stageBinaryPairsUnrolled(const uint64_t *pairs)
+    {
+        npuCmdStageInsn0(pairs[0], pairs[1]);
+        npuCmdStageInsn1(pairs[2], pairs[3]);
+        npuCmdStageInsn2(pairs[4], pairs[5]);
+        npuCmdStageInsn3(pairs[6], pairs[7]);
+    }
+
+    static void
+    launchBinaryPairsUnrolledAt(const uint64_t *pairs, uint64_t port_base)
+    {
+        stageBinaryPairsUnrolled(pairs);
+        asm volatile("" ::: "memory");
         launchStagedOnlyAt(port_base);
     }
 
