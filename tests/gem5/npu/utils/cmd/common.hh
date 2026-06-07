@@ -86,6 +86,33 @@ npuBuildHeaderWord(uint32_t device_type, uint32_t device_id, uint32_t op_code,
 
 __attribute__((naked, noinline, noclone, used))
 static void
+npuCmdLaunchRawPairsInsn(uint64_t p0, uint64_t p1, uint64_t p2, uint64_t p3,
+                         uint64_t p4, uint64_t p5, uint64_t p6,
+                         uint64_t p7)
+{
+    (void)p0;
+    (void)p1;
+    (void)p2;
+    (void)p3;
+    (void)p4;
+    (void)p5;
+    (void)p6;
+    (void)p7;
+    asm volatile(
+        ".option push\n\t"
+        ".option norvc\n\t"
+        ".insn r 0x0b, 0, 1, x0, a0, a1\n\t"
+        ".insn r 0x0b, 0, 2, x0, a2, a3\n\t"
+        ".insn r 0x0b, 0, 3, x0, a4, a5\n\t"
+        ".insn r 0x0b, 0, 4, x0, a6, a7\n\t"
+        ".insn r 0x0b, 0, 0, x0, x0, x0\n\t"
+        "addi x0, x0, 0\n\t"
+        "jalr x0, 0(x1)\n\t"
+        ".option pop\n\t");
+}
+
+__attribute__((naked, noinline, noclone, used))
+static void
 npuCmdLaunchInlineBlockInsn(const uint64_t *pairs)
 {
     (void)pairs;

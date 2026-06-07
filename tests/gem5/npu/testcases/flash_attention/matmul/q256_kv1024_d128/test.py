@@ -2,6 +2,7 @@
 # All rights reserved.
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,9 @@ PROFILE_HTML = PROFILE_DIR / "q256_kv1024_d128.npu_profile.html"
 STDOUT_ARTIFACT = PROFILE_DIR / "q256_kv1024_d128.simout.txt"
 PERF_SUMMARY = PROFILE_DIR / "q256_kv1024_d128.performance_summary.json"
 PERF_SUMMARIZER = TESTCASE_ROOT / "summarize_perf.py"
+FAST_MATMUL_HEADER = (
+    TESTCASE_ROOT.parents[3] / "utils" / "primitive" / "fastMatmul.hh"
+)
 binary = resolve_binary_path(
     __file__, "flash_attention_matmul_q256_kv1024_d128_riscv"
 )
@@ -162,6 +166,24 @@ class GeneratePerformanceSummary(verifier.Verifier):
             )
 
 
+class VerifyFastMatmulLaunchPath(verifier.Verifier):
+    def __init__(self):
+        super().__init__()
+
+    def test(self, params):
+        source = FAST_MATMUL_HEADER.read_text(encoding="utf-8")
+        if re.search(r"\.launchCmdAt\s*\(", source):
+            test_util.fail(
+                "fastMatmul should call the flat raw-pairs launch path, "
+                "not NpuCmd::launchCmdAt()"
+            )
+        if "npuCmdLaunchRawPairsInsn(" not in source:
+            test_util.fail(
+                "fastMatmul should prepare raw command pairs and launch "
+                "through npuCmdLaunchRawPairsInsn()"
+            )
+
+
 register_npu_test(
     NpuRunnerSpec(
         name="flash_attention_matmul_q256_kv1024_d128",
@@ -205,6 +227,7 @@ register_npu_test(
             r"MPU_EXIT_CODE=0",
             make_profile_artifact_verifier(__file__),
             GeneratePerformanceSummary(),
+            VerifyFastMatmulLaunchPath(),
         ),
         fixtures=(make_testcase_build_fixture(__file__),),
     )
