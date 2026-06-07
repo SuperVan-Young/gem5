@@ -31,7 +31,6 @@ typedef struct
     NpuCmd mvin_a;
     NpuCmd mvin_b;
     NpuCmd compute_fused;
-    NpuCmd drain;
     NpuCmd mvout;
 } NpuFastMatmulCmdTemplates;
 
@@ -126,11 +125,8 @@ npu_fast_matmul_build_cmd_templates(
                   MPU_BUFFER_RESERVED, 0U, tile->tile_m, tile->tile_n,
                   tile->tile_k, 0U, 0U, config->sync_indicator, 0U);
     templates->compute_fused.setWord(MPU_WORD_FLAGS,
-                                     MPU_FLAG_LAST_K_BLOCK);
-    mpu_build_cmd(&templates->drain, config->device_id,
-                  mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_DRAIN), MPU_BUFFER_C,
-                  config->c_buffer_index, tile->tile_m, tile->tile_n,
-                  tile->tile_k, 0U, 0U, config->sync_indicator, 0U);
+                                     MPU_FLAG_LAST_K_BLOCK |
+                                         MPU_FLAG_DRAIN_TO_C);
     mpu_build_cmd(&templates->mvout, config->device_id,
                   mpu_op_code(MPU_DATA_TYPE_INT8, MPU_OP_MVOUT), MPU_BUFFER_C,
                   config->c_buffer_index, tile->tile_m, tile->tile_n,
@@ -168,7 +164,7 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
 
     if (stats != NULL) {
         *stats = {};
-        stats->template_build_count = 5U;
+        stats->template_build_count = 4U;
         stats->tile_count = tile_count;
     }
 
@@ -217,14 +213,11 @@ npu_fast_matmul_launch_tiled_spm(const NpuMpuGemmSpmI8Matrix *a_matrix,
                 templates.compute_fused, mpu_fused_buffer_word(buffer_index),
                 0U, cmd_m, cmd_n, cmd_k, 0U);
             NPU_FAST_MATMUL_LAUNCH_RAW(
-                templates.drain, mpu_buffer_word(MPU_BUFFER_C, c_buffer),
-                0U, cmd_m, cmd_n, cmd_k, 0U);
-            NPU_FAST_MATMUL_LAUNCH_RAW(
                 templates.mvout, mpu_buffer_word(MPU_BUFFER_C, c_buffer),
                 c_addr, cmd_m, cmd_n, cmd_k, set_completion_sync);
 
             if (stats != NULL) {
-                stats->launched_cmd_count += 5U;
+                stats->launched_cmd_count += 4U;
             }
             tile_ordinal += 1U;
         }

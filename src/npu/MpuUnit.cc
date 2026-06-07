@@ -61,6 +61,7 @@ constexpr uint32_t PrefetchIssueQueueId = 1;
 constexpr uint32_t MpuFlagAccumulate = 0x00000001U;
 constexpr uint32_t MpuFlagLastKBlock = 0x00000002U;
 constexpr uint32_t MpuFlagClearOutput = 0x00000004U;
+constexpr uint32_t MpuFlagDrainToC = 0x00000008U;
 
 bool
 mpuFlagSet(uint32_t flags, uint32_t mask)
@@ -396,8 +397,12 @@ MpuUnit::validateComputeFused(const ParsedCmd &cmd) const
 
     const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
     const bool clear = mpuFlagSet(cmd.flags, MpuFlagClearOutput);
+    const bool drain_to_c = mpuFlagSet(cmd.flags, MpuFlagDrainToC);
     panic_if(accumulate && clear,
              "%s: fused compute cannot both accumulate and clear output",
+             name());
+    panic_if(drain_to_c && !mpuFlagSet(cmd.flags, MpuFlagLastKBlock),
+             "%s: fused compute can drain to C only on the last K block",
              name());
 }
 
@@ -431,6 +436,7 @@ MpuUnit::fusedComputeReady(const ParsedCmd &cmd) const
              "%s: B buffer payload size mismatch for fused compute", name());
 
     const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
+    const bool drain_to_c = mpuFlagSet(cmd.flags, MpuFlagDrainToC);
     if (!accumulate) {
         panic_if(outputStorage.state != OutputStorageState::Empty,
                  "%s: fused compute first block requires empty output",
@@ -440,6 +446,16 @@ MpuUnit::fusedComputeReady(const ParsedCmd &cmd) const
                  "%s: fused accumulate requires existing output", name());
         panic_if(outputStorage.m != cmd.m || outputStorage.n != cmd.n,
                  "%s: fused accumulate shape mismatch", name());
+    }
+    if (drain_to_c) {
+        const CBufferSlot &c = selectedCBuffer(index);
+        panic_if(c.state != BufferState::Empty,
+                 "%s: fused compute drain-to-C requires EMPTY C%u",
+                 name(), index);
+        panic_if(static_cast<uint64_t>(cmd.m) * cmd.n * sizeof(int32_t) >
+                     cBufferCapacityBytes,
+                 "%s: fused drained C tile bytes exceed C buffer capacity",
+                 name());
     }
 
     return true;
@@ -508,7 +524,8 @@ MpuUnit::validateCommand(const std::vector<uint8_t> &rawCmd,
              "%s: MPU commands require reserved word 4 == 0", name());
     const uint32_t allowedFlags =
         cmd.kind == CmdKind::ComputeFused ?
-            (MpuFlagAccumulate | MpuFlagLastKBlock | MpuFlagClearOutput) :
+            (MpuFlagAccumulate | MpuFlagLastKBlock | MpuFlagClearOutput |
+             MpuFlagDrainToC) :
             0U;
     panic_if((cmd.flags & ~allowedFlags) != 0 ||
                  extractWord(rawCmd, ReservedWord13) != 0 ||
@@ -840,6 +857,7 @@ MpuUnit::performComputeFused(const ParsedCmd &cmd)
     const ABBufferSlot &b = bBuffers[index];
     const bool accumulate = mpuFlagSet(cmd.flags, MpuFlagAccumulate);
     const bool last = mpuFlagSet(cmd.flags, MpuFlagLastKBlock);
+    const bool drain_to_c = mpuFlagSet(cmd.flags, MpuFlagDrainToC);
 
     if (!accumulate || outputStorage.state == OutputStorageState::Empty) {
         outputStorage.data.assign(static_cast<size_t>(cmd.m) * cmd.n, 0);
@@ -864,11 +882,21 @@ MpuUnit::performComputeFused(const ParsedCmd &cmd)
 
     outputStorage.k += cmd.k;
     outputStorage.readyTick = curTick();
-    outputStorage.state = last ?
-        OutputStorageState::ReadyToDrain :
-        OutputStorageState::Active;
     stats.totalMacOps +=
         static_cast<uint64_t>(cmd.m) * cmd.n * cmd.k;
+
+    if (drain_to_c) {
+        CBufferSlot &slot = selectedCBuffer(index);
+        slot.data = outputStorage.data;
+        transitionCBufferToFull(slot, cmd);
+        stats.totalOutputElementsDrained +=
+            static_cast<uint64_t>(cmd.m) * cmd.n;
+        outputStorage.reset();
+    } else {
+        outputStorage.state = last ?
+            OutputStorageState::ReadyToDrain :
+            OutputStorageState::Active;
+    }
 
     aBuffers[index].reset();
     bBuffers[index].reset();

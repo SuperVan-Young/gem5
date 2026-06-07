@@ -35,6 +35,7 @@
 #define MPU_FLAG_ACCUMULATE 0x00000001U
 #define MPU_FLAG_LAST_K_BLOCK 0x00000002U
 #define MPU_FLAG_CLEAR_OUTPUT 0x00000004U
+#define MPU_FLAG_DRAIN_TO_C 0x00000008U
 
 static inline uint32_t
 mpu_op_code(uint32_t data_type, uint32_t cmd_kind)

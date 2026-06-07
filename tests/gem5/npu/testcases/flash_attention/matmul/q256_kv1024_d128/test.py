@@ -100,7 +100,7 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail(
                 "Unexpected baseline build count in %s", PERF_SUMMARY
             )
-        if summary["fast"]["template_builds"] != 5:
+        if summary["fast"]["template_builds"] != 4:
             test_util.fail(
                 "Unexpected fast template count in %s", PERF_SUMMARY
             )
@@ -135,28 +135,28 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Output checksum mismatch in %s", PERF_SUMMARY)
         if "fast_issue_gaps" not in summary:
             test_util.fail("Missing fast_issue_gaps in %s", PERF_SUMMARY)
-        if summary["fast_issue_gaps"]["macro_count"] != 80:
+        if summary["fast_issue_gaps"]["macro_count"] != 64:
             test_util.fail(
-                "Expected 80 fast macro events, got %s",
+                "Expected 64 fast macro events, got %s",
                 summary["fast_issue_gaps"]["macro_count"],
             )
         if "launch_profile" not in summary:
             test_util.fail("Missing launch_profile in %s", PERF_SUMMARY)
-        if summary["launch_profile"]["count"] != 192:
+        if summary["launch_profile"]["count"] != 176:
             test_util.fail(
-                "Expected 192 launch profile events, got %s",
+                "Expected 176 launch profile events, got %s",
                 summary["launch_profile"]["count"],
             )
         if "launch_request_gaps" not in summary:
             test_util.fail("Missing launch_request_gaps in %s", PERF_SUMMARY)
-        if summary["launch_request_gaps"]["count"] != 80:
+        if summary["launch_request_gaps"]["count"] != 64:
             test_util.fail(
-                "Expected 80 fast launch request events, got %s",
+                "Expected 64 fast launch request events, got %s",
                 summary["launch_request_gaps"]["count"],
             )
-        if summary["launch_request_gaps"]["gap_count"] != 79:
+        if summary["launch_request_gaps"]["gap_count"] != 63:
             test_util.fail(
-                "Expected 79 fast launch request gaps, got %s",
+                "Expected 63 fast launch request gaps, got %s",
                 summary["launch_request_gaps"]["gap_count"],
             )
         if summary["fast_effective_tops"] <= 0.0:
@@ -196,10 +196,13 @@ class VerifyFastMatmulFusedComputePath(verifier.Verifier):
         source = FAST_MATMUL_HEADER.read_text(encoding="utf-8")
         if "MPU_OP_COMPUTE_FUSED" not in source:
             test_util.fail("fastMatmul should use fused compute opcode")
+        if "MPU_FLAG_DRAIN_TO_C" not in source:
+            test_util.fail("fastMatmul fused compute should drain to C")
         forbidden = (
             "templates.load_a,",
             "templates.load_b,",
             "templates.compute,",
+            "templates.drain,",
         )
         for pattern in forbidden:
             if pattern in source:
@@ -223,9 +226,9 @@ register_npu_test(
             r"total_flops=67108864",
             r"FLASH_ATTENTION_MATMUL_BASELINE cmds=112 build_cmd_calls=112 "
             r"sync_indicator=64 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_FAST cmds=80 template_builds=5 "
+            r"FLASH_ATTENTION_MATMUL_FAST cmds=64 template_builds=4 "
             r"sync_indicator=128 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=107 "
+            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=108 "
             r"baseline_checksum=-?[0-9]+ fast_checksum=-?[0-9]+ "
             r"ref_checksum=-?[0-9]+ status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_BASELINE "
@@ -234,8 +237,8 @@ register_npu_test(
             r"mvin=32 load=32 compute=16 drain=16 mvout=16 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_FAST "
             r"total_span_cycles=[0-9]+ busy_cycles=[0-9]+ "
-            r"compute_cycles=[0-9]+ macro_count=80 "
-            r"mvin=32 load=0 compute=16 drain=16 mvout=16 status=PASS",
+            r"compute_cycles=[0-9]+ macro_count=64 "
+            r"mvin=32 load=0 compute=16 drain=0 mvout=16 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_COMPARE "
             r"baseline_total_span_cycles=[0-9]+ "
             r"fast_total_span_cycles=[0-9]+ "
@@ -243,7 +246,7 @@ register_npu_test(
             r"baseline_compute_cycles=[0-9]+ fast_compute_cycles=[0-9]+ "
             r"status=PASS",
             r"FLASH_ATTENTION_MATMUL_PASS",
-            rf"MPU_SUMMARY scenario={SCENARIO} cmds=192 "
+            rf"MPU_SUMMARY scenario={SCENARIO} cmds=176 "
             r"compute_cycles=[0-9]+ drain_cycles=[0-9]+ "
             r"output_ready_cycles=[0-9]+ cmd_cycles=[0-9]+ "
             r"spm_wait=[0-9]+ "
