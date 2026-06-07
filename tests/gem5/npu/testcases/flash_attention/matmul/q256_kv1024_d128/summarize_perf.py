@@ -261,6 +261,10 @@ def main():
         "mpu_summary": {
             "cmds": require_int(mpu_summary, "cmds"),
             "compute_cycles": require_int(mpu_summary, "compute_cycles"),
+            "drain_cycles": require_int(mpu_summary, "drain_cycles"),
+            "output_ready_cycles": require_int(
+                mpu_summary, "output_ready_cycles"
+            ),
             "cmd_cycles": require_int(mpu_summary, "cmd_cycles"),
             "spm_wait": require_int(mpu_summary, "spm_wait"),
             "macs": require_int(mpu_summary, "macs"),

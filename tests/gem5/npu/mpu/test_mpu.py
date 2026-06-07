@@ -79,11 +79,22 @@ add_mpu_test(
     ),
 )
 add_mpu_test(
-    "mpu_compute_latency_k_plus_m",
-    "compute_latency_k_plus_m",
+    "mpu_compute_latency_and_drain_handoff",
+    "compute_latency_and_drain_handoff",
     (
-        r"MPU_SUMMARY scenario=compute_latency_k_plus_m cmds=7 .* compute_cycles=8 .* macs=30 .*",
-        r"MPU_SCENARIO_PASS=compute_latency_k_plus_m",
+        r"MPU_SUMMARY scenario=compute_latency_and_drain_handoff cmds=7 .* "
+        r"compute_cycles=5 drain_cycles=[1-9][0-9]* "
+        r"output_ready_cycles=13 .* macs=30 .*",
+        r"MPU_SCENARIO_PASS=compute_latency_and_drain_handoff",
+    ),
+)
+add_mpu_test(
+    "mpu_drain_handoff_allows_next_compute",
+    "drain_handoff_allows_next_compute",
+    (
+        r"MPU_SUMMARY scenario=drain_handoff_allows_next_compute cmds=14 .* "
+        r"compute=2 drain=2 mvout=2 .* c0=0 c1=0 out=0 .*",
+        r"MPU_SCENARIO_PASS=drain_handoff_allows_next_compute",
     ),
 )
 add_mpu_test(

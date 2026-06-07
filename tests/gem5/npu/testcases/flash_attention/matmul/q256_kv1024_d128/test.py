@@ -154,7 +154,9 @@ register_npu_test(
             r"status=PASS",
             r"FLASH_ATTENTION_MATMUL_PASS",
             rf"MPU_SUMMARY scenario={SCENARIO} cmds=224 "
-            r"compute_cycles=[0-9]+ cmd_cycles=[0-9]+ spm_wait=[0-9]+ "
+            r"compute_cycles=[0-9]+ drain_cycles=[0-9]+ "
+            r"output_ready_cycles=[0-9]+ cmd_cycles=[0-9]+ "
+            r"spm_wait=[0-9]+ "
             r"macs=67108864 busy=[0-9]+ idle=[0-9]+",
             r"MPU_EXIT_CODE=0",
             make_profile_artifact_verifier(__file__),

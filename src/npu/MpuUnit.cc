@@ -90,6 +90,7 @@ MpuUnit::OutputStorage::reset()
 {
     state = OutputStorageState::Empty;
     m = n = k = 0;
+    readyTick = 0;
     data.clear();
 }
 
@@ -1018,22 +1019,39 @@ MpuUnit::buildUops(MacroCmdContext &macroCmd)
         outputStorage.n = cmd.n;
         outputStorage.k = cmd.k;
         outputStorage.data.assign(static_cast<size_t>(cmd.m) * cmd.n, 0);
-        lastComputeLatencyCyclesValue =
-            static_cast<uint64_t>(cmd.k) + cmd.m;
+        lastComputeLatencyCyclesValue = static_cast<uint64_t>(cmd.k);
+        lastOutputReadyLatencyCyclesValue =
+            static_cast<uint64_t>(cmd.k) + arrayDim;
+        outputStorage.readyTick =
+            curTick() +
+            static_cast<Tick>(lastOutputReadyLatencyCyclesValue) *
+            clockPeriod();
         refreshScoreboard();
         DPRINTF(MpuUnit,
-                "compute start dims=(%u,%u,%u) latency_cycles=%llu\n",
+                "compute start dims=(%u,%u,%u) issue_cycles=%llu "
+                "output_ready_cycles=%llu\n",
                 cmd.m, cmd.n, cmd.k,
                 static_cast<unsigned long long>(
-                    lastComputeLatencyCyclesValue));
+                    lastComputeLatencyCyclesValue),
+                static_cast<unsigned long long>(
+                    lastOutputReadyLatencyCyclesValue));
         appendExecUop(macroCmd,
-                      (static_cast<Tick>(cmd.k) + cmd.m) * clockPeriod());
+                      static_cast<Tick>(cmd.k) * clockPeriod());
         break;
-      case CmdKind::Drain:
-        appendExecUop(macroCmd,
-                      drainLatencyBase +
-                      static_cast<Tick>(cmd.m) * cmd.n * clockPeriod());
+      case CmdKind::Drain: {
+        const Tick now = curTick();
+        const Tick ready_tick = outputStorage.readyTick;
+        const Tick wait_ticks = ready_tick > now ? ready_tick - now : 0;
+        const Tick handoff_ticks = std::max(clockPeriod(), drainLatencyBase);
+        const uint64_t wait_cycles =
+            wait_ticks == 0 ? 0 : static_cast<uint64_t>(
+                ticksToCycles(wait_ticks));
+
+        lastDrainLatencyCyclesValue = wait_cycles +
+            static_cast<uint64_t>(ticksToCycles(handoff_ticks));
+        appendExecUop(macroCmd, wait_ticks + handoff_ticks);
         break;
+      }
     }
 
     if (macroCmd.uopQueue.empty()) {
@@ -1347,6 +1365,18 @@ uint64_t
 MpuUnit::lastComputeLatencyCycles() const
 {
     return lastComputeLatencyCyclesValue;
+}
+
+uint64_t
+MpuUnit::lastDrainLatencyCycles() const
+{
+    return lastDrainLatencyCyclesValue;
+}
+
+uint64_t
+MpuUnit::lastOutputReadyLatencyCycles() const
+{
+    return lastOutputReadyLatencyCyclesValue;
 }
 
 uint64_t

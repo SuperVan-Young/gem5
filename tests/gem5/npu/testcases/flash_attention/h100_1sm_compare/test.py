@@ -92,6 +92,8 @@ class GeneratePerformanceSummary(verifier.Verifier):
             "total_flops",
             "compare_cycles",
             "compare_latency",
+            "compare_issue_latency",
+            "compare_completion_latency",
             "compare_macs",
             "compare_busy",
             "compare_idle",
@@ -111,6 +113,8 @@ class GeneratePerformanceSummary(verifier.Verifier):
 
         required_mpu_fields = (
             "compute_cycles",
+            "drain_cycles",
+            "output_ready_cycles",
             "cmd_cycles",
             "spm_wait",
             "macs",
@@ -139,6 +143,8 @@ class GeneratePerformanceSummary(verifier.Verifier):
         numeric_compare_fields = (
             "compare_cycles",
             "compare_latency",
+            "compare_issue_latency",
+            "compare_completion_latency",
             "compare_macs",
             "compare_busy",
             "compare_idle",
@@ -208,7 +214,7 @@ register_npu_test(
             r"FLASH_ATTENTION_H100_1SM_COMPARE_PERF_SOURCE "
             r"source_line=profile_and_MPU_SUMMARY "
             r"cycles_field=profile_stage_span_cycles "
-            r"latency_field=profile_compute_exec_cycles "
+            r"latency_field=profile_compute_plus_drain_handoff_cycles "
             r"macs_field=mpu_summary_total_macs "
             r"busy_field=mpu_summary_busy "
             r"idle_field=profile_stage_idle "
@@ -216,6 +222,8 @@ register_npu_test(
             r"FLASH_ATTENTION_H100_1SM_COMPARE_PERF_SUMMARY "
             r"scenario=flash_attention_h100_1sm_compare "
             r"compare_cycles=[0-9]+ compare_latency=[0-9]+ "
+            r"compare_issue_latency=[0-9]+ "
+            r"compare_completion_latency=[0-9]+ "
             r"compare_macs=[0-9]+ compare_busy=[0-9]+ "
             r"compare_idle=[0-9]+ compare_spm_wait=[0-9]+ "
             r"compare_scope=full_flash_attention "
@@ -223,6 +231,7 @@ register_npu_test(
             r"excluded_from_compare_latency=true status=PASS",
             r"FLASH_ATTENTION_H100_1SM_COMPARE_PASS",
             rf"MPU_SUMMARY scenario={SCENARIO} .* compute_cycles=[0-9]+ "
+            r"drain_cycles=[0-9]+ output_ready_cycles=[0-9]+ "
             r"cmd_cycles=[0-9]+ spm_wait=[0-9]+ macs=[0-9]+ "
             r"busy=[0-9]+ idle=[0-9]+ .*",
             r"MPU_EXIT_CODE=0",

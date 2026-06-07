@@ -85,15 +85,23 @@ def _busy_cycles(events):
     )
 
 
-def _compute_cycles(events):
+def _exec_opcode_cycles(events, opcode):
     return _ticks_to_cycles(
         sum(
             int(event.get("duration", 0))
             for event in events
             if event.get("macro_kind") == "Exec"
-            and int(event.get("opcode", -1)) == 3
+            and int(event.get("opcode", -1)) == opcode
         )
     )
+
+
+def _compute_cycles(events):
+    return _exec_opcode_cycles(events, 3)
+
+
+def _drain_cycles(events):
+    return _exec_opcode_cycles(events, 4)
 
 
 def emit_compare_perf_summary(active_mpu, scenario):
@@ -114,7 +122,11 @@ def emit_compare_perf_summary(active_mpu, scenario):
         pv_events
     )
     compare_busy = int(active_mpu.busyCycles())
-    compare_latency = _compute_cycles(compare_events)
+    compare_issue_latency = _compute_cycles(compare_events)
+    compare_completion_latency = compare_issue_latency + _drain_cycles(
+        compare_events
+    )
+    compare_latency = compare_completion_latency
     compare_idle = compare_cycles - compare_busy
     if compare_idle < 0:
         raise RuntimeError(
@@ -125,7 +137,7 @@ def emit_compare_perf_summary(active_mpu, scenario):
         "FLASH_ATTENTION_H100_1SM_COMPARE_PERF_SOURCE "
         "source_line=profile_and_MPU_SUMMARY "
         "cycles_field=profile_stage_span_cycles "
-        "latency_field=profile_compute_exec_cycles "
+        "latency_field=profile_compute_plus_drain_handoff_cycles "
         "macs_field=mpu_summary_total_macs "
         "busy_field=mpu_summary_busy "
         "idle_field=profile_stage_idle "
@@ -136,6 +148,8 @@ def emit_compare_perf_summary(active_mpu, scenario):
         f"scenario={scenario} "
         f"compare_cycles={compare_cycles} "
         f"compare_latency={compare_latency} "
+        f"compare_issue_latency={compare_issue_latency} "
+        f"compare_completion_latency={compare_completion_latency} "
         f"compare_macs={active_mpu.totalMacOps()} "
         f"compare_busy={compare_busy} "
         f"compare_idle={compare_idle} "
@@ -262,6 +276,8 @@ print(
     f"loadedA={active_mpu.loadedAIndex()} "
     f"loadedB={active_mpu.loadedBIndex()} "
     f"compute_cycles={active_mpu.lastComputeLatencyCycles()} "
+    f"drain_cycles={active_mpu.lastDrainLatencyCycles()} "
+    f"output_ready_cycles={active_mpu.lastOutputReadyLatencyCycles()} "
     f"cmd_cycles={active_mpu.lastCommandLatencyCycles()} "
     f"spm_wait={active_mpu.stallCyclesWaitingForSpm()} "
     f"macs={active_mpu.totalMacOps()} "

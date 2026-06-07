@@ -54,6 +54,8 @@ class MpuUnit(SpecializedExecutionUnit):
         PyBindMethod("stallCyclesOutputStorageUnavailable"),
         PyBindMethod("stallCyclesDrainDestBusy"),
         PyBindMethod("lastComputeLatencyCycles"),
+        PyBindMethod("lastDrainLatencyCycles"),
+        PyBindMethod("lastOutputReadyLatencyCycles"),
         PyBindMethod("lastCommandLatencyCycles"),
         PyBindMethod("currentCmdKind"),
         PyBindMethod("aBufferState"),

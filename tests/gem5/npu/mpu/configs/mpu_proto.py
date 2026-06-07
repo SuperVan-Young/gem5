@@ -93,6 +93,8 @@ print(
     f"loadedA={active_mpu.loadedAIndex()} "
     f"loadedB={active_mpu.loadedBIndex()} "
     f"compute_cycles={active_mpu.lastComputeLatencyCycles()} "
+    f"drain_cycles={active_mpu.lastDrainLatencyCycles()} "
+    f"output_ready_cycles={active_mpu.lastOutputReadyLatencyCycles()} "
     f"cmd_cycles={active_mpu.lastCommandLatencyCycles()} "
     f"spm_wait={active_mpu.stallCyclesWaitingForSpm()} "
     f"macs={active_mpu.totalMacOps()} "

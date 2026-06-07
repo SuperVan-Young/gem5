@@ -146,6 +146,12 @@ def main():
         "compare_latency": require_int_value(
             perf_summary, "compare_latency"
         ),
+        "compare_issue_latency": require_int_value(
+            perf_summary, "compare_issue_latency"
+        ),
+        "compare_completion_latency": require_int_value(
+            perf_summary, "compare_completion_latency"
+        ),
         "compare_macs": require_int_value(perf_summary, "compare_macs"),
         "compare_busy": require_int_value(perf_summary, "compare_busy"),
         "compare_idle": require_int_value(perf_summary, "compare_idle"),
@@ -168,6 +174,10 @@ def main():
         },
         "mpu_summary": {
             "compute_cycles": require_int(mpu_summary, "compute_cycles"),
+            "drain_cycles": require_int(mpu_summary, "drain_cycles"),
+            "output_ready_cycles": require_int(
+                mpu_summary, "output_ready_cycles"
+            ),
             "cmd_cycles": require_int(mpu_summary, "cmd_cycles"),
             "spm_wait": require_int(mpu_summary, "spm_wait"),
             "macs": require_int(mpu_summary, "macs"),

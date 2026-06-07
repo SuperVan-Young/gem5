@@ -140,6 +140,7 @@ class MpuUnit : public SpecializedExecutionUnit
         uint32_t m = 0;
         uint32_t n = 0;
         uint32_t k = 0;
+        Tick readyTick = 0;
         std::vector<int32_t> data;
 
         void reset();
@@ -249,6 +250,8 @@ class MpuUnit : public SpecializedExecutionUnit
 
     uint64_t lastCommandLatencyCyclesValue = 0;
     uint64_t lastComputeLatencyCyclesValue = 0;
+    uint64_t lastDrainLatencyCyclesValue = 0;
+    uint64_t lastOutputReadyLatencyCyclesValue = 0;
 
     std::unordered_map<uint64_t, MpuMacroRuntime> macroRuntimes;
 
@@ -345,6 +348,8 @@ class MpuUnit : public SpecializedExecutionUnit
     uint64_t stallCyclesOutputStorageUnavailable() const;
     uint64_t stallCyclesDrainDestBusy() const;
     uint64_t lastComputeLatencyCycles() const;
+    uint64_t lastDrainLatencyCycles() const;
+    uint64_t lastOutputReadyLatencyCycles() const;
     uint64_t lastCommandLatencyCycles() const;
     int currentCmdKind() const;
     int aBufferState(uint32_t index) const;
