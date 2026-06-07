@@ -21,8 +21,10 @@ from npu_test_system import (  # noqa: E402
 SCENARIO = "flash_attention_matmul_q256_kv1024_d128"
 SYSTEM_CLOCK = "1GHz"
 SPM_SIZE_BYTES = 4 * 1024 * 1024
-SPM_LATENCY = "10ns"
+SPM_LATENCY = "1ns"
 SPM_BANDWIDTH = "100GiB/s"
+SYSTEM_XBAR_WIDTH_BYTES = 256
+SYSTEM_XBAR_LATENCY_CYCLES = 0
 DRAM_MAP_SIZE_BYTES = 32 * 1024 * 1024
 DRAM_BANDWIDTH = "25.378787879GB/s"
 DRAM_LATENCY = "30ns"
@@ -153,7 +155,16 @@ def build_system(binary, scenario):
         mem_ranges=mem_ranges,
         addr_map=NPUAddressMap(),
     )
-    builder.build_base_system()
+    builder.build_base_system(
+        membus_kwargs={
+            "width": SYSTEM_XBAR_WIDTH_BYTES,
+            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "snoop_response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+        }
+    )
     builder.add_lowmem(
         AddrRange(0, size=0x60000000),
         latency=DRAM_LATENCY,
