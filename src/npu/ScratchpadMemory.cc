@@ -166,11 +166,8 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
     Tick receive_delay = pkt->headerDelay + pkt->payloadDelay;
     pkt->headerDelay = pkt->payloadDelay = 0;
 
-    const Tick duration = pkt->getSize() * bandwidth;
-    const unsigned pipe_port = pipelinePort(pkt);
     Tick service_tick =
-        std::max(curTick() + receive_delay, nextServiceTick[pipe_port]);
-    nextServiceTick[pipe_port] = service_tick + duration;
+        schedulePipelineService(pkt, curTick() + receive_delay);
 
     const bool needs_response = pkt->needsResponse();
     Tick response_tick = service_tick + latency;
@@ -192,22 +189,49 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
 
     DPRINTF(ScratchpadMemory, "Timing request accepted: addr=%#llx "
             "size=%d service=%llu response=%llu inflight=%u depth=%u "
-            "pipe_port=%u needsResponse=%d\n", pkt->getAddr(),
+            "needsResponse=%d\n", pkt->getAddr(),
             pkt->getSize(), service_tick, response_tick, inflightRequests,
-            pipelineDepth, pipe_port, needs_response);
+            pipelineDepth, needs_response);
 
     scheduleAccess();
     return true;
 }
 
 unsigned
-ScratchpadMemory::pipelinePort(PacketPtr pkt) const
+ScratchpadMemory::pipelinePort(Addr addr) const
 {
     const Addr base = getAddrRange().start();
-    if (pkt->getAddr() < base) {
+    if (addr < base) {
         return 0;
     }
-    return ((pkt->getAddr() - base) / pipelinePortStride) % pipelinePorts;
+    return ((addr - base) / pipelinePortStride) % pipelinePorts;
+}
+
+Tick
+ScratchpadMemory::schedulePipelineService(PacketPtr pkt, Tick ready_tick)
+{
+    Tick service_tick = ready_tick;
+    Addr cursor = pkt->getAddr();
+    size_t remaining = pkt->getSize();
+
+    while (remaining != 0) {
+        const Addr base = getAddrRange().start();
+        const Addr offset = cursor < base ? 0 : cursor - base;
+        const uint32_t bank_offset = offset % pipelinePortStride;
+        const size_t chunk = std::min<size_t>(
+            remaining, pipelinePortStride - bank_offset);
+        const unsigned pipe_port = pipelinePort(cursor);
+        const Tick bank_ready =
+            std::max(ready_tick, nextServiceTick[pipe_port]);
+        const Tick duration = chunk * bandwidth;
+
+        nextServiceTick[pipe_port] = bank_ready + duration;
+        service_tick = std::max(service_tick, bank_ready);
+        cursor += chunk;
+        remaining -= chunk;
+    }
+
+    return service_tick;
 }
 
 void

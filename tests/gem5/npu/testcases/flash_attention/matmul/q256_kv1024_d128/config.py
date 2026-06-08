@@ -167,7 +167,21 @@ def build_system(binary, scenario):
             "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
             "snoop_response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
             "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-        }
+        },
+        npu_mmio_bus_kwargs={
+            "width": SYSTEM_XBAR_WIDTH_BYTES,
+            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+        },
+        cpu_npu_mmio_bus_kwargs={
+            "width": SYSTEM_XBAR_WIDTH_BYTES,
+            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+        },
     )
     builder.add_lowmem(
         AddrRange(0, size=0x60000000),

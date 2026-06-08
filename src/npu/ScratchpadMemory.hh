@@ -183,7 +183,8 @@ class ScratchpadMemory : public memory::AbstractMemory
 
     void scheduleDequeue();
 
-    unsigned pipelinePort(PacketPtr pkt) const;
+    unsigned pipelinePort(Addr addr) const;
+    Tick schedulePipelineService(PacketPtr pkt, Tick readyTick);
 
     EventFunctionWrapper accessEvent;
 
