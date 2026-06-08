@@ -100,7 +100,7 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail(
                 "Unexpected baseline build count in %s", PERF_SUMMARY
             )
-        if summary["fast"]["template_builds"] != 4:
+        if summary["fast"]["template_builds"] != 1:
             test_util.fail(
                 "Unexpected fast template count in %s", PERF_SUMMARY
             )
@@ -114,19 +114,9 @@ class GeneratePerformanceSummary(verifier.Verifier):
                 "Baseline contiguous loads should issue one uop in %s",
                 PERF_SUMMARY,
             )
-        if summary["fast"]["profile"]["contiguous_load_macro_count"] == 0:
+        if summary["fast"]["profile"]["fused_matmul_macro_count"] != 1:
             test_util.fail(
-                "Fast phase should contain contiguous load macros in %s",
-                PERF_SUMMARY,
-            )
-        if summary["fast"]["profile"]["contiguous_load_max_uops"] != 1:
-            test_util.fail(
-                "Fast contiguous loads should issue one uop in %s",
-                PERF_SUMMARY,
-            )
-        if summary["fast"]["profile"]["fused_compute_macro_count"] != 16:
-            test_util.fail(
-                "Expected 16 fast fused compute macros in %s", PERF_SUMMARY
+                "Expected one fast fused matmul macro in %s", PERF_SUMMARY
             )
         if (
             summary["compare"]["baseline_checksum"]
@@ -135,28 +125,28 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Output checksum mismatch in %s", PERF_SUMMARY)
         if "fast_issue_gaps" not in summary:
             test_util.fail("Missing fast_issue_gaps in %s", PERF_SUMMARY)
-        if summary["fast_issue_gaps"]["macro_count"] != 64:
+        if summary["fast_issue_gaps"]["macro_count"] != 1:
             test_util.fail(
-                "Expected 64 fast macro events, got %s",
+                "Expected one fast macro event, got %s",
                 summary["fast_issue_gaps"]["macro_count"],
             )
         if "launch_profile" not in summary:
             test_util.fail("Missing launch_profile in %s", PERF_SUMMARY)
-        if summary["launch_profile"]["count"] != 176:
+        if summary["launch_profile"]["count"] != 113:
             test_util.fail(
-                "Expected 176 launch profile events, got %s",
+                "Expected 113 launch profile events, got %s",
                 summary["launch_profile"]["count"],
             )
         if "launch_request_gaps" not in summary:
             test_util.fail("Missing launch_request_gaps in %s", PERF_SUMMARY)
-        if summary["launch_request_gaps"]["count"] != 64:
+        if summary["launch_request_gaps"]["count"] != 1:
             test_util.fail(
-                "Expected 64 fast launch request events, got %s",
+                "Expected one fast launch request event, got %s",
                 summary["launch_request_gaps"]["count"],
             )
-        if summary["launch_request_gaps"]["gap_count"] != 63:
+        if summary["launch_request_gaps"]["gap_count"] != 0:
             test_util.fail(
-                "Expected 63 fast launch request gaps, got %s",
+                "Expected zero fast launch request gaps, got %s",
                 summary["launch_request_gaps"]["gap_count"],
             )
         if summary["fast_effective_tops"] <= 0.0:
@@ -194,15 +184,17 @@ class VerifyFastMatmulFusedComputePath(verifier.Verifier):
 
     def test(self, params):
         source = FAST_MATMUL_HEADER.read_text(encoding="utf-8")
-        if "MPU_OP_COMPUTE_FUSED" not in source:
-            test_util.fail("fastMatmul should use fused compute opcode")
-        if "MPU_FLAG_DRAIN_TO_C" not in source:
-            test_util.fail("fastMatmul fused compute should drain to C")
+        if "MPU_OP_FUSED_MATMUL" not in source:
+            test_util.fail("fastMatmul should use fused matmul opcode")
         forbidden = (
+            "templates.mvin_a,",
+            "templates.mvin_b,",
             "templates.load_a,",
             "templates.load_b,",
             "templates.compute,",
+            "templates.compute_fused,",
             "templates.drain,",
+            "templates.mvout,",
         )
         for pattern in forbidden:
             if pattern in source:
@@ -226,9 +218,9 @@ register_npu_test(
             r"total_flops=67108864",
             r"FLASH_ATTENTION_MATMUL_BASELINE cmds=112 build_cmd_calls=112 "
             r"sync_indicator=64 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_FAST cmds=64 template_builds=4 "
+            r"FLASH_ATTENTION_MATMUL_FAST cmds=1 template_builds=1 "
             r"sync_indicator=128 status=PASS",
-            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=108 "
+            r"FLASH_ATTENTION_MATMUL_COMPARE build_call_reduction=111 "
             r"baseline_checksum=-?[0-9]+ fast_checksum=-?[0-9]+ "
             r"ref_checksum=-?[0-9]+ status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_BASELINE "
@@ -237,8 +229,8 @@ register_npu_test(
             r"mvin=32 load=32 compute=16 drain=16 mvout=16 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_FAST "
             r"total_span_cycles=[0-9]+ busy_cycles=[0-9]+ "
-            r"compute_cycles=[0-9]+ macro_count=64 "
-            r"mvin=32 load=0 compute=16 drain=0 mvout=16 status=PASS",
+            r"compute_cycles=[0-9]+ macro_count=1 "
+            r"mvin=0 load=0 compute=1 drain=0 mvout=0 status=PASS",
             r"FLASH_ATTENTION_MATMUL_PROFILE_COMPARE "
             r"baseline_total_span_cycles=[0-9]+ "
             r"fast_total_span_cycles=[0-9]+ "
@@ -246,7 +238,7 @@ register_npu_test(
             r"baseline_compute_cycles=[0-9]+ fast_compute_cycles=[0-9]+ "
             r"status=PASS",
             r"FLASH_ATTENTION_MATMUL_PASS",
-            rf"MPU_SUMMARY scenario={SCENARIO} cmds=176 "
+            rf"MPU_SUMMARY scenario={SCENARIO} cmds=113 "
             r"compute_cycles=[0-9]+ drain_cycles=[0-9]+ "
             r"output_ready_cycles=[0-9]+ cmd_cycles=[0-9]+ "
             r"spm_wait=[0-9]+ "

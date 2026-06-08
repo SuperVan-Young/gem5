@@ -91,7 +91,7 @@ def _summarize_phase(events, sync_indicator):
     compute_ticks = sum(
         int(event.get("duration", 0))
         for event in phase_events
-        if event["opcode_int"] in (3, 5)
+        if event["opcode_int"] in (3, 5, 6)
     )
 
     return {
@@ -102,7 +102,7 @@ def _summarize_phase(events, sync_indicator):
         "mvin": opcode_counts[0],
         "mvout": opcode_counts[1],
         "load": opcode_counts[2],
-        "compute": opcode_counts[3] + opcode_counts[5],
+        "compute": opcode_counts[3] + opcode_counts[5] + opcode_counts[6],
         "drain": opcode_counts[4],
     }
 

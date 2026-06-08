@@ -55,6 +55,7 @@ class MpuUnit : public SpecializedExecutionUnit
         Compute = 0x3,
         Drain = 0x4,
         ComputeFused = 0x5,
+        FusedMatmul = 0x6,
     };
 
     enum class BufferKind : uint8_t
@@ -95,6 +96,15 @@ class MpuUnit : public SpecializedExecutionUnit
         Addr spmAddr = 0;
         uint32_t strideBytes = 0;
         uint32_t flags = 0;
+        Addr aBase = 0;
+        Addr bBase = 0;
+        Addr cBase = 0;
+        uint32_t tileM = 0;
+        uint32_t tileN = 0;
+        uint32_t tileK = 0;
+        uint32_t aRowStrideBytes = 0;
+        uint32_t bRowStrideBytes = 0;
+        uint32_t cRowStrideBytes = 0;
     };
 
   private:
@@ -181,6 +191,15 @@ class MpuUnit : public SpecializedExecutionUnit
         LoadCommit,
     };
 
+    enum class FusedMatmulStage : uint8_t
+    {
+        Idle = 0,
+        Loading,
+        Computing,
+        Storing,
+        Done,
+    };
+
     struct MpuMacroRuntime
     {
         ParsedCmd parsed;
@@ -188,6 +207,19 @@ class MpuUnit : public SpecializedExecutionUnit
         PendingMemWindow memWindow;
         uint32_t nextMemRow = 0;
         PendingExecAction pendingExecAction = PendingExecAction::None;
+        FusedMatmulStage fusedStage = FusedMatmulStage::Idle;
+        uint32_t fusedNextTile = 0;
+        uint32_t fusedCompletedTiles = 0;
+        uint32_t fusedTileOrdinal = 0;
+        uint32_t fusedRow0 = 0;
+        uint32_t fusedCol0 = 0;
+        uint32_t fusedRows = 0;
+        uint32_t fusedCols = 0;
+        uint32_t fusedLoadResponses = 0;
+        uint32_t fusedStoreResponses = 0;
+        std::vector<int8_t> fusedAData;
+        std::vector<int8_t> fusedBData;
+        std::vector<int32_t> fusedCData;
     };
 
     struct MpuStats : public statistics::Group
@@ -265,6 +297,7 @@ class MpuUnit : public SpecializedExecutionUnit
     void validateLoadStatic(const ParsedCmd &cmd) const;
     void validateCompute(const ParsedCmd &cmd) const;
     void validateComputeFused(const ParsedCmd &cmd) const;
+    void validateFusedMatmul(const ParsedCmd &cmd) const;
     void validateDrain(const ParsedCmd &cmd) const;
     void validateMvout(const ParsedCmd &cmd) const;
     bool loadReady(const ParsedCmd &cmd) const;
@@ -306,6 +339,12 @@ class MpuUnit : public SpecializedExecutionUnit
                                MpuMacroRuntime &runtime);
     void appendFusedComputeProgressUop(MacroCmdContext &macroCmd,
                                        MpuMacroRuntime &runtime);
+    uint32_t fusedMatmulTileCount(const ParsedCmd &cmd) const;
+    void beginFusedMatmulTile(MacroCmdContext &macroCmd,
+                              MpuMacroRuntime &runtime);
+    void appendFusedMatmulStores(MacroCmdContext &macroCmd,
+                                 MpuMacroRuntime &runtime);
+    void performFusedMatmulTile(MpuMacroRuntime &runtime);
 
     void transitionABufferToFull(ABBufferSlot &slot, const ParsedCmd &cmd);
     void transitionABufferToLoaded(ABBufferSlot &slot, const ParsedCmd &cmd);
