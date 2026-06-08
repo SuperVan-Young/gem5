@@ -126,6 +126,7 @@ class SpecializedExecutionUnit : public ClockedObject
         uint32_t ownerIssueQueueId = 0;
         PortID portId = InvalidPortID;
         uint64_t token = 0;
+        uint64_t profileId = 0;
         Addr addr = 0;
         size_t size = 0;
         Tick latency = 0;
@@ -151,8 +152,21 @@ class SpecializedExecutionUnit : public ClockedObject
         uint32_t ownerIssueQueueId = 0;
         PortID portId = InvalidPortID;
         uint64_t token = 0;
+        uint64_t profileId = 0;
         Addr addr = 0;
         size_t size = 0;
+    };
+
+    struct UopProfileEvent
+    {
+        MicroOpContext::Kind kind = MicroOpContext::Kind::Exec;
+        uint64_t profileId = 0;
+        uint64_t token = 0;
+        PortID portId = InvalidPortID;
+        Addr addr = 0;
+        size_t size = 0;
+        Tick issueTick = 0;
+        Tick completeTick = 0;
     };
 
     /*
@@ -182,6 +196,7 @@ class SpecializedExecutionUnit : public ClockedObject
         uint64_t completedStoreUops = 0;
         uint64_t outstandingMemUops = 0;
         Tick execActiveTicks = 0;
+        std::vector<UopProfileEvent> profileUops;
     };
 
     /*
@@ -343,13 +358,20 @@ class SpecializedExecutionUnit : public ClockedObject
     bool hasSchedulableWork() const;
     void emitProfileBegin(MacroCmdContext &macroCmd) const;
     void emitProfileEnd(const MacroCmdContext &macroCmd) const;
+    void recordUopIssue(MacroCmdContext &macroCmd,
+                        const MicroOpContext &uop);
+    void recordUopComplete(MacroCmdContext &macroCmd,
+                           uint64_t profileId);
     void appendProfileEventJson(std::ostream &os, const char *phase,
                                 const MacroCmdContext &macroCmd,
                                 Tick eventTick) const;
+    void appendUopProfileEventsJson(std::ostream &os,
+                                    const MacroCmdContext &macroCmd) const;
     void appendJsonString(std::ostream &os, const std::string &value) const;
     void appendCmdWordsJson(std::ostream &os,
                             const std::vector<uint8_t> &cmd) const;
     const char *macroCmdKindName(MacroCmdKind kind) const;
+    const char *uopKindName(MicroOpContext::Kind kind) const;
 
     CPUSidePort cpuSidePort;
     StagingBuffer stagingBuffer;
@@ -368,6 +390,7 @@ class SpecializedExecutionUnit : public ClockedObject
     std::deque<uint64_t> pendingEpilogueCmdIds;
     std::deque<uint32_t> pendingCompletionSyncWords;
     std::vector<IssueQueueState> issueQueues;
+    uint64_t nextUopProfileId = 1;
     std::unordered_map<uint64_t, MacroCmdContext> macroCmdContexts;
     std::unordered_map<PacketPtr, MemTxnContext> activeMemTxns;
     std::unordered_map<uint32_t, MicroOpContext> activeExecUops;

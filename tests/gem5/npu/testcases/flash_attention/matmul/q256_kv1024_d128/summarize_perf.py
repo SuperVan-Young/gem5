@@ -185,6 +185,7 @@ def summarize_macro_start_gaps(profile_json_path, sync_indicator):
         event
         for event in profile_data.get("events", [])
         if event.get("begin", {}).get("sync_indicator") == sync_indicator
+        and "uop" not in event
     ]
     events.sort(key=lambda event: int(event["start_tick"]))
     if len(events) < 2:

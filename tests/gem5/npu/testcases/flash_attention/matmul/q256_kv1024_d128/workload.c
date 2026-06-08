@@ -78,9 +78,7 @@ waitOutputValueReady(const NpuMpuGemmSpmI32Matrix *matrix, uint32_t row,
                      uint32_t col)
 {
     const uintptr_t addr =
-        matrix->base_addr +
-        (uintptr_t)row * (uintptr_t)matrix->row_stride_bytes +
-        (uintptr_t)col * sizeof(int32_t);
+        npu_mpu_gemm_i32_addr(matrix, row, col);
     const volatile int32_t *value_ptr = (const volatile int32_t *)addr;
 
     return npu_wait_i32_vector_not_value(NULL, value_ptr, OutputSentinel, 1U,
@@ -166,30 +164,15 @@ int
 main(int argc, char **argv)
 {
     const char *scenario = argc > 1 ? argv[1] : ExpectedScenario;
-    const NpuMpuGemmSpmI8Matrix a_matrix = {
-        ASpm,
-        M,
-        K,
-        npu_mpu_gemm_i8_row_stride_bytes(K),
-    };
-    const NpuMpuGemmSpmI8Matrix b_matrix = {
-        BSpm,
-        K,
-        N,
-        npu_mpu_gemm_i8_row_stride_bytes(N),
-    };
-    const NpuMpuGemmSpmI32Matrix baseline_c_matrix = {
-        BaselineCSpm,
-        M,
-        N,
-        npu_mpu_gemm_i32_row_stride_bytes(N),
-    };
-    const NpuMpuGemmSpmI32Matrix fast_c_matrix = {
-        FastCSpm,
-        M,
-        N,
-        npu_mpu_gemm_i32_row_stride_bytes(N),
-    };
+    const NpuMpuGemmSpmI8Matrix a_matrix =
+        npu_mpu_gemm_i8_blocked_matrix(ASpm, M, K, TileM, TileK);
+    const NpuMpuGemmSpmI8Matrix b_matrix =
+        npu_mpu_gemm_i8_blocked_matrix(BSpm, K, N, TileK, TileN);
+    const NpuMpuGemmSpmI32Matrix baseline_c_matrix =
+        npu_mpu_gemm_i32_blocked_matrix(
+            BaselineCSpm, M, N, TileM, TileN);
+    const NpuMpuGemmSpmI32Matrix fast_c_matrix =
+        npu_mpu_gemm_i32_blocked_matrix(FastCSpm, M, N, TileM, TileN);
     const NpuMpuGemmProblemShape problem = {M, N, K};
     const NpuMpuGemmTileShape tile = {TileM, TileN, TileK};
     const NpuMpuGemmLaunchConfig baseline_launch = {

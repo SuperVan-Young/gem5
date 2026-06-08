@@ -479,9 +479,9 @@ MpuUnit::validateFusedMatmul(const ParsedCmd &cmd) const
              "%s: fused matmul currently requires k == tile_k (%u != %u)",
              name(), cmd.k, cmd.tileK);
 
-    const uint32_t a_row_bytes = cmd.k;
-    const uint32_t b_row_bytes = cmd.n;
-    const uint32_t c_row_bytes = cmd.n * sizeof(int32_t);
+    const uint32_t a_row_bytes = cmd.tileK;
+    const uint32_t b_row_bytes = cmd.tileN;
+    const uint32_t c_row_bytes = cmd.tileN * sizeof(int32_t);
     panic_if(cmd.aRowStrideBytes < a_row_bytes,
              "%s: fused matmul A stride=%u is smaller than row_bytes=%u",
              name(), cmd.aRowStrideBytes, a_row_bytes);
@@ -1231,15 +1231,21 @@ MpuUnit::beginFusedMatmulTile(MacroCmdContext &macroCmd,
                               MpuMacroRuntime &runtime)
 {
     const ParsedCmd &cmd = runtime.parsed;
-
+    const uint32_t tile_cols = (cmd.n + cmd.tileN - 1) / cmd.tileN;
+    const uint32_t tile = runtime.fusedNextTile;
+    const uint32_t tile_row = tile / tile_cols;
+    const uint32_t tile_col = tile % tile_cols;
+    const Addr a_tile_base = cmd.aBase +
+        static_cast<Addr>(tile_row) * cmd.tileM * cmd.tileK;
+    const Addr b_tile_base = cmd.bBase +
+        static_cast<Addr>(tile_col) * cmd.tileK * cmd.tileN;
     runtime.fusedStage = FusedMatmulStage::Loading;
-    runtime.fusedTileOrdinal = 0;
-    runtime.fusedRow0 = 0;
-    runtime.fusedCol0 = 0;
-    runtime.fusedRows = cmd.m;
-    runtime.fusedCols = cmd.n;
+    runtime.fusedTileOrdinal = tile;
+    runtime.fusedRow0 = (tile / tile_cols) * cmd.tileM;
+    runtime.fusedCol0 = (tile % tile_cols) * cmd.tileN;
+    runtime.fusedRows = std::min(cmd.tileM, cmd.m - runtime.fusedRow0);
+    runtime.fusedCols = std::min(cmd.tileN, cmd.n - runtime.fusedCol0);
     runtime.fusedLoadResponses = 0;
-    runtime.fusedStoreResponses = 0;
     runtime.fusedAData.assign(static_cast<size_t>(runtime.fusedRows) * cmd.k,
                               0);
     runtime.fusedBData.assign(static_cast<size_t>(cmd.k) * runtime.fusedCols,
@@ -1252,12 +1258,12 @@ MpuUnit::beginFusedMatmulTile(MacroCmdContext &macroCmd,
         beginMemWindow(runtime);
     }
 
-    appendLoadUop(macroCmd, cmd.aBase, runtime.fusedAData.size());
+    appendLoadUop(macroCmd, a_tile_base, runtime.fusedAData.size());
     auto &a_uop = macroCmd.uopQueue.back();
     a_uop.portId = mvinAPortId();
     a_uop.token = makeFusedMatmulToken(FusedMatmulTokenKind::ALoad, 0);
 
-    appendLoadUop(macroCmd, cmd.bBase, runtime.fusedBData.size());
+    appendLoadUop(macroCmd, b_tile_base, runtime.fusedBData.size());
     auto &b_uop = macroCmd.uopQueue.back();
     b_uop.portId = mvinBPortId();
     b_uop.token = makeFusedMatmulToken(FusedMatmulTokenKind::BLoad, 0);
@@ -1293,16 +1299,19 @@ MpuUnit::appendFusedMatmulStores(MacroCmdContext &macroCmd,
                                  MpuMacroRuntime &runtime)
 {
     const ParsedCmd &cmd = runtime.parsed;
+    const Addr c_tile_base = cmd.cBase +
+        static_cast<Addr>(runtime.fusedTileOrdinal) *
+            cmd.tileM * cmd.tileN * sizeof(int32_t);
 
     runtime.fusedStage = FusedMatmulStage::Storing;
-    runtime.fusedStoreResponses = 0;
     std::vector<uint8_t> bytes(
         runtime.fusedCData.size() * sizeof(int32_t), 0);
     std::memcpy(bytes.data(), runtime.fusedCData.data(), bytes.size());
-    appendStoreUop(macroCmd, cmd.cBase, bytes.size(), bytes);
+    appendStoreUop(macroCmd, c_tile_base, bytes.size(), bytes);
     auto &uop = macroCmd.uopQueue.back();
     uop.portId = mvoutPortId();
     uop.token = makeFusedMatmulToken(FusedMatmulTokenKind::CStore, 0);
+    runtime.fusedIssuedStores++;
 }
 
 MpuUnit::MacroCmdKind
@@ -1448,6 +1457,8 @@ MpuUnit::buildUops(MacroCmdContext &macroCmd)
       case CmdKind::FusedMatmul:
         runtime.fusedNextTile = 0;
         runtime.fusedCompletedTiles = 0;
+        runtime.fusedIssuedStores = 0;
+        runtime.fusedStoreResponses = 0;
         beginFusedMatmulTile(macroCmd, runtime);
         break;
       case CmdKind::Compute:
@@ -1606,17 +1617,21 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
             }
 
             runtime.fusedLoadResponses++;
-            if (runtime.fusedLoadResponses == 2 &&
-                macroCmd.outstandingMemUops == 0) {
+            if (runtime.fusedLoadResponses == 2) {
                 runtime.fusedStage = FusedMatmulStage::Computing;
-                lastComputeLatencyCyclesValue =
-                    static_cast<uint64_t>(cmd.k) *
-                    fusedMatmulTileCount(cmd);
+                lastComputeLatencyCyclesValue = static_cast<uint64_t>(cmd.k);
                 lastOutputReadyLatencyCyclesValue =
                     lastComputeLatencyCyclesValue + arrayDim;
+                performFusedMatmulTile(runtime);
                 appendExecUop(macroCmd,
                               static_cast<Tick>(lastComputeLatencyCyclesValue) *
                                   clockPeriod());
+                appendFusedMatmulStores(macroCmd, runtime);
+                runtime.fusedCompletedTiles++;
+                runtime.fusedNextTile++;
+                if (runtime.fusedNextTile < fusedMatmulTileCount(cmd)) {
+                    beginFusedMatmulTile(macroCmd, runtime);
+                }
             }
         } else {
             panic_if(fusedMatmulTokenKind(txn.token) !=
@@ -1624,10 +1639,9 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
                      "%s: unexpected fused matmul store token kind", name());
             stats.totalCBytesOut += txn.size;
             runtime.fusedStoreResponses++;
-            if (runtime.fusedStoreResponses == 1 &&
+            if (runtime.fusedNextTile >= fusedMatmulTileCount(cmd) &&
+                runtime.fusedStoreResponses == runtime.fusedIssuedStores &&
                 macroCmd.outstandingMemUops == 0) {
-                runtime.fusedCompletedTiles++;
-                runtime.fusedNextTile = fusedMatmulTileCount(cmd);
                 runtime.fusedStage = FusedMatmulStage::Done;
                 finalizeMemWindow(runtime);
                 markEpiloguePending(macroCmd);
@@ -1687,17 +1701,14 @@ MpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
         performComputeFused(cmd);
         break;
       case CmdKind::FusedMatmul:
-        panic_if(runtime.fusedStage != FusedMatmulStage::Computing,
-                 "%s: fused matmul exec completed outside compute stage",
-                 name());
-        performFusedMatmulTile(runtime);
-        appendFusedMatmulStores(macroCmd, runtime);
+        panic_if(runtime.fusedStage == FusedMatmulStage::Idle,
+                 "%s: fused matmul exec completed before tile start", name());
         refreshScoreboard();
         DPRINTF(MpuUnit,
                 "fused matmul tile=%u row0=%u col0=%u rows=%u cols=%u\n",
                 runtime.fusedTileOrdinal, runtime.fusedRow0,
                 runtime.fusedCol0, runtime.fusedRows, runtime.fusedCols);
-        return;
+        break;
       case CmdKind::Drain:
         performDrain(cmd);
         break;

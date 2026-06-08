@@ -589,11 +589,13 @@ void
 SpecializedExecutionUnit::issueMemUop(MacroCmdContext &macroCmd,
                                       MicroOpContext uop)
 {
+    uop.profileId = nextUopProfileId++;
     if (uop.kind == MicroOpContext::Kind::Load) {
         macroCmd.issuedLoadUops++;
     } else {
         macroCmd.issuedStoreUops++;
     }
+    recordUopIssue(macroCmd, uop);
 
     const PortID port_id =
         uop.portId == InvalidPortID ? mappedMemPort(macroCmd) : uop.portId;
@@ -605,6 +607,7 @@ SpecializedExecutionUnit::issueMemUop(MacroCmdContext &macroCmd,
     txn.ownerIssueQueueId = macroCmd.targetIssueQueueId;
     txn.portId = port_id;
     txn.token = uop.token;
+    txn.profileId = uop.profileId;
     txn.addr = uop.addr;
     txn.size = uop.size;
 
@@ -622,6 +625,7 @@ void
 SpecializedExecutionUnit::issueExecUop(MacroCmdContext &macroCmd,
                                        MicroOpContext uop)
 {
+    uop.profileId = nextUopProfileId++;
     const uint32_t queue_id = macroCmd.targetIssueQueueId;
     panic_if(activeExecUops.find(queue_id) != activeExecUops.end(),
              "%s: issue queue %u already has an active exec uop",
@@ -630,6 +634,7 @@ SpecializedExecutionUnit::issueExecUop(MacroCmdContext &macroCmd,
     executeCountValue++;
     macroCmd.issuedExecUops++;
     macroCmd.execActiveTicks += std::max<Tick>(1, uop.latency);
+    recordUopIssue(macroCmd, uop);
     activeExecUops.emplace(queue_id, uop);
     auto event = std::make_unique<EventFunctionWrapper>(
         [this, queue_id] { finishExecution(queue_id); },
@@ -657,6 +662,7 @@ SpecializedExecutionUnit::finishExecution(uint32_t issueQueueId)
 
     auto &macro_cmd = macro_it->second;
     macro_cmd.waitingCallback = false;
+    recordUopComplete(macro_cmd, uop.profileId);
     onExecUopComplete(macro_cmd, uop);
 
     updateConcurrentMicroOps();
@@ -790,6 +796,7 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
         completedWriteCount++;
         macro_cmd.completedStoreUops++;
     }
+    recordUopComplete(macro_cmd, txn.profileId);
     onMemUopComplete(macro_cmd, txn, pkt);
 
     delete pkt;
@@ -1024,6 +1031,34 @@ SpecializedExecutionUnit::emitProfileEnd(const MacroCmdContext &macroCmd) const
 }
 
 void
+SpecializedExecutionUnit::recordUopIssue(MacroCmdContext &macroCmd,
+                                         const MicroOpContext &uop)
+{
+    UopProfileEvent event;
+    event.kind = uop.kind;
+    event.profileId = uop.profileId;
+    event.token = uop.token;
+    event.portId = uop.portId;
+    event.addr = uop.addr;
+    event.size = uop.size;
+    event.issueTick = curTick();
+    macroCmd.profileUops.push_back(event);
+}
+
+void
+SpecializedExecutionUnit::recordUopComplete(MacroCmdContext &macroCmd,
+                                            uint64_t profileId)
+{
+    for (auto it = macroCmd.profileUops.rbegin();
+         it != macroCmd.profileUops.rend(); ++it) {
+        if (it->profileId == profileId) {
+            it->completeTick = curTick();
+            return;
+        }
+    }
+}
+
+void
 SpecializedExecutionUnit::appendProfileEventJson(
     std::ostream &os, const char *phase, const MacroCmdContext &macroCmd,
     Tick eventTick) const
@@ -1064,7 +1099,42 @@ SpecializedExecutionUnit::appendProfileEventJson(
     appendCmdWordsJson(os, macroCmd.cmd);
     os << ",\"details\":{";
     appendProfileDetailsJson(macroCmd, os);
-    os << "}}";
+    os << "}";
+    if (std::string(phase) == "end") {
+        os << ",\"uop_events\":";
+        appendUopProfileEventsJson(os, macroCmd);
+    }
+    os << "}";
+}
+
+void
+SpecializedExecutionUnit::appendUopProfileEventsJson(
+    std::ostream &os, const MacroCmdContext &macroCmd) const
+{
+    os << '[';
+    for (size_t i = 0; i < macroCmd.profileUops.size(); ++i) {
+        const auto &uop = macroCmd.profileUops[i];
+        if (i != 0) {
+            os << ',';
+        }
+        os << '{';
+        os << "\"profile_id\":" << uop.profileId;
+        os << ",\"kind\":";
+        appendJsonString(os, uopKindName(uop.kind));
+        os << ",\"token\":" << uop.token;
+        os << ",\"port\":" << uop.portId;
+        os << ",\"addr\":" << static_cast<unsigned long long>(uop.addr);
+        os << ",\"size\":" << uop.size;
+        os << ",\"start_tick\":" << uop.issueTick;
+        os << ",\"end_tick\":" << uop.completeTick;
+        if (uop.completeTick >= uop.issueTick) {
+            os << ",\"duration\":" << (uop.completeTick - uop.issueTick);
+        } else {
+            os << ",\"duration\":0";
+        }
+        os << '}';
+    }
+    os << ']';
 }
 
 void
@@ -1125,6 +1195,23 @@ SpecializedExecutionUnit::macroCmdKindName(MacroCmdKind kind) const
     }
 
     panic("%s: unreachable macro command kind", name());
+}
+
+const char *
+SpecializedExecutionUnit::uopKindName(MicroOpContext::Kind kind) const
+{
+    switch (kind) {
+      case MicroOpContext::Kind::Load:
+        return "load";
+      case MicroOpContext::Kind::Exec:
+        return "exec";
+      case MicroOpContext::Kind::Store:
+        return "store";
+      case MicroOpContext::Kind::SyncWrite:
+        return "sync_write";
+    }
+
+    panic("%s: unreachable uop kind", name());
 }
 
 bool

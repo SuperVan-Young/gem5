@@ -11,6 +11,8 @@ typedef struct
     uint32_t rows;
     uint32_t cols;
     uint32_t row_stride_bytes;
+    uint32_t block_rows;
+    uint32_t block_cols;
 } NpuMpuGemmSpmI8Matrix;
 
 typedef struct
@@ -19,6 +21,8 @@ typedef struct
     uint32_t rows;
     uint32_t cols;
     uint32_t row_stride_bytes;
+    uint32_t block_rows;
+    uint32_t block_cols;
 } NpuMpuGemmSpmI32Matrix;
 
 typedef struct
@@ -45,6 +49,105 @@ static inline uint32_t
 npu_mpu_gemm_i32_row_stride_bytes(uint32_t cols)
 {
     return cols * sizeof(int32_t);
+}
+
+static inline uint32_t
+npu_mpu_gemm_div_ceil_u32(uint32_t value, uint32_t divisor)
+{
+    return (value + divisor - 1U) / divisor;
+}
+
+static inline bool
+npu_mpu_gemm_i8_is_blocked(const NpuMpuGemmSpmI8Matrix *matrix)
+{
+    return matrix->block_rows != 0U && matrix->block_cols != 0U;
+}
+
+static inline bool
+npu_mpu_gemm_i32_is_blocked(const NpuMpuGemmSpmI32Matrix *matrix)
+{
+    return matrix->block_rows != 0U && matrix->block_cols != 0U;
+}
+
+static inline NpuMpuGemmSpmI8Matrix
+npu_mpu_gemm_i8_blocked_matrix(uintptr_t base_addr, uint32_t rows,
+                               uint32_t cols, uint32_t block_rows,
+                               uint32_t block_cols)
+{
+    const NpuMpuGemmSpmI8Matrix matrix = {
+        base_addr,
+        rows,
+        cols,
+        npu_mpu_gemm_i8_row_stride_bytes(block_cols),
+        block_rows,
+        block_cols,
+    };
+    return matrix;
+}
+
+static inline NpuMpuGemmSpmI32Matrix
+npu_mpu_gemm_i32_blocked_matrix(uintptr_t base_addr, uint32_t rows,
+                                uint32_t cols, uint32_t block_rows,
+                                uint32_t block_cols)
+{
+    const NpuMpuGemmSpmI32Matrix matrix = {
+        base_addr,
+        rows,
+        cols,
+        npu_mpu_gemm_i32_row_stride_bytes(block_cols),
+        block_rows,
+        block_cols,
+    };
+    return matrix;
+}
+
+static inline uintptr_t
+npu_mpu_gemm_i8_addr(const NpuMpuGemmSpmI8Matrix *matrix, uint32_t row,
+                     uint32_t col)
+{
+    if (!npu_mpu_gemm_i8_is_blocked(matrix)) {
+        return matrix->base_addr +
+               (uintptr_t)row * matrix->row_stride_bytes + col;
+    }
+
+    const uint32_t blocks_per_row =
+        npu_mpu_gemm_div_ceil_u32(matrix->cols, matrix->block_cols);
+    const uint32_t block_row = row / matrix->block_rows;
+    const uint32_t block_col = col / matrix->block_cols;
+    const uint32_t inner_row = row % matrix->block_rows;
+    const uint32_t inner_col = col % matrix->block_cols;
+    const uintptr_t block_elems =
+        (uintptr_t)matrix->block_rows * matrix->block_cols;
+    const uintptr_t block_index =
+        (uintptr_t)block_row * blocks_per_row + block_col;
+    return matrix->base_addr + block_index * block_elems +
+           (uintptr_t)inner_row * matrix->block_cols + inner_col;
+}
+
+static inline uintptr_t
+npu_mpu_gemm_i32_addr(const NpuMpuGemmSpmI32Matrix *matrix, uint32_t row,
+                      uint32_t col)
+{
+    if (!npu_mpu_gemm_i32_is_blocked(matrix)) {
+        return matrix->base_addr +
+               (uintptr_t)row * matrix->row_stride_bytes +
+               (uintptr_t)col * sizeof(int32_t);
+    }
+
+    const uint32_t blocks_per_row =
+        npu_mpu_gemm_div_ceil_u32(matrix->cols, matrix->block_cols);
+    const uint32_t block_row = row / matrix->block_rows;
+    const uint32_t block_col = col / matrix->block_cols;
+    const uint32_t inner_row = row % matrix->block_rows;
+    const uint32_t inner_col = col % matrix->block_cols;
+    const uintptr_t block_elems =
+        (uintptr_t)matrix->block_rows * matrix->block_cols;
+    const uintptr_t block_index =
+        (uintptr_t)block_row * blocks_per_row + block_col;
+    return matrix->base_addr +
+           (block_index * block_elems +
+            (uintptr_t)inner_row * matrix->block_cols + inner_col) *
+               sizeof(int32_t);
 }
 
 static inline int
@@ -82,19 +185,46 @@ npu_mpu_gemm_validate_problem(const NpuMpuGemmSpmI8Matrix *a_matrix,
         return -1;
     }
 
-    if (a_matrix->row_stride_bytes !=
-        npu_mpu_gemm_i8_row_stride_bytes(a_matrix->cols)) {
+    if (!npu_mpu_gemm_i8_is_blocked(a_matrix) &&
+        a_matrix->row_stride_bytes !=
+            npu_mpu_gemm_i8_row_stride_bytes(a_matrix->cols)) {
         printf("MPU_GEMM_VALIDATE_FAIL=a_not_dense_row_major\n");
         return -1;
     }
-    if (b_matrix->row_stride_bytes !=
-        npu_mpu_gemm_i8_row_stride_bytes(b_matrix->cols)) {
+    if (!npu_mpu_gemm_i8_is_blocked(b_matrix) &&
+        b_matrix->row_stride_bytes !=
+            npu_mpu_gemm_i8_row_stride_bytes(b_matrix->cols)) {
         printf("MPU_GEMM_VALIDATE_FAIL=b_not_dense_row_major\n");
         return -1;
     }
-    if (c_matrix->row_stride_bytes !=
-        npu_mpu_gemm_i32_row_stride_bytes(c_matrix->cols)) {
+    if (!npu_mpu_gemm_i32_is_blocked(c_matrix) &&
+        c_matrix->row_stride_bytes !=
+            npu_mpu_gemm_i32_row_stride_bytes(c_matrix->cols)) {
         printf("MPU_GEMM_VALIDATE_FAIL=c_not_dense_row_major\n");
+        return -1;
+    }
+    if (npu_mpu_gemm_i8_is_blocked(a_matrix) &&
+        (a_matrix->block_rows != tile->tile_m ||
+         a_matrix->block_cols != tile->tile_k ||
+         a_matrix->row_stride_bytes !=
+             npu_mpu_gemm_i8_row_stride_bytes(tile->tile_k))) {
+        printf("MPU_GEMM_VALIDATE_FAIL=a_block_layout_mismatch\n");
+        return -1;
+    }
+    if (npu_mpu_gemm_i8_is_blocked(b_matrix) &&
+        (b_matrix->block_rows != tile->tile_k ||
+         b_matrix->block_cols != tile->tile_n ||
+         b_matrix->row_stride_bytes !=
+             npu_mpu_gemm_i8_row_stride_bytes(tile->tile_n))) {
+        printf("MPU_GEMM_VALIDATE_FAIL=b_block_layout_mismatch\n");
+        return -1;
+    }
+    if (npu_mpu_gemm_i32_is_blocked(c_matrix) &&
+        (c_matrix->block_rows != tile->tile_m ||
+         c_matrix->block_cols != tile->tile_n ||
+         c_matrix->row_stride_bytes !=
+             npu_mpu_gemm_i32_row_stride_bytes(tile->tile_n))) {
+        printf("MPU_GEMM_VALIDATE_FAIL=c_block_layout_mismatch\n");
         return -1;
     }
 
@@ -129,23 +259,20 @@ npu_mpu_gemm_tile_cols(const NpuMpuGemmProblemShape *problem,
 static inline uintptr_t
 npu_mpu_gemm_a_tile_addr(const NpuMpuGemmSpmI8Matrix *a_matrix, uint32_t row0)
 {
-    return a_matrix->base_addr +
-           (uintptr_t)row0 * (uintptr_t)a_matrix->row_stride_bytes;
+    return npu_mpu_gemm_i8_addr(a_matrix, row0, 0U);
 }
 
 static inline uintptr_t
 npu_mpu_gemm_b_tile_addr(const NpuMpuGemmSpmI8Matrix *b_matrix, uint32_t col0)
 {
-    return b_matrix->base_addr + (uintptr_t)col0;
+    return npu_mpu_gemm_i8_addr(b_matrix, 0U, col0);
 }
 
 static inline uintptr_t
 npu_mpu_gemm_c_tile_addr(const NpuMpuGemmSpmI32Matrix *c_matrix, uint32_t row0,
                          uint32_t col0)
 {
-    return c_matrix->base_addr +
-           (uintptr_t)row0 * (uintptr_t)c_matrix->row_stride_bytes +
-           (uintptr_t)col0 * sizeof(int32_t);
+    return npu_mpu_gemm_i32_addr(c_matrix, row0, col0);
 }
 
 static inline void
@@ -153,10 +280,10 @@ npu_mpu_gemm_store_i8_matrix_to_spm(const int8_t *src,
                                     const NpuMpuGemmSpmI8Matrix *dst)
 {
     for (uint32_t row = 0U; row < dst->rows; ++row) {
-        volatile uint8_t *dst_row = (volatile uint8_t *)(uintptr_t)(
-            dst->base_addr + (uintptr_t)row * dst->row_stride_bytes);
         for (uint32_t col = 0U; col < dst->cols; ++col) {
-            dst_row[col] = (uint8_t)src[row * dst->cols + col];
+            volatile uint8_t *dst_elem = (volatile uint8_t *)(uintptr_t)
+                npu_mpu_gemm_i8_addr(dst, row, col);
+            *dst_elem = (uint8_t)src[row * dst->cols + col];
         }
     }
 }
@@ -166,10 +293,10 @@ npu_mpu_gemm_fill_i32_matrix_in_spm(const NpuMpuGemmSpmI32Matrix *dst,
                                     int32_t value)
 {
     for (uint32_t row = 0U; row < dst->rows; ++row) {
-        volatile int32_t *dst_row = (volatile int32_t *)(uintptr_t)(
-            dst->base_addr + (uintptr_t)row * dst->row_stride_bytes);
         for (uint32_t col = 0U; col < dst->cols; ++col) {
-            dst_row[col] = value;
+            volatile int32_t *dst_elem = (volatile int32_t *)(uintptr_t)
+                npu_mpu_gemm_i32_addr(dst, row, col);
+            *dst_elem = value;
         }
     }
 }
@@ -179,12 +306,11 @@ npu_mpu_gemm_load_i32_matrix_from_spm(const NpuMpuGemmSpmI32Matrix *src,
                                       int32_t *dst)
 {
     for (uint32_t row = 0U; row < src->rows; ++row) {
-        const uintptr_t row_addr =
-            src->base_addr + (uintptr_t)row * src->row_stride_bytes;
-        const volatile int32_t *src_row =
-            (const volatile int32_t *)row_addr;
         for (uint32_t col = 0U; col < src->cols; ++col) {
-            dst[row * src->cols + col] = src_row[col];
+            const volatile int32_t *src_elem =
+                (const volatile int32_t *)(uintptr_t)
+                    npu_mpu_gemm_i32_addr(src, row, col);
+            dst[row * src->cols + col] = *src_elem;
         }
     }
 }

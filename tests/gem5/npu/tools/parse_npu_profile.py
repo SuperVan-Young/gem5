@@ -89,7 +89,7 @@ def _pair_records(records):
                 f"{key!r}: {begin['tick']} -> {record['tick']}"
             )
 
-        paired.append(
+        paired_event = (
             {
                 "axis": begin["seu_name"],
                 "axis_display": _axis_display(begin),
@@ -109,6 +109,44 @@ def _pair_records(records):
                 "end": record,
             }
         )
+        paired.append(paired_event)
+
+        for uop_index, uop in enumerate(record.get("uop_events", [])):
+            start_tick = int(uop.get("start_tick", record["tick"]))
+            end_tick = int(uop.get("end_tick", start_tick))
+            uop_kind = uop.get("kind", "uop")
+            uop_axis = f"{begin['seu_name']}.uops"
+            paired.append(
+                {
+                    "axis": uop_axis,
+                    "axis_display": f"{_axis_display(begin)} uops",
+                    "title": (
+                        f"{_axis_display(begin)} macro "
+                        f"{begin['macro_id']} {uop_kind}[{uop_index}]"
+                    ),
+                    "seu_name": begin["seu_name"],
+                    "seu_type": f"{begin['seu_type']}.uop",
+                    "device_id": begin["device_id"],
+                    "macro_id": begin["macro_id"],
+                    "issue_queue": begin["issue_queue"],
+                    "macro_kind": uop_kind,
+                    "start_tick": start_tick,
+                    "end_tick": end_tick,
+                    "duration": max(0, end_tick - start_tick),
+                    "raw_words": [],
+                    "details": {
+                        "sync_indicator": begin["sync_indicator"],
+                        "macro_opcode": begin["opcode"],
+                        "profile_id": uop.get("profile_id", 0),
+                        "kind": uop_kind,
+                        "token": uop.get("token", 0),
+                        "port": uop.get("port", -1),
+                        "addr": uop.get("addr", 0),
+                        "size": uop.get("size", 0),
+                    },
+                    "uop": uop,
+                }
+            )
 
     if active:
         first_key = next(iter(active))

@@ -216,6 +216,7 @@ class MpuUnit : public SpecializedExecutionUnit
         uint32_t fusedRows = 0;
         uint32_t fusedCols = 0;
         uint32_t fusedLoadResponses = 0;
+        uint32_t fusedIssuedStores = 0;
         uint32_t fusedStoreResponses = 0;
         std::vector<int8_t> fusedAData;
         std::vector<int8_t> fusedBData;
