@@ -58,6 +58,7 @@ constexpr size_t ReservedWord14 = 14;
 constexpr size_t ReservedWord15 = 15;
 constexpr uint32_t ExecIssueQueueId = 0;
 constexpr uint32_t PrefetchIssueQueueId = 1;
+constexpr uint32_t StoreIssueQueueId = 2;
 constexpr uint32_t MpuFlagAccumulate = 0x00000001U;
 constexpr uint32_t MpuFlagLastKBlock = 0x00000002U;
 constexpr uint32_t MpuFlagClearOutput = 0x00000004U;
@@ -1100,8 +1101,14 @@ MpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
                             MacroCmdKind kind) const
 {
     (void)kind;
-    return parseCommand(cmd).kind == CmdKind::Mvin ?
-        PrefetchIssueQueueId : ExecIssueQueueId;
+    const CmdKind cmd_kind = parseCommand(cmd).kind;
+    if (cmd_kind == CmdKind::Mvin) {
+        return PrefetchIssueQueueId;
+    }
+    if (cmd_kind == CmdKind::Mvout) {
+        return StoreIssueQueueId;
+    }
+    return ExecIssueQueueId;
 }
 
 std::vector<SpecializedExecutionUnit::IssueQueueState>
@@ -1110,7 +1117,27 @@ MpuUnit::buildIssueQueues() const
     return {
         {ExecIssueQueueId, IssueQueueKind::Exec, {}, {}, PortID(0)},
         {PrefetchIssueQueueId, IssueQueueKind::Mem, {}, {}, mvinPortId()},
+        {StoreIssueQueueId, IssueQueueKind::Mem, {}, {}, mvoutPortId()},
     };
+}
+
+bool
+MpuUnit::canActivateMacroCmd(const MacroCmdContext &macroCmd) const
+{
+    const ParsedCmd cmd = parseCommand(macroCmd.cmd);
+    if (cmd.kind == CmdKind::Mvout) {
+        const CBufferSlot &slot = selectedCBuffer(cmd.bufferIndex);
+        return slot.state == BufferState::Full &&
+               slot.m == cmd.m &&
+               slot.n == cmd.n;
+    }
+
+    if (cmd.kind == CmdKind::ComputeFused &&
+        mpuFlagSet(cmd.flags, MpuFlagDrainToC)) {
+        return selectedCBuffer(cmd.bufferIndex).state == BufferState::Empty;
+    }
+
+    return true;
 }
 
 void
@@ -1172,10 +1199,14 @@ MpuUnit::buildUops(MacroCmdContext &macroCmd)
 
     switch (cmd.kind) {
       case CmdKind::Mvin:
-        appendMvinRowUop(macroCmd, runtime);
+        while (runtime.nextMemRow < expectedRows(cmd)) {
+            appendMvinRowUop(macroCmd, runtime);
+        }
         break;
       case CmdKind::Mvout:
-        appendMvoutRowUop(macroCmd, runtime);
+        while (runtime.nextMemRow < cmd.m) {
+            appendMvoutRowUop(macroCmd, runtime);
+        }
         break;
       case CmdKind::Load:
         appendLoadProgressUop(macroCmd, runtime);
@@ -1283,9 +1314,8 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
                     row, static_cast<unsigned long long>(txn.addr), txn.size,
                     static_cast<unsigned>(cmd.bufferKind), cmd.bufferIndex);
 
-            if (runtime.nextMemRow < expectedRows(cmd)) {
-                appendMvinRowUop(macroCmd, runtime);
-            } else {
+            if (runtime.nextMemRow >= expectedRows(cmd) &&
+                macroCmd.outstandingMemUops == 0) {
                 transitionABufferToFull(slot, cmd);
                 finalizeMemWindow(runtime);
                 refreshScoreboard();
@@ -1306,9 +1336,8 @@ MpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
                     static_cast<unsigned long long>(txn.token),
                     static_cast<unsigned long long>(txn.addr), txn.size,
                     cmd.bufferIndex);
-            if (runtime.nextMemRow < cmd.m) {
-                appendMvoutRowUop(macroCmd, runtime);
-            } else {
+            if (runtime.nextMemRow >= cmd.m &&
+                macroCmd.outstandingMemUops == 0) {
                 finalizeMemWindow(runtime);
                 markEpiloguePending(macroCmd);
             }

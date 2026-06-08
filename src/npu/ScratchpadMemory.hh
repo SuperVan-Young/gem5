@@ -39,6 +39,7 @@
 #define __NPU_SCRATCHPAD_MEMORY_HH__
 
 #include <list>
+#include <vector>
 
 #include "mem/abstract_mem.hh"
 #include "mem/port.hh"
@@ -71,8 +72,29 @@ class ScratchpadMemory : public memory::AbstractMemory
       public:
         const Tick tick;
         const PacketPtr pkt;
+        const uint64_t seq;
 
-        DeferredPacket(PacketPtr _pkt, Tick _tick) : tick(_tick), pkt(_pkt)
+        DeferredPacket(PacketPtr _pkt, Tick _tick, uint64_t _seq)
+            : tick(_tick), pkt(_pkt), seq(_seq)
+        {}
+    };
+
+    class DeferredAccess
+    {
+      public:
+        const Tick tick;
+        const Tick responseTick;
+        const PacketPtr pkt;
+        const uint64_t seq;
+        const bool needsResponse;
+
+        DeferredAccess(PacketPtr _pkt, Tick _tick, Tick _response_tick,
+                       uint64_t _seq, bool _needs_response)
+            : tick(_tick),
+              responseTick(_response_tick),
+              pkt(_pkt),
+              seq(_seq),
+              needsResponse(_needs_response)
         {}
     };
 
@@ -114,6 +136,26 @@ class ScratchpadMemory : public memory::AbstractMemory
      */
     const double bandwidth;
 
+    const unsigned pipelineDepth;
+
+    const unsigned pipelinePorts;
+
+    const uint32_t pipelinePortStride;
+
+    unsigned inflightRequests;
+
+    std::vector<Tick> nextServiceTick;
+
+    uint64_t nextSeq;
+
+    uint64_t acceptedRequestsValue;
+
+    uint64_t pipelineFullRetriesValue;
+
+    uint64_t maxInflightRequestsValue;
+
+    std::list<DeferredAccess> accessQueue;
+
     /**
      * Internal packet queue for timing mode.
      * Responses are queued here until ready to send.
@@ -124,11 +166,6 @@ class ScratchpadMemory : public memory::AbstractMemory
      * Track if the SPM is busy processing a request.
      * Used for bandwidth limiting.
      */
-    bool isBusy;
-
-    /**
-     * Flag to retry an outstanding request that arrived while busy.
-     */
     bool retryReq;
 
     /**
@@ -136,15 +173,19 @@ class ScratchpadMemory : public memory::AbstractMemory
      */
     bool retryResp;
 
-    /**
-     * Release the SPM after being busy and send retry if needed.
-     */
-    void release();
+    void processAccess();
 
-    /**
-     * Event for releasing the SPM after bandwidth-limited access.
-     */
-    EventFunctionWrapper releaseEvent;
+    void completeRequest();
+
+    void trySendRetryReq();
+
+    void scheduleAccess();
+
+    void scheduleDequeue();
+
+    unsigned pipelinePort(PacketPtr pkt) const;
+
+    EventFunctionWrapper accessEvent;
 
     /**
      * Dequeue a packet from the internal queue and send as response.
@@ -170,6 +211,9 @@ class ScratchpadMemory : public memory::AbstractMemory
     Port &getPort(const std::string &if_name,
                   PortID idx=InvalidPortID) override;
     void init() override;
+
+    uint64_t maxInflightRequests() const { return maxInflightRequestsValue; }
+    uint64_t pipelineFullRetries() const { return pipelineFullRetriesValue; }
 
   protected:
     Tick recvAtomic(PacketPtr pkt);

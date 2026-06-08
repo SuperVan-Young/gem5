@@ -79,7 +79,8 @@ appendLaunchFieldsJson(std::ostream &os,
     os << "\"device_type\":" << static_cast<uint32_t>(fields.deviceType);
     os << ",\"device_id\":" << static_cast<uint32_t>(fields.deviceId);
     os << ",\"opcode\":" << static_cast<uint32_t>(fields.opCode);
-    os << ",\"sync_indicator\":" << static_cast<uint32_t>(fields.syncIndicator);
+    os << ",\"sync_indicator\":"
+       << static_cast<uint32_t>(fields.syncIndicator);
 }
 
 void
@@ -204,6 +205,7 @@ SpecializedExecutionUnit::MemSidePort::recvReqRetry()
     PacketPtr pkt = blockedPacket;
     blockedPacket = nullptr;
     sendPacket(pkt);
+    owner->trySendCompletionSyncWords();
 }
 
 SpecializedExecutionUnit::SpecializedExecutionUnit(
@@ -214,11 +216,14 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
       cmdQueueDepth(params.cmd_queue_depth),
       baseAddr(params.base_addr),
       syncEnqueueOnDataWrite(params.sync_enqueue_on_data_write),
+      memPortOutstandingLimit(params.mem_port_outstanding_limit),
       debugProcessLatency(params.debug_process_latency),
       issueEvent([this] { issueOneCommand(); }, name() + ".issueEvent")
 {
     panic_if(params.num_mem_side_ports == 0,
              "SpecializedExecutionUnit requires at least one mem_side port");
+    panic_if(memPortOutstandingLimit == 0,
+             "%s: mem_port_outstanding_limit must be non-zero", name());
 
     stagingBuffer.bytes.resize(macroCmdBytes, 0);
     memSidePorts.reserve(params.num_mem_side_ports);
@@ -228,14 +233,17 @@ SpecializedExecutionUnit::SpecializedExecutionUnit(
         port->portId = i;
         memSidePorts.push_back(std::move(port));
     }
+    memPortOutstanding.resize(params.num_mem_side_ports, 0);
+    maxMemPortOutstandingValues.resize(params.num_mem_side_ports, 0);
     issueQueues = buildIssueQueues();
 
     DPRINTF(SpecializedExecutionUnit,
             "Created SEU: base_addr=%#x cmd_bytes=%u queue_depth=%u "
-            "mem_ports=%llu issue_queues=%llu\n",
+            "mem_ports=%llu issue_queues=%llu outstanding_limit=%u\n",
             baseAddr, macroCmdBytes, cmdQueueDepth,
             static_cast<unsigned long long>(memSidePorts.size()),
-            static_cast<unsigned long long>(issueQueues.size()));
+            static_cast<unsigned long long>(issueQueues.size()),
+            memPortOutstandingLimit);
 }
 
 SpecializedExecutionUnit::~SpecializedExecutionUnit()
@@ -525,14 +533,33 @@ SpecializedExecutionUnit::issueReadyUops()
         }
         auto &macro_cmd = it->second;
 
-        if (macro_cmd.phase != Phase::Active ||
-            macro_cmd.waitingCallback || macro_cmd.uopQueue.empty()) {
+        if (macro_cmd.phase != Phase::Active || macro_cmd.uopQueue.empty()) {
             continue;
         }
 
-        MicroOpContext uop = std::move(macro_cmd.uopQueue.front());
-        macro_cmd.uopQueue.pop_front();
-        issueOneUop(macro_cmd, std::move(uop));
+        while (macro_cmd.phase == Phase::Active &&
+               !macro_cmd.uopQueue.empty()) {
+            const auto &front = macro_cmd.uopQueue.front();
+            if (front.kind == MicroOpContext::Kind::Load ||
+                front.kind == MicroOpContext::Kind::Store) {
+                if (!canIssueMemUop(front, macro_cmd)) {
+                    break;
+                }
+            } else if (macro_cmd.waitingCallback ||
+                       macro_cmd.outstandingMemUops != 0) {
+                break;
+            }
+
+            MicroOpContext uop = std::move(macro_cmd.uopQueue.front());
+            macro_cmd.uopQueue.pop_front();
+            const auto kind = uop.kind;
+            issueOneUop(macro_cmd, std::move(uop));
+
+            if (kind != MicroOpContext::Kind::Load &&
+                kind != MicroOpContext::Kind::Store) {
+                break;
+            }
+        }
     }
 }
 
@@ -544,13 +571,13 @@ SpecializedExecutionUnit::issueOneUop(MacroCmdContext &macroCmd,
              "%s: issueOneUop requires Active phase for macro %llu",
              name(), static_cast<unsigned long long>(macroCmd.macroCmdId));
 
-    macroCmd.waitingCallback = true;
     switch (uop.kind) {
       case MicroOpContext::Kind::Load:
       case MicroOpContext::Kind::Store:
         issueMemUop(macroCmd, std::move(uop));
         break;
       case MicroOpContext::Kind::Exec:
+        macroCmd.waitingCallback = true;
         issueExecUop(macroCmd, std::move(uop));
         break;
       case MicroOpContext::Kind::SyncWrite:
@@ -581,6 +608,12 @@ SpecializedExecutionUnit::issueMemUop(MacroCmdContext &macroCmd,
     txn.addr = uop.addr;
     txn.size = uop.size;
 
+    ++macroCmd.outstandingMemUops;
+    ++memPortOutstanding[port_id];
+    maxMemPortOutstandingValues[port_id] =
+        std::max<uint64_t>(maxMemPortOutstandingValues[port_id],
+                           memPortOutstanding[port_id]);
+
     sendTrackedPacket(txn, uop.kind == MicroOpContext::Kind::Store ?
         &uop.data : nullptr);
 }
@@ -596,6 +629,7 @@ SpecializedExecutionUnit::issueExecUop(MacroCmdContext &macroCmd,
 
     executeCountValue++;
     macroCmd.issuedExecUops++;
+    macroCmd.execActiveTicks += std::max<Tick>(1, uop.latency);
     activeExecUops.emplace(queue_id, uop);
     auto event = std::make_unique<EventFunctionWrapper>(
         [this, queue_id] { finishExecution(queue_id); },
@@ -727,6 +761,7 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
     if (txn.kind == MemTxnContext::Kind::SyncWrite) {
         delete pkt;
         updateConcurrentMicroOps();
+        trySendCompletionSyncWords();
         tryScheduleIssue();
         return true;
     }
@@ -737,7 +772,17 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
              name(), static_cast<unsigned long long>(txn.macroCmdId));
 
     auto &macro_cmd = macro_it->second;
-    macro_cmd.waitingCallback = false;
+    panic_if(macro_cmd.outstandingMemUops == 0,
+             "%s: macro %llu memory response underflow",
+             name(), static_cast<unsigned long long>(txn.macroCmdId));
+    panic_if(txn.portId < 0 ||
+             static_cast<size_t>(txn.portId) >= memPortOutstanding.size(),
+             "%s: invalid memory response port %d", name(), txn.portId);
+    panic_if(memPortOutstanding[txn.portId] == 0,
+             "%s: memory port %d outstanding underflow", name(), txn.portId);
+
+    --macro_cmd.outstandingMemUops;
+    --memPortOutstanding[txn.portId];
     if (txn.kind == MemTxnContext::Kind::Load) {
         completedReadCount++;
         macro_cmd.completedLoadUops++;
@@ -749,6 +794,7 @@ SpecializedExecutionUnit::handleMemResponse(PacketPtr pkt)
 
     delete pkt;
     updateConcurrentMicroOps();
+    trySendCompletionSyncWords();
     tryScheduleIssue();
     return true;
 }
@@ -777,6 +823,19 @@ SpecializedExecutionUnit::sendTrackedPacket(const MemTxnContext &txn,
 
     getMemSidePort(txn.portId).sendPacket(pkt);
     updateConcurrentMicroOps();
+}
+
+bool
+SpecializedExecutionUnit::canIssueMemUop(
+    const MicroOpContext &uop, const MacroCmdContext &macroCmd) const
+{
+    const PortID port_id =
+        uop.portId == InvalidPortID ? mappedMemPort(macroCmd) : uop.portId;
+    panic_if(port_id < 0 ||
+             static_cast<size_t>(port_id) >= memPortOutstanding.size(),
+             "%s: invalid mem port %d", name(), port_id);
+    return memPortOutstanding[port_id] < memPortOutstandingLimit &&
+           !getMemSidePort(port_id).isBlocked();
 }
 
 void
@@ -996,6 +1055,7 @@ SpecializedExecutionUnit::appendProfileEventJson(
     os << ",\"issued_exec_uops\":" << macroCmd.issuedExecUops;
     os << ",\"completed_load_uops\":" << macroCmd.completedLoadUops;
     os << ",\"completed_store_uops\":" << macroCmd.completedStoreUops;
+    os << ",\"exec_active_ticks\":" << macroCmd.execActiveTicks;
     if (macroCmd.profileBeginTick != 0 &&
         eventTick >= macroCmd.profileBeginTick) {
         os << ",\"duration\":" << (eventTick - macroCmd.profileBeginTick);
@@ -1086,19 +1146,42 @@ SpecializedExecutionUnit::buildCompletionSyncWord(
 void
 SpecializedExecutionUnit::sendCompletionSyncWord(uint32_t word)
 {
-    MemTxnContext txn;
-    txn.kind = MemTxnContext::Kind::SyncWrite;
-    txn.macroCmdId = 0;
-    txn.ownerIssueQueueId = 0;
-    txn.portId = 0;
-    txn.token = nextMicroOpToken++;
-    txn.addr = SyncIndicatorBase;
-    txn.size = sizeof(uint32_t);
-    const auto data = packWord(word);
+    pendingCompletionSyncWords.push_back(word);
+    trySendCompletionSyncWords();
+}
 
-    DPRINTF(SpecializedExecutionUnit,
-            "completion sync write word=%#x\n", word);
-    sendTrackedPacket(txn, &data);
+void
+SpecializedExecutionUnit::trySendCompletionSyncWords()
+{
+    while (!pendingCompletionSyncWords.empty()) {
+        PortID port_id = InvalidPortID;
+        for (PortID i = 0; i < static_cast<PortID>(memSidePorts.size()); ++i) {
+            if (!getMemSidePort(i).isBlocked()) {
+                port_id = i;
+                break;
+            }
+        }
+        if (port_id == InvalidPortID) {
+            return;
+        }
+
+        const uint32_t word = pendingCompletionSyncWords.front();
+        pendingCompletionSyncWords.pop_front();
+
+        DPRINTF(SpecializedExecutionUnit,
+                "completion sync write word=%#x port=%d\n", word, port_id);
+
+        const auto data = packWord(word);
+        MemTxnContext txn;
+        txn.kind = MemTxnContext::Kind::SyncWrite;
+        txn.macroCmdId = 0;
+        txn.ownerIssueQueueId = 0;
+        txn.portId = port_id;
+        txn.token = nextMicroOpToken++;
+        txn.addr = SyncIndicatorBase;
+        txn.size = sizeof(uint32_t);
+        sendTrackedPacket(txn, &data);
+    }
 }
 
 void
@@ -1152,6 +1235,10 @@ SpecializedExecutionUnit::appendExecUop(MacroCmdContext &macroCmd,
 void
 SpecializedExecutionUnit::markEpiloguePending(MacroCmdContext &macroCmd)
 {
+    if (macroCmd.waitingCallback || macroCmd.outstandingMemUops != 0) {
+        return;
+    }
+
     if (macroCmd.phase == Phase::Done ||
         macroCmd.phase == Phase::Epilogue ||
         macroCmd.phase == Phase::EpiloguePending) {
@@ -1346,6 +1433,16 @@ uint64_t
 SpecializedExecutionUnit::maxActiveMicroOps() const
 {
     return maxConcurrentMicroOpsValue;
+}
+
+uint64_t
+SpecializedExecutionUnit::maxMemPortOutstanding() const
+{
+    uint64_t max_value = 0;
+    for (const auto value : maxMemPortOutstandingValues) {
+        max_value = std::max(max_value, value);
+    }
+    return max_value;
 }
 
 } // namespace gem5

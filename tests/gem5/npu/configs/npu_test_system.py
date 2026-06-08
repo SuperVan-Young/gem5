@@ -285,6 +285,9 @@ class NPUTestSystemBuilder:
         size=DEFAULT_SPM_SIZE,
         latency="10ns",
         bandwidth="100GiB/s",
+        pipeline_depth=1024,
+        pipeline_ports=1,
+        pipeline_port_stride=64,
         attr_name="spm",
     ):
         self._require_system()
@@ -293,6 +296,9 @@ class NPUTestSystemBuilder:
             range=AddrRange(base_addr, size=size),
             latency=latency,
             bandwidth=bandwidth,
+            pipeline_depth=pipeline_depth,
+            pipeline_ports=pipeline_ports,
+            pipeline_port_stride=pipeline_port_stride,
         )
         spm.port = self.system.membus.mem_side_ports
         setattr(self.system, attr_name, spm)
@@ -443,6 +449,7 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         num_mem_side_ports=1,
+        mem_port_outstanding_limit=1024,
         base_addr=None,
         debug_process_latency="50ns",
         sync_enqueue_on_data_write=True,
@@ -458,6 +465,7 @@ class NPUTestSystemBuilder:
             macro_cmd_bytes=macro_cmd_bytes,
             cmd_queue_depth=cmd_queue_depth,
             num_mem_side_ports=num_mem_side_ports,
+            mem_port_outstanding_limit=mem_port_outstanding_limit,
             debug_process_latency=debug_process_latency,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
         )
@@ -477,6 +485,7 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         num_mem_side_ports=1,
+        mem_port_outstanding_limit=1024,
         num_input_ports=None,
         num_output_ports=None,
         input_buffer_count=2,
@@ -511,6 +520,7 @@ class NPUTestSystemBuilder:
             "macro_cmd_bytes": macro_cmd_bytes,
             "cmd_queue_depth": cmd_queue_depth,
             "num_mem_side_ports": num_mem_side_ports,
+            "mem_port_outstanding_limit": mem_port_outstanding_limit,
             "num_input_ports": (
                 max(2, num_mem_side_ports)
                 if num_input_ports is None
@@ -701,6 +711,7 @@ class NPUTestSystemBuilder:
         macro_cmd_bytes=DEFAULT_MACRO_CMD_BYTES,
         cmd_queue_depth=DEFAULT_CMD_QUEUE_DEPTH,
         num_mem_side_ports=2,
+        mem_port_outstanding_limit=1024,
         base_addr=None,
         device_id=0,
         array_dim=8,
@@ -731,6 +742,7 @@ class NPUTestSystemBuilder:
             macro_cmd_bytes=macro_cmd_bytes,
             cmd_queue_depth=cmd_queue_depth,
             num_mem_side_ports=num_mem_side_ports,
+            mem_port_outstanding_limit=mem_port_outstanding_limit,
             sync_enqueue_on_data_write=sync_enqueue_on_data_write,
             array_dim=array_dim,
             a_buffer_capacity_bytes=a_buffer_capacity_bytes,

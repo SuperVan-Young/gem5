@@ -28,6 +28,8 @@
 
 #include "npu/ScratchpadMemory.hh"
 
+#include <algorithm>
+
 #include "base/trace.hh"
 #include "debug/Drain.hh"
 #include "debug/ScratchpadMemory.hh"
@@ -43,14 +45,29 @@ ScratchpadMemory::ScratchpadMemory(const ScratchpadMemoryParams &p) :
     port(name() + ".port", *this),
     latency(p.latency),
     bandwidth(p.bandwidth),
-    isBusy(false),
+    pipelineDepth(p.pipeline_depth),
+    pipelinePorts(p.pipeline_ports),
+    pipelinePortStride(p.pipeline_port_stride),
+    inflightRequests(0),
+    nextServiceTick(p.pipeline_ports, 0),
+    nextSeq(0),
+    acceptedRequestsValue(0),
+    pipelineFullRetriesValue(0),
+    maxInflightRequestsValue(0),
     retryReq(false),
     retryResp(false),
-    releaseEvent([this]{ release(); }, name()),
+    accessEvent([this]{ processAccess(); }, name() + ".accessEvent"),
     dequeueEvent([this]{ dequeue(); }, name())
 {
     DPRINTF(ScratchpadMemory, "Created ScratchpadMemory with latency=%llu, "
-            "bandwidth=%f ticks/byte\n", latency, bandwidth);
+            "bandwidth=%f ticks/byte pipeline_depth=%u\n", latency,
+            bandwidth, pipelineDepth);
+    panic_if(pipelineDepth == 0, "%s: pipeline_depth must be non-zero",
+             name());
+    panic_if(pipelinePorts == 0, "%s: pipeline_ports must be non-zero",
+             name());
+    panic_if(pipelinePortStride == 0,
+             "%s: pipeline_port_stride must be non-zero", name());
 }
 
 void
@@ -95,8 +112,14 @@ ScratchpadMemory::recvFunctional(PacketPtr pkt)
     // Perform functional access to the backing store
     functionalAccess(pkt);
 
-    // Also check packets in our timing queue
+    // Also check packets in our timing queues.
     bool done = false;
+    auto a = accessQueue.begin();
+    while (!done && a != accessQueue.end()) {
+        done = pkt->trySatisfyFunctional(a->pkt);
+        ++a;
+    }
+
     auto p = packetQueue.begin();
     while (!done && p != packetQueue.end()) {
         done = pkt->trySatisfyFunctional(p->pkt);
@@ -130,11 +153,12 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
         return false;
     }
 
-    // If busy, remember to retry
-    if (isBusy) {
-        DPRINTF(ScratchpadMemory, "SPM busy, scheduling retry: addr=%#llx\n",
-                pkt->getAddr());
+    if (inflightRequests >= pipelineDepth) {
+        DPRINTF(ScratchpadMemory, "SPM pipeline full, scheduling retry: "
+                "addr=%#llx inflight=%u depth=%u\n", pkt->getAddr(),
+                inflightRequests, pipelineDepth);
         retryReq = true;
+        ++pipelineFullRetriesValue;
         return false;
     }
 
@@ -142,66 +166,138 @@ ScratchpadMemory::recvTimingReq(PacketPtr pkt)
     Tick receive_delay = pkt->headerDelay + pkt->payloadDelay;
     pkt->headerDelay = pkt->payloadDelay = 0;
 
-    // Calculate bandwidth-limited duration
-    Tick duration = pkt->getSize() * bandwidth;
+    const Tick duration = pkt->getSize() * bandwidth;
+    const unsigned pipe_port = pipelinePort(pkt);
+    Tick service_tick =
+        std::max(curTick() + receive_delay, nextServiceTick[pipe_port]);
+    nextServiceTick[pipe_port] = service_tick + duration;
 
-    // Only schedule release event if there's actual bandwidth constraint
-    if (duration != 0) {
-        schedule(releaseEvent, curTick() + duration);
-        isBusy = true;
+    const bool needs_response = pkt->needsResponse();
+    Tick response_tick = service_tick + latency;
+    const uint64_t seq = nextSeq++;
+
+    ++inflightRequests;
+    ++acceptedRequestsValue;
+    maxInflightRequestsValue =
+        std::max<uint64_t>(maxInflightRequestsValue, inflightRequests);
+
+    auto access_it = accessQueue.begin();
+    while (access_it != accessQueue.end() &&
+           (access_it->tick < service_tick ||
+            (access_it->tick == service_tick && access_it->seq < seq))) {
+        ++access_it;
     }
+    accessQueue.emplace(access_it, pkt, service_tick, response_tick, seq,
+                        needs_response);
 
-    // Process the packet (perform access)
-    bool needsResponse = pkt->needsResponse();
-    recvAtomic(pkt);
+    DPRINTF(ScratchpadMemory, "Timing request accepted: addr=%#llx "
+            "size=%d service=%llu response=%llu inflight=%u depth=%u "
+            "pipe_port=%u needsResponse=%d\n", pkt->getAddr(),
+            pkt->getSize(), service_tick, response_tick, inflightRequests,
+            pipelineDepth, pipe_port, needs_response);
 
-    DPRINTF(ScratchpadMemory, "Timing request processed: addr=%#llx, "
-            "size=%d, needsResponse=%d\n", pkt->getAddr(), pkt->getSize(),
-            needsResponse);
-
-    // Turn packet around if response expected
-    if (needsResponse) {
-        assert(pkt->isResponse());
-
-        // Calculate when to send the response
-        Tick when_to_send = curTick() + receive_delay + latency;
-
-        // Insert in sorted order, but maintain order with same-address packets
-        auto i = packetQueue.end();
-        if (!packetQueue.empty()) {
-            --i;
-            while (i != packetQueue.begin() && when_to_send < i->tick &&
-                   !i->pkt->matchAddr(pkt)) {
-                --i;
-            }
-            ++i;
-        }
-
-        packetQueue.emplace(i, pkt, when_to_send);
-
-        // Schedule dequeue event if not already pending
-        if (!retryResp && !dequeueEvent.scheduled()) {
-            schedule(dequeueEvent, packetQueue.back().tick);
-        }
-    } else {
-        // No response needed, delete packet
-        pendingDelete.reset(pkt);
-    }
-
+    scheduleAccess();
     return true;
 }
 
-void
-ScratchpadMemory::release()
+unsigned
+ScratchpadMemory::pipelinePort(PacketPtr pkt) const
 {
-    assert(isBusy);
-    isBusy = false;
+    const Addr base = getAddrRange().start();
+    if (pkt->getAddr() < base) {
+        return 0;
+    }
+    return ((pkt->getAddr() - base) / pipelinePortStride) % pipelinePorts;
+}
 
-    DPRINTF(ScratchpadMemory, "SPM released from busy state\n");
+void
+ScratchpadMemory::scheduleAccess()
+{
+    if (accessQueue.empty()) {
+        return;
+    }
 
-    if (retryReq) {
+    const Tick when = std::max(accessQueue.front().tick, curTick());
+    if (accessEvent.scheduled()) {
+        reschedule(accessEvent, when, true);
+    } else {
+        schedule(accessEvent, when);
+    }
+}
+
+void
+ScratchpadMemory::scheduleDequeue()
+{
+    if (retryResp || packetQueue.empty()) {
+        return;
+    }
+
+    const Tick when = std::max(packetQueue.front().tick, curTick());
+    if (dequeueEvent.scheduled()) {
+        reschedule(dequeueEvent, when, true);
+    } else {
+        schedule(dequeueEvent, when);
+    }
+}
+
+void
+ScratchpadMemory::processAccess()
+{
+    while (!accessQueue.empty() && accessQueue.front().tick <= curTick()) {
+        const DeferredAccess deferred_access = accessQueue.front();
+        accessQueue.pop_front();
+
+        PacketPtr pkt = deferred_access.pkt;
+        DPRINTF(ScratchpadMemory, "Processing access: addr=%#llx "
+                "size=%d tick=%llu response=%llu seq=%llu\n",
+                pkt->getAddr(), pkt->getSize(), deferred_access.tick,
+                deferred_access.responseTick,
+                static_cast<unsigned long long>(deferred_access.seq));
+
+        access(pkt);
+
+        if (deferred_access.needsResponse) {
+            assert(pkt->isResponse());
+
+            auto response_it = packetQueue.begin();
+            while (response_it != packetQueue.end() &&
+                   (response_it->tick < deferred_access.responseTick ||
+                    (response_it->tick == deferred_access.responseTick &&
+                     response_it->seq < deferred_access.seq))) {
+                ++response_it;
+            }
+            packetQueue.emplace(response_it, pkt, deferred_access.responseTick,
+                                deferred_access.seq);
+            scheduleDequeue();
+        } else {
+            pendingDelete.reset(pkt);
+            completeRequest();
+        }
+    }
+
+    scheduleAccess();
+}
+
+void
+ScratchpadMemory::trySendRetryReq()
+{
+    if (retryReq && inflightRequests < pipelineDepth) {
         retryReq = false;
         port.sendRetryReq();
+    }
+}
+
+void
+ScratchpadMemory::completeRequest()
+{
+    assert(inflightRequests > 0);
+    --inflightRequests;
+    trySendRetryReq();
+
+    if (drainState() == DrainState::Draining && accessQueue.empty() &&
+        packetQueue.empty() && inflightRequests == 0 && !retryResp) {
+        DPRINTF(Drain, "Draining of ScratchpadMemory complete\n");
+        signalDrainDone();
     }
 }
 
@@ -221,14 +317,10 @@ ScratchpadMemory::dequeue()
     if (!retryResp) {
         // Successfully sent, remove from queue
         packetQueue.pop_front();
+        completeRequest();
 
         if (!packetQueue.empty()) {
-            // Schedule next dequeue
-            reschedule(dequeueEvent,
-                       std::max(packetQueue.front().tick, curTick()), true);
-        } else if (drainState() == DrainState::Draining) {
-            DPRINTF(Drain, "Draining of ScratchpadMemory complete\n");
-            signalDrainDone();
+            scheduleDequeue();
         }
     }
 }
@@ -252,7 +344,10 @@ ScratchpadMemory::getPort(const std::string &if_name, PortID idx)
 DrainState
 ScratchpadMemory::drain()
 {
-    if (!packetQueue.empty()) {
+    const bool has_pending_work =
+        !accessQueue.empty() || !packetQueue.empty() ||
+        inflightRequests != 0 || retryResp;
+    if (has_pending_work) {
         DPRINTF(Drain, "ScratchpadMemory queue has requests, waiting\n");
         return DrainState::Draining;
     }

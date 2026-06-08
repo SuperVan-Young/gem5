@@ -322,6 +322,7 @@ class MpuUnit : public SpecializedExecutionUnit
     uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
                                 MacroCmdKind kind) const override;
     std::vector<IssueQueueState> buildIssueQueues() const override;
+    bool canActivateMacroCmd(const MacroCmdContext &macroCmd) const override;
     void onMacroCmdBegin(MacroCmdContext &macroCmd) override;
     void buildUops(MacroCmdContext &macroCmd) override;
     void onMemUopComplete(MacroCmdContext &macroCmd,

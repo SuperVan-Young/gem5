@@ -23,6 +23,9 @@ SYSTEM_CLOCK = "1GHz"
 SPM_SIZE_BYTES = 4 * 1024 * 1024
 SPM_LATENCY = "1ns"
 SPM_BANDWIDTH = "100GiB/s"
+SPM_PIPELINE_DEPTH = 1024
+SPM_PIPELINE_PORTS = 32
+SPM_PIPELINE_PORT_STRIDE = 64
 SYSTEM_XBAR_WIDTH_BYTES = 256
 SYSTEM_XBAR_LATENCY_CYCLES = 0
 DRAM_MAP_SIZE_BYTES = 32 * 1024 * 1024
@@ -33,6 +36,7 @@ MPU_A_BUFFER_BYTES = 16 * 1024
 MPU_B_BUFFER_BYTES = 16 * 1024
 MPU_C_BUFFER_BYTES = 64 * 1024
 MPU_MEM_SIDE_PORTS = 2
+MPU_MEM_PORT_OUTSTANDING_LIMIT = 1024
 PROFILE_LOG = (
     Path(__file__).resolve().parent
     / "profile"
@@ -175,6 +179,9 @@ def build_system(binary, scenario):
         size=SPM_SIZE_BYTES,
         latency=SPM_LATENCY,
         bandwidth=SPM_BANDWIDTH,
+        pipeline_depth=SPM_PIPELINE_DEPTH,
+        pipeline_ports=SPM_PIPELINE_PORTS,
+        pipeline_port_stride=SPM_PIPELINE_PORT_STRIDE,
     )
     builder.add_cpu(cpu_id=0)
     process = builder.set_workload(os.path.abspath(binary), argv=[scenario])
@@ -183,6 +190,7 @@ def build_system(binary, scenario):
         attr_name="mpu",
         device_id=0,
         num_mem_side_ports=MPU_MEM_SIDE_PORTS,
+        mem_port_outstanding_limit=MPU_MEM_PORT_OUTSTANDING_LIMIT,
         array_dim=MPU_ARRAY_DIM,
         a_buffer_capacity_bytes=MPU_A_BUFFER_BYTES,
         b_buffer_capacity_bytes=MPU_B_BUFFER_BYTES,

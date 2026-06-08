@@ -180,6 +180,8 @@ class SpecializedExecutionUnit : public ClockedObject
         uint64_t issuedExecUops = 0;
         uint64_t completedLoadUops = 0;
         uint64_t completedStoreUops = 0;
+        uint64_t outstandingMemUops = 0;
+        Tick execActiveTicks = 0;
     };
 
     /*
@@ -241,6 +243,7 @@ class SpecializedExecutionUnit : public ClockedObject
         MemSidePort(const std::string &name, SpecializedExecutionUnit *owner);
 
         void sendPacket(PacketPtr pkt);
+        bool isBlocked() const { return blockedPacket != nullptr; }
         PortID portId = InvalidPortID;
 
       protected:
@@ -265,6 +268,7 @@ class SpecializedExecutionUnit : public ClockedObject
     uint64_t executeCount() const;
     uint64_t epilogueCount() const;
     uint64_t maxActiveMicroOps() const;
+    uint64_t maxMemPortOutstanding() const;
 
   protected:
     virtual MacroCmdKind classifyMacroCmd(
@@ -332,7 +336,10 @@ class SpecializedExecutionUnit : public ClockedObject
     void finishExecution(uint32_t issueQueueId);
     void sendTrackedPacket(const MemTxnContext &txn,
                            const std::vector<uint8_t> *data = nullptr);
+    void trySendCompletionSyncWords();
     void updateConcurrentMicroOps();
+    bool canIssueMemUop(const MicroOpContext &uop,
+                        const MacroCmdContext &macroCmd) const;
     bool hasSchedulableWork() const;
     void emitProfileBegin(MacroCmdContext &macroCmd) const;
     void emitProfileEnd(const MacroCmdContext &macroCmd) const;
@@ -351,11 +358,15 @@ class SpecializedExecutionUnit : public ClockedObject
     const uint32_t cmdQueueDepth;
     const Addr baseAddr;
     const bool syncEnqueueOnDataWrite;
+    const unsigned memPortOutstandingLimit;
     Tick debugProcessLatency;
 
     std::vector<std::unique_ptr<MemSidePort>> memSidePorts;
+    std::vector<unsigned> memPortOutstanding;
+    std::vector<uint64_t> maxMemPortOutstandingValues;
     std::deque<uint64_t> dispatchQueue;
     std::deque<uint64_t> pendingEpilogueCmdIds;
+    std::deque<uint32_t> pendingCompletionSyncWords;
     std::vector<IssueQueueState> issueQueues;
     std::unordered_map<uint64_t, MacroCmdContext> macroCmdContexts;
     std::unordered_map<PacketPtr, MemTxnContext> activeMemTxns;

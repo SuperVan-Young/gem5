@@ -20,12 +20,17 @@ class SpecializedExecutionUnit(ClockedObject):
     num_mem_side_ports = Param.Unsigned(
         1, "Number of memory-side request ports"
     )
+    mem_port_outstanding_limit = Param.Unsigned(
+        1024,
+        "Maximum number of outstanding memory requests per mem_side port",
+    )
     debug_process_latency = Param.Latency(
         "100ns", "Fixed execution latency returned by the debug process path"
     )
     sync_enqueue_on_data_write = Param.Bool(
         False,
-        "If true, writing command data area immediately enqueues the current staging buffer",
+        "If true, writing command data area immediately enqueues the "
+        "current staging buffer",
     )
 
     cxx_exports = [
@@ -38,6 +43,7 @@ class SpecializedExecutionUnit(ClockedObject):
         PyBindMethod("executeCount"),
         PyBindMethod("epilogueCount"),
         PyBindMethod("maxActiveMicroOps"),
+        PyBindMethod("maxMemPortOutstanding"),
         PyBindMethod("isIssueBusy"),
         PyBindMethod("setDebugProcessLatency"),
     ]

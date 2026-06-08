@@ -26,6 +26,7 @@
 
 from m5.objects.AbstractMemory import AbstractMemory
 from m5.params import *
+from m5.SimObject import *
 
 
 class ScratchpadMemory(AbstractMemory):
@@ -51,3 +52,21 @@ class ScratchpadMemory(AbstractMemory):
     bandwidth = Param.MemoryBandwidth(
         "100GiB/s", "Combined read and write bandwidth"
     )
+
+    pipeline_depth = Param.Unsigned(
+        1024,
+        "Maximum number of accepted timing requests that may be in flight",
+    )
+    pipeline_ports = Param.Unsigned(
+        1,
+        "Number of independent logical SPM pipeline ports sharing this memory",
+    )
+    pipeline_port_stride = Param.Unsigned(
+        64,
+        "Address stride used to map requests onto logical SPM pipeline ports",
+    )
+
+    cxx_exports = [
+        PyBindMethod("maxInflightRequests"),
+        PyBindMethod("pipelineFullRetries"),
+    ]
