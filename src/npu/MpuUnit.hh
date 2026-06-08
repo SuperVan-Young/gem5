@@ -231,6 +231,7 @@ class MpuUnit : public SpecializedExecutionUnit
     const Tick mvoutRequestLatency;
     const Tick loadLatencyBase;
     const Tick drainLatencyBase;
+    const uint32_t numMpuMemSidePorts;
 
     std::array<ABBufferSlot, 2> aBuffers;
     std::array<ABBufferSlot, 2> bBuffers;
@@ -288,7 +289,9 @@ class MpuUnit : public SpecializedExecutionUnit
     uint32_t expectedRowBytes(const ParsedCmd &cmd) const;
     uint32_t requiredBytes(const ParsedCmd &cmd) const;
     bool isContiguousSpmWindow(const ParsedCmd &cmd) const;
-    PortID mvinPortId() const;
+    PortID mvinPortId(BufferKind kind) const;
+    PortID mvinAPortId() const;
+    PortID mvinBPortId() const;
     PortID mvoutPortId() const;
     void validateSpmWindow(const ParsedCmd &cmd) const;
     void beginMemWindow(MpuMacroRuntime &runtime);

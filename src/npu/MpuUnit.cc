@@ -57,8 +57,9 @@ constexpr size_t ReservedWord13 = 13;
 constexpr size_t ReservedWord14 = 14;
 constexpr size_t ReservedWord15 = 15;
 constexpr uint32_t ExecIssueQueueId = 0;
-constexpr uint32_t PrefetchIssueQueueId = 1;
-constexpr uint32_t StoreIssueQueueId = 2;
+constexpr uint32_t PrefetchAIssueQueueId = 1;
+constexpr uint32_t PrefetchBIssueQueueId = 2;
+constexpr uint32_t StoreIssueQueueId = 3;
 constexpr uint32_t MpuFlagAccumulate = 0x00000001U;
 constexpr uint32_t MpuFlagLastKBlock = 0x00000002U;
 constexpr uint32_t MpuFlagClearOutput = 0x00000004U;
@@ -156,7 +157,8 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
       mvinRequestLatency(params.mvin_request_latency),
       mvoutRequestLatency(params.mvout_request_latency),
       loadLatencyBase(params.load_latency_base),
-      drainLatencyBase(params.drain_latency_base)
+      drainLatencyBase(params.drain_latency_base),
+      numMpuMemSidePorts(params.num_mem_side_ports)
 {
     fatal_if(macroCmdBytes != CacheLineBytes,
              "%s: MpuUnit requires 64-byte macro commands", name());
@@ -173,8 +175,9 @@ MpuUnit::MpuUnit(const MpuUnitParams &params)
              "%s: exec_uop_queue_depth must be in [1, 16]", name());
     fatal_if(drainUopQueueDepth == 0 || drainUopQueueDepth > 16,
              "%s: drain_uop_queue_depth must be in [1, 16]", name());
-    fatal_if(memSidePorts.empty() || memSidePorts.size() > 2,
-             "%s: MpuUnit requires one or two mem_side ports", name());
+    fatal_if(memSidePorts.empty() || memSidePorts.size() > 3,
+             "%s: MpuUnit requires one, two, or three mem_side ports",
+             name());
 
     // Rebuild issue queues after base construction so MPU's override takes
     // effect; virtual dispatch does not apply during base-class construction.
@@ -712,15 +715,33 @@ MpuUnit::finalizeMemWindow(MpuMacroRuntime &runtime)
 }
 
 PortID
-MpuUnit::mvinPortId() const
+MpuUnit::mvinPortId(BufferKind kind) const
+{
+    if (kind == BufferKind::B && numMpuMemSidePorts > 2) {
+        return mvinBPortId();
+    }
+    return mvinAPortId();
+}
+
+PortID
+MpuUnit::mvinAPortId() const
 {
     return 0;
 }
 
 PortID
+MpuUnit::mvinBPortId() const
+{
+    return numMpuMemSidePorts > 2 ? 1 : 0;
+}
+
+PortID
 MpuUnit::mvoutPortId() const
 {
-    return memSidePorts.size() > 1 ? 1 : 0;
+    if (numMpuMemSidePorts > 2) {
+        return 2;
+    }
+    return numMpuMemSidePorts > 1 ? 1 : 0;
 }
 
 MpuUnit::MpuMacroRuntime &
@@ -1000,7 +1021,7 @@ MpuUnit::appendMvinRowUop(MacroCmdContext &macroCmd,
 
     if (isContiguousSpmWindow(cmd)) {
         appendLoadUop(macroCmd, cmd.spmAddr, requiredBytes(cmd));
-        macroCmd.uopQueue.back().portId = mvinPortId();
+        macroCmd.uopQueue.back().portId = mvinPortId(cmd.bufferKind);
         macroCmd.uopQueue.back().token = 0;
         runtime.nextMemRow = expectedRows(cmd);
         return;
@@ -1009,7 +1030,7 @@ MpuUnit::appendMvinRowUop(MacroCmdContext &macroCmd,
     appendLoadUop(macroCmd,
                   cmd.spmAddr + static_cast<Addr>(row) * cmd.strideBytes,
                   expectedRowBytes(cmd));
-    macroCmd.uopQueue.back().portId = mvinPortId();
+    macroCmd.uopQueue.back().portId = mvinPortId(cmd.bufferKind);
     macroCmd.uopQueue.back().token = row;
     runtime.nextMemRow++;
 }
@@ -1103,7 +1124,8 @@ MpuUnit::classifyIssueQueue(const std::vector<uint8_t> &cmd,
     (void)kind;
     const CmdKind cmd_kind = parseCommand(cmd).kind;
     if (cmd_kind == CmdKind::Mvin) {
-        return PrefetchIssueQueueId;
+        return parseCommand(cmd).bufferKind == BufferKind::B ?
+            PrefetchBIssueQueueId : PrefetchAIssueQueueId;
     }
     if (cmd_kind == CmdKind::Mvout) {
         return StoreIssueQueueId;
@@ -1116,7 +1138,8 @@ MpuUnit::buildIssueQueues() const
 {
     return {
         {ExecIssueQueueId, IssueQueueKind::Exec, {}, {}, PortID(0)},
-        {PrefetchIssueQueueId, IssueQueueKind::Mem, {}, {}, mvinPortId()},
+        {PrefetchAIssueQueueId, IssueQueueKind::Mem, {}, {}, mvinAPortId()},
+        {PrefetchBIssueQueueId, IssueQueueKind::Mem, {}, {}, mvinBPortId()},
         {StoreIssueQueueId, IssueQueueKind::Mem, {}, {}, mvoutPortId()},
     };
 }
