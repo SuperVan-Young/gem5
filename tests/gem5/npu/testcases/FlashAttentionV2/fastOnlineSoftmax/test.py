@@ -95,6 +95,14 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Unexpected sub count in %s", PERF_SUMMARY)
         if summary["profile"]["opcode_counts"]["exp"] != 2:
             test_util.fail("Unexpected exp count in %s", PERF_SUMMARY)
+        if summary["vpu_summary"]["max_active_uops"] <= 1:
+            test_util.fail(
+                "Expected pipelined VPU uops in %s", PERF_SUMMARY
+            )
+        if summary["vpu_summary"]["executes"] > 800:
+            test_util.fail(
+                "Expected grouped VPU dlen uops in %s", PERF_SUMMARY
+            )
 
 
 register_npu_test(
@@ -123,7 +131,8 @@ register_npu_test(
             r"reduce_sum=1 exp=2 status=PASS",
             r"FLASH_ATTENTION_FAST_ONLINE_SOFTMAX_PASS",
             rf"VPU_SUMMARY scenario={SCENARIO} cmds=14 queue_occupancy=0 "
-            r"issue_busy=False executes=14 max_active_uops=[0-9]+",
+            r"issue_busy=False executes=[0-9]+ "
+            r"max_active_uops=([2-9]|[1-9][0-9]+)",
             r"VPU_EXIT_CODE=0",
             r"FLASH_ATTENTION_FAST_ONLINE_SOFTMAX_CONFIG_PASS",
             make_profile_artifact_verifier(

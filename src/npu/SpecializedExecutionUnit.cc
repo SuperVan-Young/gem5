@@ -546,7 +546,9 @@ SpecializedExecutionUnit::issueReadyUops()
                     break;
                 }
             } else if (macro_cmd.waitingCallback ||
-                       macro_cmd.outstandingMemUops != 0) {
+                       (macro_cmd.outstandingMemUops != 0 &&
+                        !canIssueExecWithOutstandingMemUops(
+                            macro_cmd, front))) {
                 break;
             }
 
@@ -841,7 +843,8 @@ SpecializedExecutionUnit::canIssueMemUop(
     panic_if(port_id < 0 ||
              static_cast<size_t>(port_id) >= memPortOutstanding.size(),
              "%s: invalid mem port %d", name(), port_id);
-    return memPortOutstanding[port_id] < memPortOutstandingLimit &&
+    return activeMemTxns.size() < MaxActiveMemPackets &&
+           memPortOutstanding[port_id] < memPortOutstandingLimit &&
            !getMemSidePort(port_id).isBlocked();
 }
 
@@ -903,6 +906,55 @@ SpecializedExecutionUnit::canActivateMacroCmd(
 {
     (void)macroCmd;
     return true;
+}
+
+bool
+SpecializedExecutionUnit::canIssueExecWithOutstandingMemUops(
+    const MacroCmdContext &macroCmd,
+    const MicroOpContext &uop) const
+{
+    (void)macroCmd;
+    (void)uop;
+    return false;
+}
+
+void
+SpecializedExecutionUnit::functionalReadMem(PortID portId, Addr addr,
+                                            std::vector<uint8_t> &bytes)
+{
+    panic_if(portId < 0 ||
+             static_cast<size_t>(portId) >= memSidePorts.size(),
+             "%s: invalid functional read port %d", name(), portId);
+    if (bytes.empty()) {
+        return;
+    }
+
+    RequestPtr req = std::make_shared<Request>(
+        addr, bytes.size(), Request::Flags(), Request::funcRequestorId);
+    PacketPtr pkt = buildPacketFromRequest(req, MemCmd::ReadReq, nullptr);
+    getMemSidePort(portId).sendFunctional(pkt);
+    std::copy(pkt->getConstPtr<uint8_t>(),
+              pkt->getConstPtr<uint8_t>() + pkt->getSize(),
+              bytes.begin());
+    delete pkt;
+}
+
+void
+SpecializedExecutionUnit::functionalWriteMem(
+    PortID portId, Addr addr, const std::vector<uint8_t> &bytes)
+{
+    panic_if(portId < 0 ||
+             static_cast<size_t>(portId) >= memSidePorts.size(),
+             "%s: invalid functional write port %d", name(), portId);
+    if (bytes.empty()) {
+        return;
+    }
+
+    RequestPtr req = std::make_shared<Request>(
+        addr, bytes.size(), Request::Flags(), Request::funcRequestorId);
+    PacketPtr pkt = buildPacketFromRequest(req, MemCmd::WriteReq, &bytes);
+    getMemSidePort(portId).sendFunctional(pkt);
+    delete pkt;
 }
 
 void
@@ -1101,6 +1153,10 @@ SpecializedExecutionUnit::appendProfileEventJson(
     appendProfileDetailsJson(macroCmd, os);
     os << "}";
     if (std::string(phase) == "end") {
+        os << ",\"uop_events_total\":" << macroCmd.profileUops.size();
+        os << ",\"uop_events_truncated\":"
+           << (macroCmd.profileUops.size() > MaxProfileUopEvents ?
+                   "true" : "false");
         os << ",\"uop_events\":";
         appendUopProfileEventsJson(os, macroCmd);
     }
@@ -1112,11 +1168,16 @@ SpecializedExecutionUnit::appendUopProfileEventsJson(
     std::ostream &os, const MacroCmdContext &macroCmd) const
 {
     os << '[';
-    for (size_t i = 0; i < macroCmd.profileUops.size(); ++i) {
-        const auto &uop = macroCmd.profileUops[i];
-        if (i != 0) {
+    const size_t total = macroCmd.profileUops.size();
+    const size_t head_count = std::min(total, MaxProfileUopEvents / 2);
+    const size_t tail_count = total > MaxProfileUopEvents ?
+        MaxProfileUopEvents - head_count : 0;
+    bool emitted = false;
+    auto emitUop = [&](const UopProfileEvent &uop) {
+        if (emitted) {
             os << ',';
         }
+        emitted = true;
         os << '{';
         os << "\"profile_id\":" << uop.profileId;
         os << ",\"kind\":";
@@ -1133,6 +1194,17 @@ SpecializedExecutionUnit::appendUopProfileEventsJson(
             os << ",\"duration\":0";
         }
         os << '}';
+    };
+
+    for (size_t i = 0; i < head_count; ++i) {
+        const auto &uop = macroCmd.profileUops[i];
+        emitUop(uop);
+    }
+    if (tail_count != 0) {
+        for (size_t i = total - tail_count; i < total; ++i) {
+            const auto &uop = macroCmd.profileUops[i];
+            emitUop(uop);
+        }
     }
     os << ']';
 }

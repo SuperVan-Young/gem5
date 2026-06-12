@@ -66,6 +66,7 @@ VpuUnit::VpuUnit(const VpuUnitParams &params)
       localOutputBase(params.local_output_base),
       localBufferStride(params.local_buffer_stride),
       dlenBytes(params.dlen_bytes),
+      dlenGroupSize(params.dlen_group_size),
       int8CyclesPerDlen(params.int8_cycles_per_dlen),
       int16CyclesPerDlen(params.int16_cycles_per_dlen),
       int32CyclesPerDlen(params.int32_cycles_per_dlen),
@@ -83,8 +84,9 @@ VpuUnit::VpuUnit(const VpuUnitParams &params)
              "%s: VPU v2 requires at least two input buffers and one output "
              "buffer",
              name());
-    panic_if(localBufferStride == 0 || dlenBytes == 0,
-             "%s: local buffer stride and dlen must be non-zero", name());
+    panic_if(localBufferStride == 0 || dlenBytes == 0 || dlenGroupSize == 0,
+             "%s: local buffer stride, dlen, and group size must be non-zero",
+             name());
     panic_if((localBufferStride % dlenBytes) != 0,
              "%s: local buffer stride must contain an integer number of dlen "
              "chunks",
@@ -452,6 +454,127 @@ VpuUnit::workDlenChunks(const VpuMacroState &state) const
         1U, static_cast<uint32_t>((workBytes + dlenBytes - 1U) / dlenBytes));
 }
 
+uint32_t
+VpuUnit::workDlenChunksInGroup(const VpuMacroState &state, uint32_t group) const
+{
+    const uint32_t total = workDlenChunks(state);
+    const uint32_t start = group * dlenGroupSize;
+    panic_if(start >= total,
+             "%s: dlen group %u exceeds work chunk count %u", name(), group,
+             total);
+    return std::min<uint32_t>(dlenGroupSize, total - start);
+}
+
+uint32_t
+VpuUnit::byteDlenChunks(size_t bytes) const
+{
+    if (bytes == 0) {
+        return 0;
+    }
+    return static_cast<uint32_t>((bytes + dlenBytes - 1U) / dlenBytes);
+}
+
+size_t
+VpuUnit::dlenGroupBytes() const
+{
+    return static_cast<size_t>(dlenGroupSize) * dlenBytes;
+}
+
+uint32_t
+VpuUnit::byteDlenGroups(size_t bytes) const
+{
+    if (bytes == 0) {
+        return 0;
+    }
+    const size_t group_bytes = dlenGroupBytes();
+    return static_cast<uint32_t>((bytes + group_bytes - 1U) / group_bytes);
+}
+
+size_t
+VpuUnit::dlenChunkOffset(uint32_t chunk) const
+{
+    return static_cast<size_t>(chunk) * dlenBytes;
+}
+
+size_t
+VpuUnit::dlenChunkSize(size_t totalBytes, uint32_t chunk) const
+{
+    const size_t offset = dlenChunkOffset(chunk);
+    panic_if(offset >= totalBytes,
+             "%s: dlen chunk %u exceeds span %zu", name(), chunk, totalBytes);
+    return std::min<size_t>(dlenBytes, totalBytes - offset);
+}
+
+size_t
+VpuUnit::dlenGroupOffset(uint32_t group) const
+{
+    return static_cast<size_t>(group) * dlenGroupBytes();
+}
+
+size_t
+VpuUnit::dlenGroupSizeBytes(size_t totalBytes, uint32_t group) const
+{
+    const size_t offset = dlenGroupOffset(group);
+    panic_if(offset >= totalBytes,
+             "%s: dlen group %u exceeds span %zu", name(), group, totalBytes);
+    return std::min<size_t>(dlenGroupBytes(), totalBytes - offset);
+}
+
+size_t
+VpuUnit::dlenGroupTimingBytes(size_t totalBytes, uint32_t group) const
+{
+    return std::min<size_t>(dlenBytes, dlenGroupSizeBytes(totalBytes, group));
+}
+
+PortID
+VpuUnit::dlenChunkPort(Addr addr, size_t size, uint32_t chunk) const
+{
+    const PortID base = decodeSpmPort(addr, size);
+    return static_cast<PortID>((base + chunk) % numMemPorts);
+}
+
+PortID
+VpuUnit::src0ReadPortId(uint32_t group) const
+{
+    return static_cast<PortID>(group % numMemPorts);
+}
+
+PortID
+VpuUnit::src1ReadPortId(uint32_t group) const
+{
+    const uint32_t base = numMemPorts > 2 ? 1 : 0;
+    return static_cast<PortID>((base + group) % numMemPorts);
+}
+
+PortID
+VpuUnit::dstWritePortId(uint32_t group) const
+{
+    if (numMemPorts > 2) {
+        return static_cast<PortID>((2U + group) % numMemPorts);
+    }
+    const uint32_t base = numMemPorts > 1 ? 1 : 0;
+    return static_cast<PortID>((base + group) % numMemPorts);
+}
+
+uint64_t
+VpuUnit::encodeToken(ExecToken token, uint32_t chunk) const
+{
+    return (static_cast<uint64_t>(chunk) << 32) |
+        static_cast<uint64_t>(token);
+}
+
+VpuUnit::ExecToken
+VpuUnit::decodeTokenKind(uint64_t token) const
+{
+    return static_cast<ExecToken>(token & 0xffffffffULL);
+}
+
+uint32_t
+VpuUnit::decodeTokenChunk(uint64_t token) const
+{
+    return static_cast<uint32_t>(token >> 32);
+}
+
 size_t
 VpuUnit::tensorSpanBytes(const TensorDesc &tensor, size_t elemSize,
                          const DecodedVectorOp &op) const
@@ -650,9 +773,8 @@ VpuUnit::validateCommand(const MacroCmdContext &macroCmd,
 }
 
 Tick
-VpuUnit::computeExecLatency(const VpuMacroState &state)
+VpuUnit::computeExecLatency(const VpuMacroState &state, uint32_t chunk)
 {
-    const uint32_t dlenChunks = workDlenChunks(state);
     Cycles perDlenCycles = dtypeCyclesPerDlen(state.op.dstType);
     perDlenCycles = std::max(perDlenCycles, dtypeCyclesPerDlen(state.op.src0Type));
     if (state.op.hasSrc1) {
@@ -662,14 +784,20 @@ VpuUnit::computeExecLatency(const VpuMacroState &state)
 
     Tick extraLatency = 0;
     if (isLutOpcode(state.op.opcode)) {
-        const size_t workBytes = static_cast<size_t>(state.src0.shape.w) *
+        const size_t totalWorkBytes = static_cast<size_t>(state.src0.shape.w) *
             state.src0.shape.c * state.op.src0ElemSize;
+        const size_t offset = dlenGroupOffset(chunk);
+        const size_t groupBytes = offset < totalWorkBytes ?
+            std::min<size_t>(dlenGroupBytes(), totalWorkBytes - offset) :
+            dlenGroupBytes();
+        const size_t workBytes = std::min<size_t>(dlenBytes, groupBytes);
         extraLatency = lut->reserve(lutOperation(state.op.opcode), workBytes,
                                     curTick());
     }
 
-    const Tick totalLatency = debugProcessLatency +
-        (clockPeriod() * (perDlenCycles * dlenChunks)) + extraLatency;
+    const Tick totalLatency =
+        clockPeriod() * (perDlenCycles * workDlenChunksInGroup(state, chunk)) +
+        extraLatency;
     if (isLinearOpcode(state.op.opcode)) {
         lastLinearExecuteLatencyValue = totalLatency;
     }
@@ -743,6 +871,28 @@ VpuUnit::storeSourceReady(const VpuMacroState &state) const
     const BufferRole role = isOutputLocalAddr(state.src0.addr) ?
         BufferRole::Output : BufferRole::Input;
     return sourceReady(state.src0, role, state.src0SpanBytes);
+}
+
+bool
+VpuUnit::computeSourcesReady(const VpuMacroState &state) const
+{
+    return (!state.src0InSpm ||
+                state.completedSrc0LoadChunks == state.src0LoadChunks) &&
+           (!state.src1InSpm ||
+                state.completedSrc1LoadChunks == state.src1LoadChunks);
+}
+
+void
+VpuUnit::completeCompute(VpuMacroState &state)
+{
+    panic_if(state.resultReady,
+             "%s: VPU compute completed more than once", name());
+    panic_if(state.completedExecChunks != state.execChunks,
+             "%s: VPU compute completed before timing uop", name());
+    panic_if(!computeSourcesReady(state),
+             "%s: VPU compute completed before sources were ready", name());
+
+    executeVectorOp(state);
 }
 
 void
@@ -1243,12 +1393,43 @@ VpuUnit::canActivateMacroCmd(const MacroCmdContext &macroCmd) const
     return true;
 }
 
+bool
+VpuUnit::canIssueExecWithOutstandingMemUops(
+    const MacroCmdContext &macroCmd,
+    const MicroOpContext &uop) const
+{
+    if (macroCmd.kind != MacroCmdKind::Exec) {
+        return false;
+    }
+    const ExecToken token = decodeTokenKind(uop.token);
+    return token == ExecToken::RunCompute;
+}
+
 void
 VpuUnit::onMacroCmdBegin(MacroCmdContext &macroCmd)
 {
     VpuMacroState state;
     state.op = decodeVectorOp(macroCmd);
     validateCommand(macroCmd, state);
+    if (isComputeOpcode(state.op.opcode)) {
+        state.src0LoadChunks =
+            state.src0InSpm ? byteDlenGroups(state.src0SpanBytes) : 0;
+        state.src1LoadChunks =
+            state.src1InSpm ? byteDlenGroups(state.src1SpanBytes) : 0;
+        state.execChunks =
+            std::max<uint32_t>(1U, divCeil(workDlenChunks(state),
+                                           dlenGroupSize));
+        state.storeChunks =
+            state.dstInSpm ? byteDlenGroups(state.dstSpanBytes) : 0;
+        state.src0Loaded = !state.src0InSpm;
+        state.src1Loaded = !state.src1InSpm;
+        if (state.src0InSpm) {
+            state.src0Bytes.resize(state.src0SpanBytes, 0);
+        }
+        if (state.src1InSpm) {
+            state.src1Bytes.resize(state.src1SpanBytes, 0);
+        }
+    }
     macroStates.emplace(macroCmd.macroCmdId, std::move(state));
 }
 
@@ -1287,47 +1468,88 @@ VpuUnit::buildUops(MacroCmdContext &macroCmd)
         break;
       }
       default:
-        if (state.src0InSpm && !state.src0Loaded) {
-            if (!state.src0Requested) {
-                appendLoadUop(macroCmd, state.src0.addr, state.src0SpanBytes);
-                macroCmd.uopQueue.back().token =
-                    static_cast<uint64_t>(ExecToken::LoadSrc0);
-                macroCmd.uopQueue.back().portId =
-                    decodeSpmPort(state.src0.addr, state.src0SpanBytes);
-                state.src0Requested = true;
-            }
-            break;
+        while (state.nextSrc0LoadChunk < state.src0LoadChunks &&
+               state.nextSrc0LoadChunk - state.completedSrc0LoadChunks <
+                   ChunkPipelineWindow) {
+            const uint32_t chunk = state.nextSrc0LoadChunk++;
+            const size_t offset = dlenGroupOffset(chunk);
+            const size_t size =
+                dlenGroupTimingBytes(state.src0SpanBytes, chunk);
+            appendLoadUop(macroCmd, state.src0.addr + offset, size);
+            macroCmd.uopQueue.back().token =
+                encodeToken(ExecToken::LoadSrc0, chunk);
+            macroCmd.uopQueue.back().portId = src0ReadPortId(chunk);
         }
-        if (state.src1InSpm && !state.src1Loaded) {
-            if (!state.src1Requested) {
-                appendLoadUop(macroCmd, state.src1.addr, state.src1SpanBytes);
-                macroCmd.uopQueue.back().token =
-                    static_cast<uint64_t>(ExecToken::LoadSrc1);
-                macroCmd.uopQueue.back().portId =
-                    decodeSpmPort(state.src1.addr, state.src1SpanBytes);
-                state.src1Requested = true;
-            }
-            break;
+        while (state.nextSrc1LoadChunk < state.src1LoadChunks &&
+               state.nextSrc1LoadChunk - state.completedSrc1LoadChunks <
+                   ChunkPipelineWindow) {
+            const uint32_t chunk = state.nextSrc1LoadChunk++;
+            const size_t offset = dlenGroupOffset(chunk);
+            const size_t size =
+                dlenGroupTimingBytes(state.src1SpanBytes, chunk);
+            appendLoadUop(macroCmd, state.src1.addr + offset, size);
+            macroCmd.uopQueue.back().token =
+                encodeToken(ExecToken::LoadSrc1, chunk);
+            macroCmd.uopQueue.back().portId = src1ReadPortId(chunk);
         }
         if (state.resultReady && state.dstInSpm && !state.storeIssued) {
-            appendStoreUop(macroCmd, state.dst.addr, state.dstSpanBytes,
-                           state.resultBytes);
-            macroCmd.uopQueue.back().portId =
-                decodeSpmPort(state.dst.addr, state.dstSpanBytes);
+            while (state.nextStoreChunk < state.storeChunks) {
+                const uint32_t chunk = state.nextStoreChunk++;
+                const size_t offset = dlenGroupOffset(chunk);
+                const size_t size =
+                    dlenGroupTimingBytes(state.dstSpanBytes, chunk);
+                appendStoreUop(
+                    macroCmd, state.dst.addr + offset, size,
+                    std::vector<uint8_t>(state.resultBytes.begin() + offset,
+                                         state.resultBytes.begin() + offset +
+                                             size));
+                macroCmd.uopQueue.back().token =
+                    encodeToken(ExecToken::StoreResult, chunk);
+                macroCmd.uopQueue.back().portId = dstWritePortId(chunk);
+            }
             state.storeIssued = true;
-            break;
         }
         if (state.resultReady) {
             break;
         }
-        appendExecUop(macroCmd, computeExecLatency(state));
-        macroCmd.uopQueue.back().token =
-            static_cast<uint64_t>(ExecToken::RunCompute);
+        uint32_t readyExecChunks = state.execChunks;
+        if (state.src0InSpm) {
+            readyExecChunks = std::min(
+                readyExecChunks,
+                state.nextSrc0LoadChunk == state.src0LoadChunks ?
+                    state.execChunks : state.nextSrc0LoadChunk);
+        }
+        if (state.src1InSpm) {
+            readyExecChunks = std::min(
+                readyExecChunks,
+                state.nextSrc1LoadChunk == state.src1LoadChunks ?
+                    state.execChunks : state.nextSrc1LoadChunk);
+        }
+        if (state.nextExecChunk < readyExecChunks) {
+            const uint32_t chunk = state.nextExecChunk++;
+            appendExecUop(macroCmd, computeExecLatency(state, chunk));
+            macroCmd.uopQueue.back().token =
+                encodeToken(ExecToken::RunCompute, chunk);
+        }
         break;
     }
 
     if (macroCmd.uopQueue.empty()) {
-        markEpiloguePending(macroCmd);
+        switch (state.op.opcode) {
+          case Opcode::VLoad:
+          case Opcode::VStore:
+            if (macroCmd.outstandingMemUops == 0) {
+                markEpiloguePending(macroCmd);
+            }
+            break;
+          default:
+            if (state.resultReady &&
+                (!state.dstInSpm ||
+                    state.completedStoreChunks == state.storeChunks)) {
+                markEpiloguePending(macroCmd);
+            }
+            break;
+        }
     }
 }
 
@@ -1356,19 +1578,51 @@ VpuUnit::onMemUopComplete(MacroCmdContext &macroCmd,
     }
 
     if (state.op.opcode != Opcode::VStore) {
-        const ExecToken token = static_cast<ExecToken>(txn.token);
+        const ExecToken token = decodeTokenKind(txn.token);
+        const uint32_t chunk = decodeTokenChunk(txn.token);
         if (token == ExecToken::LoadSrc0) {
-            state.src0Bytes.assign(pkt->getConstPtr<uint8_t>(),
-                                   pkt->getConstPtr<uint8_t>() + pkt->getSize());
-            state.src0Loaded = true;
+            const size_t offset = dlenGroupOffset(chunk);
+            const size_t size = dlenGroupSizeBytes(state.src0SpanBytes,
+                                                   chunk);
+            panic_if(offset + size > state.src0Bytes.size(),
+                     "%s: src0 dlen load exceeds source buffer", name());
+            std::vector<uint8_t> bytes(size, 0);
+            functionalReadMem(txn.portId, state.src0.addr + offset, bytes);
+            std::copy(bytes.begin(), bytes.end(),
+                      state.src0Bytes.begin() + offset);
+            state.completedSrc0LoadChunks++;
+            state.src0Loaded =
+                state.completedSrc0LoadChunks == state.src0LoadChunks;
         } else if (token == ExecToken::LoadSrc1) {
-            state.src1Bytes.assign(pkt->getConstPtr<uint8_t>(),
-                                   pkt->getConstPtr<uint8_t>() + pkt->getSize());
-            state.src1Loaded = true;
+            const size_t offset = dlenGroupOffset(chunk);
+            const size_t size = dlenGroupSizeBytes(state.src1SpanBytes,
+                                                   chunk);
+            panic_if(offset + size > state.src1Bytes.size(),
+                     "%s: src1 dlen load exceeds source buffer", name());
+            std::vector<uint8_t> bytes(size, 0);
+            functionalReadMem(txn.portId, state.src1.addr + offset, bytes);
+            std::copy(bytes.begin(), bytes.end(),
+                      state.src1Bytes.begin() + offset);
+            state.completedSrc1LoadChunks++;
+            state.src1Loaded =
+                state.completedSrc1LoadChunks == state.src1LoadChunks;
+        } else if (token == ExecToken::StoreResult) {
+            const size_t offset = dlenGroupOffset(chunk);
+            const size_t size = dlenGroupSizeBytes(state.dstSpanBytes, chunk);
+            std::vector<uint8_t> bytes(
+                state.resultBytes.begin() + offset,
+                state.resultBytes.begin() + offset + size);
+            functionalWriteMem(txn.portId, state.dst.addr + offset, bytes);
+            state.completedStoreChunks++;
+        }
+        if (!state.resultReady && computeSourcesReady(state) &&
+            state.completedExecChunks == state.execChunks) {
+            completeCompute(state);
         }
         buildUops(macroCmd);
         if (macroCmd.uopQueue.empty() && state.resultReady &&
-            (!state.dstInSpm || state.storeIssued)) {
+            (!state.dstInSpm ||
+                state.completedStoreChunks == state.storeChunks)) {
             markEpiloguePending(macroCmd);
         }
         return;
@@ -1385,7 +1639,7 @@ VpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
     panic_if(it == macroStates.end(), "%s: missing VPU macro state", name());
     auto &state = it->second;
 
-    const ExecToken token = static_cast<ExecToken>(uop.token);
+    const ExecToken token = decodeTokenKind(uop.token);
     if (state.op.opcode == Opcode::VStore || token == ExecToken::WaitStoreData) {
         buildUops(macroCmd);
         if (macroCmd.uopQueue.empty()) {
@@ -1394,10 +1648,17 @@ VpuUnit::onExecUopComplete(MacroCmdContext &macroCmd,
         return;
     }
 
-    executeVectorOp(state);
-    state.completedExecUops++;
+    if (token == ExecToken::RunCompute) {
+        state.completedExecChunks++;
+        state.completedExecUops++;
+    }
+    if (!state.resultReady && computeSourcesReady(state) &&
+        state.completedExecChunks == state.execChunks) {
+        completeCompute(state);
+    }
     buildUops(macroCmd);
-    if (macroCmd.uopQueue.empty() && (!state.dstInSpm || state.storeIssued)) {
+    if (macroCmd.uopQueue.empty() && state.resultReady &&
+        (!state.dstInSpm || state.completedStoreChunks == state.storeChunks)) {
         markEpiloguePending(macroCmd);
     }
 }
@@ -1452,6 +1713,8 @@ VpuUnit::appendProfileDetailsJson(const MacroCmdContext &macroCmd,
     os << ",\"src1_shape_w\":" << state.src1.shape.w;
     os << ",\"src1_shape_c\":" << state.src1.shape.c;
     os << ",\"work_dlen_chunks\":" << workDlenChunks(state);
+    os << ",\"dlen_group_size\":" << dlenGroupSize;
+    os << ",\"work_dlen_groups\":" << state.execChunks;
     os << ",\"dst_cycles_per_dlen\":" <<
         static_cast<uint64_t>(dtypeCyclesPerDlen(state.op.dstType));
     os << ",\"src0_cycles_per_dlen\":" <<

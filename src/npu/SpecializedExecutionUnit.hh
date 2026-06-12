@@ -96,6 +96,9 @@ class SpecializedExecutionUnit : public ClockedObject
         Mem = 1,
     };
 
+    static constexpr uint32_t MaxActiveMemPackets = 256;
+    static constexpr size_t MaxProfileUopEvents = 64;
+
     struct CmdFields
     {
         uint8_t deviceType = 0;
@@ -292,6 +295,13 @@ class SpecializedExecutionUnit : public ClockedObject
                                         MacroCmdKind kind) const;
     virtual std::vector<IssueQueueState> buildIssueQueues() const;
     virtual bool canActivateMacroCmd(const MacroCmdContext &macroCmd) const;
+    virtual bool canIssueExecWithOutstandingMemUops(
+        const MacroCmdContext &macroCmd,
+        const MicroOpContext &uop) const;
+    void functionalReadMem(PortID portId, Addr addr,
+                           std::vector<uint8_t> &bytes);
+    void functionalWriteMem(PortID portId, Addr addr,
+                            const std::vector<uint8_t> &bytes);
 
     virtual void onMacroCmdBegin(MacroCmdContext &macroCmd);
     virtual void buildUops(MacroCmdContext &macroCmd);

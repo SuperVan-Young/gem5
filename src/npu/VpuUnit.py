@@ -44,6 +44,10 @@ class VpuUnit(SpecializedExecutionUnit):
         "Logical dlen in bytes; the innermost layout dimension times dtype "
         "width must equal this value",
     )
+    dlen_group_size = Param.Unsigned(
+        16,
+        "Number of dlen chunks modeled by one VPU internal pipeline group",
+    )
     int8_cycles_per_dlen = Param.Cycles(
         1, "Linear VPU cycles needed to process one dlen chunk of int8/uint8"
     )

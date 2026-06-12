@@ -21,7 +21,7 @@ namespace
 
 static constexpr uint32_t Rows = 256U;
 static constexpr uint32_t Cols = 1024U;
-static constexpr uint32_t LayoutSizeElems = 32U;
+static constexpr uint32_t LayoutSizeElems = 128U;
 static constexpr uint32_t MatrixSlotSpan =
     (Rows * Cols * sizeof(uint32_t) + VPU_LOCAL_SLOT_STRIDE - 1U) /
     VPU_LOCAL_SLOT_STRIDE;
@@ -199,7 +199,7 @@ main(int argc, char **argv)
         VpuDeviceId,
         SyncIndicator,
         1U,
-        128U,
+        512U,
         0U,
     };
     NpuFastOnlineSoftmaxStats stats = {};

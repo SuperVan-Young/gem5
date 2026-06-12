@@ -105,7 +105,7 @@ def build_system(binary, scenario):
         lookup_latency="1ns",
         interpolation_latency="1ns",
         normalize_latency="1ns",
-        dlen_bytes=128,
+        dlen_bytes=512,
     )
     builder.add_vpu(
         vpu_id=0,
@@ -113,7 +113,7 @@ def build_system(binary, scenario):
         input_buffer_count=24,
         output_buffer_count=12,
         local_buffer_stride=128 * 128 * 4,
-        dlen_bytes=128,
+        dlen_bytes=512,
         float32_cycles_per_dlen=1,
         float16_cycles_per_dlen=2,
         int32_cycles_per_dlen=2,

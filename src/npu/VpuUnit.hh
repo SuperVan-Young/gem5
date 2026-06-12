@@ -159,10 +159,20 @@ class VpuUnit : public SpecializedExecutionUnit
         bool dstInSpm = false;
         bool src0Loaded = false;
         bool src1Loaded = false;
-        bool src0Requested = false;
-        bool src1Requested = false;
         bool resultReady = false;
         bool storeIssued = false;
+        uint32_t src0LoadChunks = 0;
+        uint32_t src1LoadChunks = 0;
+        uint32_t execChunks = 0;
+        uint32_t storeChunks = 0;
+        uint32_t nextSrc0LoadChunk = 0;
+        uint32_t nextSrc1LoadChunk = 0;
+        uint32_t nextExecChunk = 0;
+        uint32_t nextStoreChunk = 0;
+        uint32_t completedSrc0LoadChunks = 0;
+        uint32_t completedSrc1LoadChunks = 0;
+        uint32_t completedExecChunks = 0;
+        uint32_t completedStoreChunks = 0;
         std::vector<uint8_t> src0Bytes;
         std::vector<uint8_t> src1Bytes;
         std::vector<uint8_t> resultBytes;
@@ -175,7 +185,10 @@ class VpuUnit : public SpecializedExecutionUnit
         RunCompute = 2,
         LoadSrc0 = 3,
         LoadSrc1 = 4,
+        StoreResult = 5,
     };
+
+    static constexpr uint32_t ChunkPipelineWindow = 64;
 
     const uint8_t deviceId;
     LutUnit *const lut;
@@ -188,6 +201,7 @@ class VpuUnit : public SpecializedExecutionUnit
     const Addr localOutputBase;
     const uint32_t localBufferStride;
     const uint32_t dlenBytes;
+    const uint32_t dlenGroupSize;
     const Cycles int8CyclesPerDlen;
     const Cycles int16CyclesPerDlen;
     const Cycles int32CyclesPerDlen;
@@ -227,6 +241,23 @@ class VpuUnit : public SpecializedExecutionUnit
     size_t tileElems(const DecodedVectorOp &op) const;
     Cycles dtypeCyclesPerDlen(DataType dataType) const;
     uint32_t workDlenChunks(const VpuMacroState &state) const;
+    uint32_t workDlenChunksInGroup(const VpuMacroState &state,
+                                   uint32_t group) const;
+    uint32_t byteDlenChunks(size_t bytes) const;
+    size_t dlenGroupBytes() const;
+    uint32_t byteDlenGroups(size_t bytes) const;
+    size_t dlenChunkOffset(uint32_t chunk) const;
+    size_t dlenChunkSize(size_t totalBytes, uint32_t chunk) const;
+    size_t dlenGroupOffset(uint32_t group) const;
+    size_t dlenGroupSizeBytes(size_t totalBytes, uint32_t group) const;
+    size_t dlenGroupTimingBytes(size_t totalBytes, uint32_t group) const;
+    PortID dlenChunkPort(Addr addr, size_t size, uint32_t chunk) const;
+    PortID src0ReadPortId(uint32_t group) const;
+    PortID src1ReadPortId(uint32_t group) const;
+    PortID dstWritePortId(uint32_t group) const;
+    uint64_t encodeToken(ExecToken token, uint32_t chunk = 0) const;
+    ExecToken decodeTokenKind(uint64_t token) const;
+    uint32_t decodeTokenChunk(uint64_t token) const;
     size_t tensorSpanBytes(const TensorDesc &tensor, size_t elemSize,
                            const DecodedVectorOp &op) const;
     size_t tensorElemOffset(const TensorDesc &tensor, const DecodedVectorOp &op,
@@ -236,7 +267,7 @@ class VpuUnit : public SpecializedExecutionUnit
                         const DecodedVectorOp &op, const char *label) const;
     void validateCommand(const MacroCmdContext &macroCmd,
                          VpuMacroState &state) const;
-    Tick computeExecLatency(const VpuMacroState &state);
+    Tick computeExecLatency(const VpuMacroState &state, uint32_t chunk);
     LutUnit::Operation lutOperation(Opcode opcode) const;
     LocalBufferSlot &bufferSlot(const LocalAddr &addr);
     const LocalBufferSlot &bufferSlot(const LocalAddr &addr) const;
@@ -248,7 +279,10 @@ class VpuUnit : public SpecializedExecutionUnit
     bool sourceReady(const TensorDesc &tensor, BufferRole role,
                      size_t spanBytes) const;
     bool storeSourceReady(const VpuMacroState &state) const;
-    void writeResultBytes(const TensorDesc &dst, const std::vector<uint8_t> &bytes,
+    bool computeSourcesReady(const VpuMacroState &state) const;
+    void completeCompute(VpuMacroState &state);
+    void writeResultBytes(const TensorDesc &dst,
+                          const std::vector<uint8_t> &bytes,
                           size_t spanBytes) const;
     uint64_t loadUnsignedValue(const std::vector<uint8_t> &bytes, size_t offset,
                                size_t elemSize) const;
@@ -274,6 +308,9 @@ class VpuUnit : public SpecializedExecutionUnit
     uint32_t classifyIssueQueue(const std::vector<uint8_t> &cmd,
                                 MacroCmdKind kind) const override;
     bool canActivateMacroCmd(const MacroCmdContext &macroCmd) const override;
+    bool canIssueExecWithOutstandingMemUops(
+        const MacroCmdContext &macroCmd,
+        const MicroOpContext &uop) const override;
     void onMacroCmdBegin(MacroCmdContext &macroCmd) override;
     void buildUops(MacroCmdContext &macroCmd) override;
     void onMemUopComplete(MacroCmdContext &macroCmd,
