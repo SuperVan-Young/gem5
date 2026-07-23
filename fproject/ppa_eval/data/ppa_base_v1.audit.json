@@ -1,0 +1,91 @@
+{
+  "input": "fproject/ppa_eval/data/source/1784445812871.xlsx",
+  "input_sha256": "e1a8624ebc477b93651a9f6e6e4acfcda6fd96db68c9c5d17c43a543562fc2c3",
+  "record_count": 13,
+  "ignored": [
+    {
+      "row": 1,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 6,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 7,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 8,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 10,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 11,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 12,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 13,
+      "reason": "missing fields: utilization, period"
+    },
+    {
+      "row": 14,
+      "reason": "missing fields: utilization, period"
+    },
+    {
+      "row": 15,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 16,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 17,
+      "reason": "missing fields: utilization, period, area, timing, power"
+    },
+    {
+      "row": 18,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 19,
+      "reason": "missing fields: utilization, period, area, timing, power"
+    },
+    {
+      "row": 20,
+      "reason": "missing fields: utilization, period, area, timing, power"
+    },
+    {
+      "row": 21,
+      "reason": "missing fields: utilization, period, area, timing, power"
+    },
+    {
+      "row": 22,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 27,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 28,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 29,
+      "reason": "not a PPA design row"
+    },
+    {
+      "row": 30,
+      "reason": "not a PPA design row"
+    }
+  ]
+}
