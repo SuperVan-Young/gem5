@@ -84,9 +84,8 @@ def _summarize_phase(events, sync_indicator):
         )
 
     opcode_counts = Counter(event["opcode_int"] for event in phase_events)
-    total_span_ticks = (
-        max(event["end_tick"] for event in phase_events)
-        - min(event["start_tick"] for event in phase_events)
+    total_span_ticks = max(event["end_tick"] for event in phase_events) - min(
+        event["start_tick"] for event in phase_events
     )
     busy_ticks = sum(int(event.get("duration", 0)) for event in phase_events)
     return {
@@ -109,8 +108,8 @@ def emit_profile_summary():
     softmax = _summarize_phase(events, SOFTMAX_SYNC_INDICATOR)
     pv = _summarize_phase(events, PV_SYNC_INDICATOR)
     total_span_cycles = _ticks_to_cycles(
-        max(qk["end_tick"], softmax["end_tick"], pv["end_tick"]) -
-        min(qk["start_tick"], softmax["start_tick"], pv["start_tick"])
+        max(qk["end_tick"], softmax["end_tick"], pv["end_tick"])
+        - min(qk["start_tick"], softmax["start_tick"], pv["start_tick"])
     )
 
     print(
@@ -158,87 +157,161 @@ def emit_profile_summary():
     return True
 
 
-def build_system(binary, scenario):
+def _load_simulation_config(path):
+    if path is None:
+        return {}
+    with Path(path).open(encoding="utf-8") as source:
+        return json.load(source)
+
+
+def _nested(config, section, field, default):
+    return config.get(section, {}).get(field, default)
+
+
+def build_system(binary, scenario, q, kv, d, simulation):
     if scenario != SCENARIO:
         raise ValueError(f"Unsupported scenario: {scenario}")
 
+    spm_size = _nested(simulation, "spm", "size_bytes", SPM_SIZE_BYTES)
+    spm_base = _nested(simulation, "spm", "base_address", 0x60000000)
+    xbar_width = _nested(
+        simulation, "interconnect", "width_bytes", SYSTEM_XBAR_WIDTH_BYTES
+    )
+    xbar_latency = _nested(
+        simulation,
+        "interconnect",
+        "latency_cycles",
+        SYSTEM_XBAR_LATENCY_CYCLES,
+    )
     mem_ranges = [
-        AddrRange(0, size=0x60000000),
-        AddrRange(0x60000000, size=SPM_SIZE_BYTES),
+        AddrRange(0, size=spm_base),
+        AddrRange(spm_base, size=spm_size),
     ]
     builder = NPUTestSystemBuilder(
-        clock=SYSTEM_CLOCK,
+        clock=f"{simulation.get('clock_mhz', 1000)}MHz",
         mem_ranges=mem_ranges,
         addr_map=NPUAddressMap(),
     )
     builder.build_base_system(
         membus_kwargs={
-            "width": SYSTEM_XBAR_WIDTH_BYTES,
-            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "snoop_response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "width": xbar_width,
+            "frontend_latency": xbar_latency,
+            "forward_latency": xbar_latency,
+            "response_latency": xbar_latency,
+            "snoop_response_latency": xbar_latency,
+            "header_latency": xbar_latency,
         },
         npu_mmio_bus_kwargs={
-            "width": SYSTEM_XBAR_WIDTH_BYTES,
-            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "width": xbar_width,
+            "frontend_latency": xbar_latency,
+            "forward_latency": xbar_latency,
+            "response_latency": xbar_latency,
+            "header_latency": xbar_latency,
         },
         cpu_npu_mmio_bus_kwargs={
-            "width": SYSTEM_XBAR_WIDTH_BYTES,
-            "frontend_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "forward_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "response_latency": SYSTEM_XBAR_LATENCY_CYCLES,
-            "header_latency": SYSTEM_XBAR_LATENCY_CYCLES,
+            "width": xbar_width,
+            "frontend_latency": xbar_latency,
+            "forward_latency": xbar_latency,
+            "response_latency": xbar_latency,
+            "header_latency": xbar_latency,
         },
     )
     builder.add_lowmem(
-        AddrRange(0, size=0x60000000),
-        latency=DRAM_LATENCY,
-        bandwidth=DRAM_BANDWIDTH,
+        AddrRange(0, size=spm_base),
+        latency=_nested(simulation, "memory", "latency", DRAM_LATENCY),
+        bandwidth=_nested(simulation, "memory", "bandwidth", DRAM_BANDWIDTH),
         attr_name="lowmem",
     )
     builder.add_spm(
-        size=SPM_SIZE_BYTES,
-        latency=SPM_LATENCY,
-        bandwidth=SPM_BANDWIDTH,
-        pipeline_depth=SPM_PIPELINE_DEPTH,
-        pipeline_ports=SPM_PIPELINE_PORTS,
-        pipeline_port_stride=SPM_PIPELINE_PORT_STRIDE,
+        size=spm_size,
+        latency=_nested(simulation, "spm", "latency", SPM_LATENCY),
+        bandwidth=_nested(simulation, "spm", "bandwidth", SPM_BANDWIDTH),
+        pipeline_depth=_nested(
+            simulation, "spm", "pipeline_depth", SPM_PIPELINE_DEPTH
+        ),
+        pipeline_ports=_nested(
+            simulation, "spm", "pipeline_ports", SPM_PIPELINE_PORTS
+        ),
+        pipeline_port_stride=_nested(
+            simulation,
+            "spm",
+            "pipeline_port_stride",
+            SPM_PIPELINE_PORT_STRIDE,
+        ),
     )
     builder.add_cpu(cpu_id=0)
-    process = builder.set_workload(os.path.abspath(binary), argv=[scenario])
+    process = builder.set_workload(
+        os.path.abspath(binary),
+        argv=[
+            "--scenario",
+            scenario,
+            "--q",
+            str(q),
+            "--kv",
+            str(kv),
+            "--d",
+            str(d),
+        ],
+    )
     builder.add_megacmdqueue()
     builder.add_mpu(
         attr_name="mpu",
         device_id=0,
-        num_mem_side_ports=MPU_MEM_SIDE_PORTS,
-        mem_port_outstanding_limit=MPU_MEM_PORT_OUTSTANDING_LIMIT,
-        array_dim=MPU_ARRAY_DIM,
-        a_buffer_capacity_bytes=MPU_A_BUFFER_BYTES,
-        b_buffer_capacity_bytes=MPU_B_BUFFER_BYTES,
-        c_buffer_capacity_bytes=MPU_C_BUFFER_BYTES,
+        num_mem_side_ports=_nested(
+            simulation, "mpu", "mem_side_ports", MPU_MEM_SIDE_PORTS
+        ),
+        mem_port_outstanding_limit=_nested(
+            simulation,
+            "mpu",
+            "outstanding_limit",
+            MPU_MEM_PORT_OUTSTANDING_LIMIT,
+        ),
+        array_dim=_nested(simulation, "mpu", "array_dim", MPU_ARRAY_DIM),
+        a_buffer_capacity_bytes=_nested(
+            simulation, "mpu", "a_buffer_bytes", MPU_A_BUFFER_BYTES
+        ),
+        b_buffer_capacity_bytes=_nested(
+            simulation, "mpu", "b_buffer_bytes", MPU_B_BUFFER_BYTES
+        ),
+        c_buffer_capacity_bytes=_nested(
+            simulation, "mpu", "c_buffer_bytes", MPU_C_BUFFER_BYTES
+        ),
     )
     lut = builder.add_lut(
-        range_reduction_latency="1ns",
-        lookup_latency="1ns",
-        interpolation_latency="1ns",
-        normalize_latency="1ns",
-        dlen_bytes=512,
+        range_reduction_latency=_nested(
+            simulation, "lut", "range_reduction_latency", "1ns"
+        ),
+        lookup_latency=_nested(simulation, "lut", "lookup_latency", "1ns"),
+        interpolation_latency=_nested(
+            simulation, "lut", "interpolation_latency", "1ns"
+        ),
+        normalize_latency=_nested(
+            simulation, "lut", "normalize_latency", "1ns"
+        ),
+        dlen_bytes=_nested(simulation, "vpu", "dlen_bytes", 512),
     )
     builder.add_vpu(
         vpu_id=0,
-        num_mem_side_ports=32,
-        input_buffer_count=24,
-        output_buffer_count=12,
-        local_buffer_stride=128 * 128 * 4,
-        dlen_bytes=512,
-        float32_cycles_per_dlen=1,
-        float16_cycles_per_dlen=2,
-        int32_cycles_per_dlen=2,
+        num_mem_side_ports=_nested(simulation, "vpu", "mem_side_ports", 32),
+        input_buffer_count=_nested(
+            simulation, "vpu", "input_buffer_count", 24
+        ),
+        output_buffer_count=_nested(
+            simulation, "vpu", "output_buffer_count", 12
+        ),
+        local_buffer_stride=_nested(
+            simulation, "vpu", "local_buffer_stride", 128 * 128 * 4
+        ),
+        dlen_bytes=_nested(simulation, "vpu", "dlen_bytes", 512),
+        float32_cycles_per_dlen=_nested(
+            simulation, "vpu", "float32_cycles_per_dlen", 1
+        ),
+        float16_cycles_per_dlen=_nested(
+            simulation, "vpu", "float16_cycles_per_dlen", 2
+        ),
+        int32_cycles_per_dlen=_nested(
+            simulation, "vpu", "int32_cycles_per_dlen", 2
+        ),
         lut=lut,
     )
     builder.instantiate_root()
@@ -248,15 +321,33 @@ def build_system(binary, scenario):
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True)
 parser.add_argument("--scenario", required=True)
+parser.add_argument("--q", type=int, default=256)
+parser.add_argument("--kv", type=int, default=1024)
+parser.add_argument("--d", type=int, default=128)
+parser.add_argument("--profile-log")
+parser.add_argument("--simulation-config")
 args = parser.parse_args()
 
-builder, process = build_system(args.binary, args.scenario)
+if args.q <= 0 or args.kv <= 0 or args.d <= 0:
+    parser.error("--q, --kv, and --d must be positive")
+if args.profile_log:
+    PROFILE_LOG = Path(args.profile_log).resolve()
+simulation = _load_simulation_config(args.simulation_config)
+if simulation.get("clock_mhz", 1000) != 1000:
+    parser.error("simulation clock must be 1000 MHz")
+
+builder, process = build_system(
+    args.binary, args.scenario, args.q, args.kv, args.d, simulation
+)
 m5.instantiate()
 
 builder.map_cmdq(process=process)
 builder.map_sync(process=process)
 builder.map_spm(process=process)
-builder.map_dram(process=process, size=DRAM_MAP_SIZE_BYTES)
+builder.map_dram(
+    process=process,
+    size=_nested(simulation, "memory", "dram_size_bytes", DRAM_MAP_SIZE_BYTES),
+)
 builder.map_vpu(process=process, vpu_id=0)
 
 exit_event = m5.simulate()
@@ -293,7 +384,7 @@ if (
     profile_ok
     and exit_cause == EXPECTED_EXIT_CAUSE
     and exit_code == EXPECTED_EXIT_CODE
-    and active_mpu.completedCmdCount() == 2
+    and active_mpu.completedCmdCount() == 1 + (args.kv + 127) // 128
     and active_vpu.completedCmdCount() == 14
     and active_vpu.queueOccupancy() == 0
 ):

@@ -82,14 +82,14 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Unexpected total matmul FLOPs in %s", PERF_SUMMARY)
         if summary["profile"]["qk_fast_matmul"]["macro_count"] != 1:
             test_util.fail("QK fastMatmul should have one macro")
-        if summary["profile"]["pv_fast_matmul"]["macro_count"] != 1:
-            test_util.fail("PV fastMatmul should have one macro")
+        if summary["profile"]["pv_fast_matmul"]["macro_count"] != 8:
+            test_util.fail("PV fastMatmul should have eight K-block macros")
         if summary["profile"]["fast_online_softmax"]["macro_count"] != 14:
             test_util.fail("fastOnlineSoftmax should have 14 macros")
-        if summary["profile"]["operator_total"]["macro_count"] != 16:
-            test_util.fail("FlashAttentionV2 operator should have 16 macros")
-        if summary["mpu_summary"]["cmds"] != 2:
-            test_util.fail("Expected two MPU fastMatmul commands")
+        if summary["profile"]["operator_total"]["macro_count"] != 23:
+            test_util.fail("FlashAttentionV2 operator should have 23 macros")
+        if summary["mpu_summary"]["cmds"] != 9:
+            test_util.fail("Expected nine MPU fastMatmul commands")
         if summary["vpu_summary"]["cmds"] != 14:
             test_util.fail("Expected 14 VPU softmax commands")
         if summary["vpu_summary"]["max_active_uops"] <= 1:
@@ -121,7 +121,7 @@ register_npu_test(
             r"sync_indicator=129 status=PASS",
             r"FLASH_ATTENTION_V2_FAST_ONLINE_SOFTMAX cmds=14 "
             r"sync_indicator=145 status=PASS",
-            r"FLASH_ATTENTION_V2_PV_FAST_MATMUL cmds=1 template_builds=1 "
+            r"FLASH_ATTENTION_V2_PV_FAST_MATMUL cmds=8 template_builds=8 "
             r"sync_indicator=130 status=PASS",
             r"FLASH_ATTENTION_V2_PROFILE_QK total_span_cycles=[0-9]+ "
             r"busy_cycles=[0-9]+ macro_count=1 fused_matmul=1 status=PASS",
@@ -129,11 +129,11 @@ register_npu_test(
             r"busy_cycles=[0-9]+ macro_count=14 reduce_max=1 add=3 sub=3 "
             r"mul=1 div=1 scale=1 abs=1 reduce_sum=1 exp=2 status=PASS",
             r"FLASH_ATTENTION_V2_PROFILE_PV total_span_cycles=[0-9]+ "
-            r"busy_cycles=[0-9]+ macro_count=1 fused_matmul=1 status=PASS",
+            r"busy_cycles=[0-9]+ macro_count=8 fused_matmul=8 status=PASS",
             r"FLASH_ATTENTION_V2_PROFILE_TOTAL total_span_cycles=[0-9]+ "
-            r"busy_cycles=[0-9]+ macro_count=16 status=PASS",
+            r"busy_cycles=[0-9]+ macro_count=23 status=PASS",
             r"FLASH_ATTENTION_V2_PASS",
-            r"FLASH_ATTENTION_V2_MPU_SUMMARY cmds=2 "
+            r"FLASH_ATTENTION_V2_MPU_SUMMARY cmds=9 "
             r"compute_cycles=[0-9]+ drain_cycles=[0-9]+ "
             r"output_ready_cycles=[0-9]+ cmd_cycles=[0-9]+ "
             r"spm_wait=[0-9]+ macs=[0-9]+ busy=[0-9]+ idle=[0-9]+",

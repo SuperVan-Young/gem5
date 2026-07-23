@@ -4,11 +4,13 @@
 import csv
 import hashlib
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import (
+    asdict,
+    dataclass,
+)
 from pathlib import Path
 
 import yaml
-
 
 ARA_LANES = 4
 MESH_DIM = 32
@@ -99,7 +101,9 @@ def _positive_number(value, path):
 def load_config(path):
     config = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "root")
     _check_fields(
-        config, {"schema_version", "name", "system", "compute"}, "root"
+        config,
+        {"schema_version", "name", "system", "compute", "simulation"},
+        "root",
     )
     if config.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
@@ -132,9 +136,7 @@ def load_config(path):
         "compute.vector",
     )
     tensor = _mapping(compute.get("tensor"), "compute.tensor")
-    _check_fields(
-        tensor, {"array_dim", "utilization_pct"}, "compute.tensor"
-    )
+    _check_fields(tensor, {"array_dim", "utilization_pct"}, "compute.tensor")
 
     return {
         "schema_version": 1,
@@ -151,9 +153,7 @@ def load_config(path):
                     "compute.vector.fp32_ops_per_cycle",
                 ),
                 "utilization_pct": _positive_number(
-                    vector.get(
-                        "utilization_pct", DEFAULT_UTILIZATION_PCT
-                    ),
+                    vector.get("utilization_pct", DEFAULT_UTILIZATION_PCT),
                     "compute.vector.utilization_pct",
                 ),
                 "implementation_variant": vector.get(
@@ -165,9 +165,7 @@ def load_config(path):
                     tensor.get("array_dim"), "compute.tensor.array_dim"
                 ),
                 "utilization_pct": _positive_number(
-                    tensor.get(
-                        "utilization_pct", DEFAULT_UTILIZATION_PCT
-                    ),
+                    tensor.get("utilization_pct", DEFAULT_UTILIZATION_PCT),
                     "compute.tensor.utilization_pct",
                 ),
             },
@@ -265,9 +263,7 @@ def _module_result(
         ),
         "instance_tops": instance_ops_per_cycle * frequency_mhz / 1_000_000.0,
         "instance_count": instance_count,
-        "provisioned_ops_per_cycle": (
-            instance_count * instance_ops_per_cycle
-        ),
+        "provisioned_ops_per_cycle": (instance_count * instance_ops_per_cycle),
         "selected_record": asdict(record),
         "selection": selection,
         "power_w": instance_count * record.power_w,

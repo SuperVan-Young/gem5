@@ -96,9 +96,31 @@ compute:
             config["compute"]["vector"]["implementation_variant"],
             "no_macro",
         )
-        self.assertEqual(
-            config["compute"]["tensor"]["utilization_pct"], 50.0
-        )
+        self.assertEqual(config["compute"]["tensor"]["utilization_pct"], 50.0)
+
+    def test_config_allows_simulation_section_without_affecting_ppa(self):
+        content = """
+schema_version: 1
+name: sample
+system:
+  frequency_mhz: 2000
+  pdk: T7
+compute:
+  vector:
+    fp32_ops_per_cycle: 128
+  tensor:
+    array_dim: 128
+simulation:
+  clock_mhz: 1000
+  spm:
+    size_bytes: 8388608
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(content, encoding="utf-8")
+            config = load_config(path)
+        self.assertNotIn("simulation", config)
+        self.assertEqual(config["system"]["frequency_mhz"], 2000.0)
 
     def test_evaluate_counts_and_totals(self):
         records = [

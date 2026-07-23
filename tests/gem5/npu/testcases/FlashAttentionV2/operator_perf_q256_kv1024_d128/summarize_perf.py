@@ -17,7 +17,6 @@ PROFILE_PV_PREFIX = "FLASH_ATTENTION_V2_PROFILE_PV"
 PROFILE_TOTAL_PREFIX = "FLASH_ATTENTION_V2_PROFILE_TOTAL"
 MPU_SUMMARY_PREFIX = "FLASH_ATTENTION_V2_MPU_SUMMARY"
 VPU_SUMMARY_PREFIX = "FLASH_ATTENTION_V2_VPU_SUMMARY"
-THEORETICAL_TOPS = 16.0
 
 
 def parse_args():
@@ -28,6 +27,8 @@ def parse_args():
     parser.add_argument("--profile-html")
     parser.add_argument("--stdout-artifact")
     parser.add_argument("--output")
+    parser.add_argument("--clock-mhz", type=float, default=1000.0)
+    parser.add_argument("--array-dim", type=int, default=128)
     return parser.parse_args()
 
 
@@ -93,15 +94,17 @@ def main():
     total_matmul_flops = require_int(shape, "total_matmul_flops")
     total_span_cycles = require_int(total, "total_span_cycles")
     total_busy_cycles = require_int(total, "busy_cycles")
+    clock_hz = args.clock_mhz * 1_000_000
+    theoretical_tops = (
+        args.array_dim * args.array_dim * clock_hz / 1_000_000_000_000
+    )
     host_inclusive_tops = (
-        total_matmul_flops / (total_span_cycles / 1_000_000_000) /
-        1_000_000_000_000
+        total_matmul_flops / (total_span_cycles / clock_hz) / 1_000_000_000_000
     )
     effective_tops = (
-        total_matmul_flops / (total_busy_cycles / 1_000_000_000) /
-        1_000_000_000_000
+        total_matmul_flops / (total_busy_cycles / clock_hz) / 1_000_000_000_000
     )
-    utilization = effective_tops / THEORETICAL_TOPS
+    utilization = effective_tops / theoretical_tops
 
     summary = {
         "shape": {
@@ -109,9 +112,7 @@ def main():
             "kv": require_int(shape, "kv"),
             "d": require_int(shape, "d"),
             "matmul_count": require_int(shape, "matmul_count"),
-            "single_matmul_flops": require_int(
-                shape, "single_matmul_flops"
-            ),
+            "single_matmul_flops": require_int(shape, "single_matmul_flops"),
             "total_matmul_flops": total_matmul_flops,
         },
         "profile": {
@@ -138,16 +139,23 @@ def main():
             "operator_total": stage_summary(total),
         },
         "performance": {
-            "clock_hz": 1_000_000_000,
-            "theoretical_tops": THEORETICAL_TOPS,
+            "primary_cycle_metric": "busy_cycles",
+            "clock_hz": clock_hz,
+            "array_dim": args.array_dim,
+            "theoretical_tops": theoretical_tops,
+            "total_tensor_macs": total_matmul_flops // 2,
+            "total_tensor_ops": total_matmul_flops,
+            "op_counting": "multiply_add_as_two_ops",
             "npu_active_cycles": total_busy_cycles,
+            "operator_busy_cycles": total_busy_cycles,
             "host_inclusive_cycles": total_span_cycles,
+            "operator_elapsed_cycles": total_span_cycles,
             "effective_tops": effective_tops,
             "utilization": utilization,
             "utilization_percent": utilization * 100.0,
             "host_inclusive_effective_tops": host_inclusive_tops,
             "host_inclusive_utilization": (
-                host_inclusive_tops / THEORETICAL_TOPS
+                host_inclusive_tops / theoretical_tops
             ),
         },
         "mpu_summary": {
