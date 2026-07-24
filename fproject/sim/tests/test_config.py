@@ -15,15 +15,29 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ConfigTest(unittest.TestCase):
-    def test_f7_hardware_has_separate_simulation_clock(self):
+    def test_f7_hardware_uses_ppa_compute_rate(self):
         hardware = load_hardware(ROOT / "fproject/ppa_eval/configs/f7.yaml")
         self.assertEqual(hardware["ppa_frequency_mhz"], 2000)
-        self.assertEqual(hardware["simulation"]["clock_mhz"], 1000)
-        self.assertEqual(hardware["array_dim"], 128)
+        self.assertEqual(hardware["simulation"]["clock_mhz"], 2000)
+        self.assertEqual(hardware["array_dim"], 64)
+        self.assertEqual(hardware["tensor_ops_per_cycle"], 8192)
+        self.assertEqual(hardware["vector_fp32_elements_per_cycle"], 128)
+        self.assertEqual(hardware["vector_fp32_flops_per_cycle"], 256)
         self.assertEqual(hardware["ppa_sram_capacity_bytes"], 262144)
         self.assertEqual(
             hardware["simulation"]["spm"]["size_bytes"], 8 * 1024 * 1024
         )
+
+    def test_rejects_simulation_clock_that_differs_from_ppa(self):
+        source = ROOT / "fproject/ppa_eval/configs/f7.yaml"
+        content = source.read_text(encoding="utf-8").replace(
+            "clock_mhz: 2000", "clock_mhz: 1000"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "hardware.yaml"
+            path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "must match"):
+                load_hardware(path)
 
     def test_runtime_shapes_are_loaded_from_task_files(self):
         first = load_task(

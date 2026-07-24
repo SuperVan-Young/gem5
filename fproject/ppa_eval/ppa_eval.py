@@ -60,6 +60,7 @@ def _module_text(module):
         f"  {module['kind']}: instances={module['instance_count']} "
         f"record={record['record_id']} power={module['power_w']:.6f} W "
         f"area={module['area_mm2']:.6f} mm^2 "
+        f"peak={module['requested_tops']:.6f} TOPS "
         f"timing_met={record['timing_met']} "
         f"timing_fallback={fallback}"
     )
@@ -117,7 +118,9 @@ def render_text(result):
         ),
         (
             f"Architecture: {baseline['system']['frequency_mhz']:.0f} MHz, "
-            "32 x ara_sys + 16 x Mesh_BOTH_32x32 + 256 KiB SRAM"
+            f"{baseline['modules']['vector']['instance_count']} x ara_sys + "
+            f"{baseline['modules']['tensor']['instance_count']} x "
+            "Mesh_BOTH_32x32 + 256 KiB SRAM"
         ),
         separator,
         (

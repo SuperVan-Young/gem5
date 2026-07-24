@@ -46,6 +46,7 @@ struct TaskShape
     uint32_t d = 128U;
     uint32_t br = 128U;
     uint32_t bc = 128U;
+    uint32_t arrayDim = ArrayDim;
     const char *scenario = ExpectedScenario;
 };
 
@@ -84,6 +85,8 @@ parseArgs(int argc, char **argv, TaskShape *shape)
             target = &shape->br;
         } else if (strcmp(arg, "--bc") == 0) {
             target = &shape->bc;
+        } else if (strcmp(arg, "--array-dim") == 0) {
+            target = &shape->arrayDim;
         } else if (strcmp(arg, "--scenario") == 0) {
             if (++index >= argc) {
                 return false;
@@ -103,7 +106,7 @@ parseArgs(int argc, char **argv, TaskShape *shape)
 
     return strcmp(shape->scenario, ExpectedScenario) == 0 &&
            shape->d <= 255U && shape->br == ArrayDim &&
-           shape->bc == ArrayDim;
+           shape->bc == ArrayDim && shape->arrayDim <= ArrayDim;
 }
 
 static bool
@@ -208,11 +211,11 @@ waitOutputValueReady(const NpuMpuGemmSpmI32Matrix *matrix)
 
 static int
 runFastMatmul(const MatmulWorkspace &workspace, uint32_t m, uint32_t n,
-              uint32_t k, uint32_t sync_indicator, uint32_t seed,
-              NpuFastMatmulStats *stats)
+              uint32_t k, uint32_t array_dim, uint32_t sync_indicator,
+              uint32_t seed, NpuFastMatmulStats *stats)
 {
-    const uint32_t tile_m = std::min(m, ArrayDim);
-    const uint32_t tile_n = std::min(n, ArrayDim);
+    const uint32_t tile_m = std::min(m, array_dim);
+    const uint32_t tile_n = std::min(n, array_dim);
     const NpuMpuGemmProblemShape problem = {m, n, k};
     const NpuMpuGemmTileShape tile = {tile_m, tile_n, k};
     const NpuMpuGemmSpmI8Matrix a_matrix =
@@ -415,7 +418,7 @@ main(int argc, char **argv)
             NpuFastMatmulStats tile_pv_stats = {};
             NpuFastOnlineSoftmaxStats tile_softmax_stats = {};
             if (runFastMatmul(
-                    workspace, block_q, block_kv, shape.d,
+                    workspace, block_q, block_kv, shape.d, shape.arrayDim,
                     QKSyncIndicator, q0 + kv0, &tile_qk_stats) != 0) {
                 printf(
                     "FLASH_ATTENTION_V2_QK_FAST_MATMUL_FAIL "
@@ -433,7 +436,7 @@ main(int argc, char **argv)
                 return 1;
             }
             if (runFastMatmul(
-                    workspace, block_q, shape.d, block_kv,
+                    workspace, block_q, shape.d, block_kv, shape.arrayDim,
                     PVSyncIndicator, 5U + q0 + kv0,
                     &tile_pv_stats) != 0) {
                 printf(
@@ -464,12 +467,12 @@ main(int argc, char **argv)
     const uint64_t stage_ops = singleStageOps(shape);
     printf("FLASH_ATTENTION_V2_SCENARIO=%s\n", shape.scenario);
     printf("FLASH_ATTENTION_V2_SHAPE q=%u kv=%u d=%u tile_m=%u tile_n=%u "
-           "tile_k=%u br=%u bc=%u q_blocks=%u kv_blocks=%u "
+           "tile_k=%u br=%u bc=%u array_dim=%u q_blocks=%u kv_blocks=%u "
            "attention_tiles=%u padded_q_rows=%u matmul_count=2 "
            "single_matmul_flops=%llu total_matmul_flops=%llu\n",
            shape.q, shape.kv, shape.d, std::min(shape.q, shape.br),
            std::min(shape.kv, shape.bc), shape.d, shape.br, shape.bc,
-           q_blocks, kv_blocks, attention_tiles, padded_q_rows,
+           shape.arrayDim, q_blocks, kv_blocks, attention_tiles, padded_q_rows,
            static_cast<unsigned long long>(stage_ops),
            static_cast<unsigned long long>(stage_ops * 2ULL));
     printf("FLASH_ATTENTION_V2_QK_FAST_MATMUL cmds=%u template_builds=%u "

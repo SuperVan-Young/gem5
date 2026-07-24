@@ -51,8 +51,12 @@ fproject/ppa_eval/
 ## 评估口径
 
 - 系统频率：2 GHz。
-- Tensor：128×128 仿真阵列折算为 16 个 `Mesh_BOTH_32x32`。
-- Vector：512 B/cycle FP32 数据通路为 128 FP32 ops/cycle；每个 4-lane `ara_sys` 提供 4 ops/cycle，因此需要 32 个。
+- Tensor：4 个 `Mesh_BOTH_32x32` 提供 4096 MAC/cycle；FMA
+  按乘、加 2 ops 计，因此在 2 GHz 下提供 16.384 TOPS。
+- Vector：512 B/cycle FP32 数据通路为 128 FP32 elements/cycle。
+  Ara 每 lane 每周期处理一个 64-bit packet，即 2 个 FP32 elements；
+  每个 4-lane `ara_sys` 提供 8 elements/cycle，因此需要 16 个。
+- Vector FMA 同样按 2 ops/element 计，峰值为 0.512 TFLOPS。
 - 每个 `ara_sys` 完整计入 CPU、RVV 和 L1Cache。
 - 每个 SM 配置 256 KiB SRAM，由 4 个 16384×32（64 KiB）macro
   组成。

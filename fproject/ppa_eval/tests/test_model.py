@@ -110,9 +110,9 @@ system:
   pdk: T7
 compute:
   vector:
-    fp32_ops_per_cycle: 128
+    fp32_elements_per_cycle: 128
   tensor:
-    array_dim: 128
+    array_dim: 64
 memory:
   sram:
     capacity_bytes: 262144
@@ -138,14 +138,14 @@ system:
   pdk: T7
 compute:
   vector:
-    fp32_ops_per_cycle: 128
+    fp32_elements_per_cycle: 128
   tensor:
-    array_dim: 128
+    array_dim: 64
 memory:
   sram:
     capacity_bytes: 262144
 simulation:
-  clock_mhz: 1000
+  clock_mhz: 2000
   spm:
     size_bytes: 8388608
 """
@@ -185,12 +185,12 @@ simulation:
             },
             "compute": {
                 "vector": {
-                    "fp32_ops_per_cycle": 128.0,
+                    "fp32_elements_per_cycle": 128.0,
                     "utilization_pct": 50.0,
                     "implementation_variant": "no_macro",
                 },
                 "tensor": {
-                    "array_dim": 128.0,
+                    "array_dim": 64.0,
                     "utilization_pct": 50.0,
                 },
             },
@@ -208,16 +208,22 @@ simulation:
                 [make_sram_record()],
                 sram_datasheet,
             )
-        self.assertEqual(result["modules"]["vector"]["instance_count"], 32)
-        self.assertEqual(result["modules"]["tensor"]["instance_count"], 16)
+        self.assertEqual(result["modules"]["vector"]["instance_count"], 16)
+        self.assertEqual(result["modules"]["tensor"]["instance_count"], 4)
         self.assertEqual(result["modules"]["sram"]["instance_count"], 4)
-        self.assertAlmostEqual(result["totals"]["compute_power_w"], 64)
+        self.assertEqual(
+            result["modules"]["vector"]["requested_ops_per_cycle"], 256
+        )
+        self.assertEqual(
+            result["modules"]["tensor"]["requested_ops_per_cycle"], 8192
+        )
+        self.assertAlmostEqual(result["totals"]["compute_power_w"], 24)
         self.assertAlmostEqual(
             result["totals"]["sram_static_power_w"], 0.00025494
         )
-        self.assertAlmostEqual(result["totals"]["power_w"], 64.00025494)
-        self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 20)
-        self.assertAlmostEqual(result["totals"]["area_mm2"], 20.09299664)
+        self.assertAlmostEqual(result["totals"]["power_w"], 24.00025494)
+        self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 9)
+        self.assertAlmostEqual(result["totals"]["area_mm2"], 9.09299664)
         self.assertEqual(len(result["warnings"]), 2)
 
     def test_sram_capacity_rounds_up_to_whole_macros(self):
@@ -234,7 +240,7 @@ simulation:
             },
             "compute": {
                 "vector": {
-                    "fp32_ops_per_cycle": 4.0,
+                    "fp32_elements_per_cycle": 8.0,
                     "utilization_pct": 50.0,
                     "implementation_variant": "no_macro",
                 },
@@ -272,7 +278,7 @@ simulation:
             },
             "compute": {
                 "vector": {
-                    "fp32_ops_per_cycle": 4.0,
+                    "fp32_elements_per_cycle": 8.0,
                     "utilization_pct": 50.0,
                     "implementation_variant": "no_macro",
                 },

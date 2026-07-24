@@ -95,6 +95,11 @@ def main():
     kv = require_int(shape, "kv")
     br = require_int(shape, "br")
     bc = require_int(shape, "bc")
+    reported_array_dim = require_int(shape, "array_dim")
+    if reported_array_dim != args.array_dim:
+        raise ValueError(
+            "Reported array_dim does not match performance configuration"
+        )
     q_blocks = (q + br - 1) // br
     kv_blocks = (kv + bc - 1) // bc
     attention_tiles = q_blocks * kv_blocks
@@ -129,9 +134,8 @@ def main():
     total_span_cycles = require_int(total, "total_span_cycles")
     total_busy_cycles = require_int(total, "busy_cycles")
     clock_hz = args.clock_mhz * 1_000_000
-    theoretical_tops = (
-        args.array_dim * args.array_dim * clock_hz / 1_000_000_000_000
-    )
+    tensor_ops_per_cycle = 2 * args.array_dim * args.array_dim
+    theoretical_tops = tensor_ops_per_cycle * clock_hz / 1_000_000_000_000
     host_inclusive_tops = (
         total_matmul_flops / (total_span_cycles / clock_hz) / 1_000_000_000_000
     )
@@ -152,6 +156,7 @@ def main():
         "tiling": {
             "br": br,
             "bc": bc,
+            "hardware_array_dim": reported_array_dim,
             "q_blocks": q_blocks,
             "kv_blocks": kv_blocks,
             "attention_tiles": attention_tiles,
@@ -185,6 +190,7 @@ def main():
             "primary_cycle_metric": "busy_cycles",
             "clock_hz": clock_hz,
             "array_dim": args.array_dim,
+            "tensor_ops_per_cycle": tensor_ops_per_cycle,
             "theoretical_tops": theoretical_tops,
             "total_tensor_macs": total_matmul_flops // 2,
             "total_tensor_ops": total_matmul_flops,

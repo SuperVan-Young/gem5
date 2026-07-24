@@ -7,11 +7,11 @@ system:
     flow: DC-Innovus
 compute:
     vector:
-        fp32_ops_per_cycle: 128
+        fp32_elements_per_cycle: 128
         utilization_pct: 50
         implementation_variant: no_macro
     tensor:
-        array_dim: 128
+        array_dim: 64
         utilization_pct: 50
 memory:
     sram:

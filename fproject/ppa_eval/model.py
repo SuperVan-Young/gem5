@@ -13,6 +13,8 @@ from pathlib import Path
 import yaml
 
 ARA_LANES = 4
+ARA_FP32_ELEMENTS_PER_LANE_PER_CYCLE = 2
+OPS_PER_FMA = 2
 MESH_DIM = 32
 DEFAULT_FLOW = "DC-Innovus"
 DEFAULT_UTILIZATION_PCT = 50.0
@@ -271,7 +273,7 @@ def load_config(path):
     _check_fields(
         vector,
         {
-            "fp32_ops_per_cycle",
+            "fp32_elements_per_cycle",
             "utilization_pct",
             "implementation_variant",
         },
@@ -294,9 +296,9 @@ def load_config(path):
         },
         "compute": {
             "vector": {
-                "fp32_ops_per_cycle": _positive_number(
-                    vector.get("fp32_ops_per_cycle"),
-                    "compute.vector.fp32_ops_per_cycle",
+                "fp32_elements_per_cycle": _positive_number(
+                    vector.get("fp32_elements_per_cycle"),
+                    "compute.vector.fp32_elements_per_cycle",
                 ),
                 "utilization_pct": _positive_number(
                     vector.get("utilization_pct", DEFAULT_UTILIZATION_PCT),
@@ -477,8 +479,11 @@ def evaluate_config(
     sram = _sram_result(config, sram_records, frequency_mhz)
 
     vector_config = config["compute"]["vector"]
-    vector_ops = vector_config["fp32_ops_per_cycle"]
-    vector_count = math.ceil(vector_ops / ARA_LANES)
+    vector_elements = vector_config["fp32_elements_per_cycle"]
+    ara_elements = ARA_LANES * ARA_FP32_ELEMENTS_PER_LANE_PER_CYCLE
+    vector_ops = vector_elements * OPS_PER_FMA
+    ara_ops = ara_elements * OPS_PER_FMA
+    vector_count = math.ceil(vector_elements / ara_elements)
     vector_record, vector_selection = select_record(
         records,
         pdk=pdk,
@@ -491,16 +496,25 @@ def evaluate_config(
     vector = _module_result(
         "vector",
         vector_ops,
-        ARA_LANES,
+        ara_ops,
         vector_count,
         vector_record,
         vector_selection,
         frequency_mhz,
     )
+    vector.update(
+        {
+            "requested_fp32_elements_per_cycle": vector_elements,
+            "instance_fp32_elements_per_cycle": ara_elements,
+            "op_counting": "fp32_fma_as_two_ops",
+        }
+    )
 
     tensor_config = config["compute"]["tensor"]
-    tensor_ops = tensor_config["array_dim"] ** 2
-    mesh_ops = MESH_DIM**2
+    tensor_macs = tensor_config["array_dim"] ** 2
+    mesh_macs = MESH_DIM**2
+    tensor_ops = tensor_macs * OPS_PER_FMA
+    mesh_ops = mesh_macs * OPS_PER_FMA
     tensor_count = math.ceil(tensor_ops / mesh_ops)
     tensor_record, tensor_selection = select_record(
         records,
@@ -518,6 +532,13 @@ def evaluate_config(
         tensor_record,
         tensor_selection,
         frequency_mhz,
+    )
+    tensor.update(
+        {
+            "requested_macs_per_cycle": tensor_macs,
+            "instance_macs_per_cycle": mesh_macs,
+            "op_counting": "multiply_add_as_two_ops",
+        }
     )
     compute_power_w = vector["power_w"] + tensor["power_w"]
     compute_area_um2 = vector["area_um2"] + tensor["area_um2"]

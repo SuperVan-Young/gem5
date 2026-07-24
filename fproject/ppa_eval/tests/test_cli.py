@@ -29,10 +29,10 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(
-            report["baseline"]["modules"]["vector"]["instance_count"], 32
+            report["baseline"]["modules"]["vector"]["instance_count"], 16
         )
         self.assertEqual(
-            report["candidate"]["modules"]["tensor"]["instance_count"], 16
+            report["candidate"]["modules"]["tensor"]["instance_count"], 4
         )
         self.assertEqual(
             report["baseline"]["modules"]["sram"]["instance_count"], 4
@@ -57,8 +57,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("PPA COMPARISON: T7 (baseline) -> F7", result.stdout)
         self.assertIn("Power (W)", result.stdout)
         self.assertIn("Area (mm^2)", result.stdout)
-        self.assertIn("29.573%", result.stdout)
-        self.assertIn("30.015%", result.stdout)
+        self.assertIn("36.537%", result.stdout)
+        self.assertIn("27.965%", result.stdout)
+        self.assertIn("16 x ara_sys + 4 x Mesh_BOTH_32x32", result.stdout)
+        self.assertIn("peak=16.384000 TOPS", result.stdout)
         self.assertIn("requested=256.000 KiB", result.stdout)
         self.assertIn("sram_power=static-only", result.stdout)
 

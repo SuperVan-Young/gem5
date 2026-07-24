@@ -109,11 +109,16 @@ def load_hardware(path):
     simulation = _mapping(config.get("simulation"), "simulation")
     if simulation.get("schema_version") != 1:
         raise ConfigError("simulation.schema_version must be 1")
-    if (
-        _positive_number(simulation.get("clock_mhz"), "simulation.clock_mhz")
-        != 1000
-    ):
-        raise ConfigError("simulation.clock_mhz must be 1000 for V1")
+    simulation_clock_mhz = _positive_number(
+        simulation.get("clock_mhz"), "simulation.clock_mhz"
+    )
+    ppa_frequency_mhz = _positive_number(
+        system.get("frequency_mhz"), "system.frequency_mhz"
+    )
+    if simulation_clock_mhz != ppa_frequency_mhz:
+        raise ConfigError(
+            "simulation.clock_mhz must match system.frequency_mhz"
+        )
 
     required_sections = {
         "memory",
@@ -148,14 +153,14 @@ def load_hardware(path):
         simulation["vpu"].get("dlen_bytes"),
         "simulation.vpu.dlen_bytes",
     )
-    vector_ops = _positive_number(
-        vector.get("fp32_ops_per_cycle"),
-        "compute.vector.fp32_ops_per_cycle",
+    vector_elements = _positive_number(
+        vector.get("fp32_elements_per_cycle"),
+        "compute.vector.fp32_elements_per_cycle",
     )
-    if dlen_bytes % 4 != 0 or dlen_bytes // 4 != vector_ops:
+    if dlen_bytes % 4 != 0 or dlen_bytes // 4 != vector_elements:
         raise ConfigError(
             "simulation.vpu.dlen_bytes / 4 must match "
-            "compute.vector.fp32_ops_per_cycle"
+            "compute.vector.fp32_elements_per_cycle"
         )
     spm = simulation["spm"]
     _positive_int(spm.get("base_address"), "simulation.spm.base_address")
@@ -163,11 +168,12 @@ def load_hardware(path):
 
     return {
         "name": _string(config.get("name"), "name"),
-        "ppa_frequency_mhz": _positive_number(
-            system.get("frequency_mhz"), "system.frequency_mhz"
-        ),
+        "ppa_frequency_mhz": ppa_frequency_mhz,
         "ppa_sram_capacity_bytes": ppa_sram_capacity,
         "array_dim": array_dim,
+        "tensor_ops_per_cycle": 2 * array_dim * array_dim,
+        "vector_fp32_elements_per_cycle": vector_elements,
+        "vector_fp32_flops_per_cycle": 2 * vector_elements,
         "simulation": simulation,
     }
 
@@ -290,13 +296,6 @@ def main():
         task_path = args.task.resolve(strict=True)
         hardware = load_hardware(hardware_path)
         task = load_task(task_path)
-        if (
-            task["br"] > hardware["array_dim"]
-            or task["bc"] > hardware["array_dim"]
-        ):
-            raise ConfigError(
-                "task tiling dimensions must not exceed the MPU array"
-            )
     except (OSError, ConfigError, yaml.YAMLError) as error:
         print(f"gem5-fa-sim: input error: {error}", file=sys.stderr)
         return 2
@@ -457,6 +456,13 @@ def main():
         ],
         "simulation_clock_mhz": hardware["simulation"]["clock_mhz"],
         "tensor_array_dim": hardware["array_dim"],
+        "tensor_ops_per_cycle": hardware["tensor_ops_per_cycle"],
+        "vector_fp32_elements_per_cycle": hardware[
+            "vector_fp32_elements_per_cycle"
+        ],
+        "vector_fp32_flops_per_cycle": hardware[
+            "vector_fp32_flops_per_cycle"
+        ],
     }
     summary["task"] = task
     summary["artifacts"].update(

@@ -42,7 +42,7 @@ PROFILE_LOG = (
     / "profile"
     / "flashAttentionV2.npu_profile.log"
 )
-TICKS_PER_CYCLE = 1000
+TICKS_PER_MHZ_CYCLE = 1_000_000
 QK_SYNC_INDICATOR = 0x81
 SOFTMAX_SYNC_INDICATOR = 0x91
 PV_SYNC_INDICATOR = 0x82
@@ -68,11 +68,11 @@ def _parse_profile_end_events(profile_log):
     return events
 
 
-def _ticks_to_cycles(ticks):
-    return int(ticks) // TICKS_PER_CYCLE
+def _ticks_to_cycles(ticks, clock_mhz):
+    return int(int(ticks) * float(clock_mhz) / TICKS_PER_MHZ_CYCLE)
 
 
-def _summarize_phase(events, sync_indicator):
+def _summarize_phase(events, sync_indicator, clock_mhz):
     phase_events = [
         event
         for event in events
@@ -90,26 +90,27 @@ def _summarize_phase(events, sync_indicator):
     busy_ticks = sum(int(event.get("duration", 0)) for event in phase_events)
     return {
         "macro_count": len(phase_events),
-        "total_span_cycles": _ticks_to_cycles(total_span_ticks),
-        "busy_cycles": _ticks_to_cycles(busy_ticks),
+        "total_span_cycles": _ticks_to_cycles(total_span_ticks, clock_mhz),
+        "busy_cycles": _ticks_to_cycles(busy_ticks, clock_mhz),
         "opcode_counts": opcode_counts,
         "start_tick": min(event["start_tick"] for event in phase_events),
         "end_tick": max(event["end_tick"] for event in phase_events),
     }
 
 
-def emit_profile_summary():
+def emit_profile_summary(clock_mhz):
     if not PROFILE_LOG.is_file():
         print("FLASH_ATTENTION_V2_PROFILE status=FAIL reason=missing_log")
         return False
 
     events = _parse_profile_end_events(PROFILE_LOG)
-    qk = _summarize_phase(events, QK_SYNC_INDICATOR)
-    softmax = _summarize_phase(events, SOFTMAX_SYNC_INDICATOR)
-    pv = _summarize_phase(events, PV_SYNC_INDICATOR)
+    qk = _summarize_phase(events, QK_SYNC_INDICATOR, clock_mhz)
+    softmax = _summarize_phase(events, SOFTMAX_SYNC_INDICATOR, clock_mhz)
+    pv = _summarize_phase(events, PV_SYNC_INDICATOR, clock_mhz)
     total_span_cycles = _ticks_to_cycles(
         max(qk["end_tick"], softmax["end_tick"], pv["end_tick"])
-        - min(qk["start_tick"], softmax["start_tick"], pv["start_tick"])
+        - min(qk["start_tick"], softmax["start_tick"], pv["start_tick"]),
+        clock_mhz,
     )
 
     print(
@@ -255,6 +256,8 @@ def build_system(binary, scenario, q, kv, d, br, bc, simulation):
             str(br),
             "--bc",
             str(bc),
+            "--array-dim",
+            str(_nested(simulation, "mpu", "array_dim", MPU_ARRAY_DIM)),
         ],
     )
     builder.add_megacmdqueue()
@@ -341,8 +344,8 @@ if args.br != 128 or args.bc != 128:
 if args.profile_log:
     PROFILE_LOG = Path(args.profile_log).resolve()
 simulation = _load_simulation_config(args.simulation_config)
-if simulation.get("clock_mhz", 1000) != 1000:
-    parser.error("simulation clock must be 1000 MHz")
+if simulation.get("clock_mhz", 1000) <= 0:
+    parser.error("simulation clock must be positive")
 
 builder, process = build_system(
     args.binary,
@@ -374,7 +377,7 @@ attention_tiles = ((args.q + args.br - 1) // args.br) * (
     (args.kv + args.bc - 1) // args.bc
 )
 
-profile_ok = emit_profile_summary()
+profile_ok = emit_profile_summary(simulation.get("clock_mhz", 1000))
 print(f"FLASH_ATTENTION_V2_EXIT_CAUSE={exit_cause}")
 print(f"FLASH_ATTENTION_V2_EXIT_CODE={exit_code}")
 print(

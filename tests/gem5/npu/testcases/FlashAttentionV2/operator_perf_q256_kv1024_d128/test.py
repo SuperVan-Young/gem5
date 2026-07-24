@@ -100,6 +100,8 @@ class GeneratePerformanceSummary(verifier.Verifier):
             test_util.fail("Expected positive effective TOPS")
         if summary["performance"]["utilization"] <= 0.0:
             test_util.fail("Expected positive utilization")
+        if summary["performance"]["tensor_ops_per_cycle"] != 32768:
+            test_util.fail("Default 128x128 MPU should report 32768 ops/cycle")
 
 
 register_npu_test(
@@ -116,6 +118,7 @@ register_npu_test(
             rf"FLASH_ATTENTION_V2_SCENARIO={SCENARIO}",
             r"FLASH_ATTENTION_V2_SHAPE q=256 kv=1024 d=128 "
             r"tile_m=128 tile_n=128 tile_k=128 br=128 bc=128 "
+            r"array_dim=128 "
             r"q_blocks=2 kv_blocks=8 attention_tiles=16 padded_q_rows=0 "
             r"matmul_count=2 "
             r"single_matmul_flops=67108864 total_matmul_flops=134217728",

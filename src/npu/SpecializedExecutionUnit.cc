@@ -1394,7 +1394,8 @@ SpecializedExecutionUnit::appendExecUop(MacroCmdContext &macroCmd,
 void
 SpecializedExecutionUnit::markEpiloguePending(MacroCmdContext &macroCmd)
 {
-    if (macroCmd.waitingCallback || macroCmd.outstandingMemUops != 0) {
+    if (!macroCmd.uopQueue.empty() || macroCmd.waitingCallback ||
+        macroCmd.outstandingMemUops != 0) {
         return;
     }
 
