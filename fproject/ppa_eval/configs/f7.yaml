@@ -13,6 +13,9 @@ compute:
     tensor:
         array_dim: 128
         utilization_pct: 50
+memory:
+    sram:
+        capacity_bytes: 262144
 simulation:
     schema_version: 1
     clock_mhz: 1000

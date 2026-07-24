@@ -20,6 +20,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(hardware["ppa_frequency_mhz"], 2000)
         self.assertEqual(hardware["simulation"]["clock_mhz"], 1000)
         self.assertEqual(hardware["array_dim"], 128)
+        self.assertEqual(hardware["ppa_sram_capacity_bytes"], 262144)
+        self.assertEqual(
+            hardware["simulation"]["spm"]["size_bytes"], 8 * 1024 * 1024
+        )
 
     def test_runtime_shapes_are_loaded_from_task_files(self):
         first = load_task(
@@ -28,12 +32,17 @@ class ConfigTest(unittest.TestCase):
         second = load_task(
             ROOT / "fproject/sim/configs/fa_q128_kv512_d128.yaml"
         )
+        edge = load_task(ROOT / "fproject/sim/configs/fa_q192_kv512_d128.yaml")
         self.assertEqual(
             (first["q"], first["kv"], first["d"]), (256, 1024, 128)
         )
         self.assertEqual(
             (second["q"], second["kv"], second["d"]), (128, 512, 128)
         )
+        self.assertEqual((first["br"], first["bc"]), (128, 128))
+        self.assertEqual((second["br"], second["bc"]), (128, 128))
+        self.assertEqual((edge["q"], edge["kv"]), (192, 512))
+        self.assertEqual((edge["br"], edge["bc"]), (128, 128))
 
     def test_rejects_non_positive_shape(self):
         content = """
@@ -48,12 +57,39 @@ attention:
   heads: 1
   input_dtype: int8
   accumulation_dtype: int32
-  softmax_dtype: float32
+softmax_dtype: float32
+tiling:
+  q: 128
+  kv: 128
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "task.yaml"
             path.write_text(content, encoding="utf-8")
             with self.assertRaises(ConfigError):
+                load_task(path)
+
+    def test_rejects_non_128_tiling(self):
+        content = """
+schema_version: 1
+name: invalid_tiling
+operator: flash_attention_v2
+attention:
+  q: 128
+  kv: 512
+  d: 128
+  batch: 1
+  heads: 1
+  input_dtype: int8
+  accumulation_dtype: int32
+  softmax_dtype: float32
+tiling:
+  q: 64
+  kv: 128
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "task.yaml"
+            path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "both be 128"):
                 load_task(path)
 
 

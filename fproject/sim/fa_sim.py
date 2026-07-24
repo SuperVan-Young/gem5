@@ -83,7 +83,14 @@ def load_hardware(path):
     config = _load_yaml(path)
     _fields(
         config,
-        {"schema_version", "name", "system", "compute", "simulation"},
+        {
+            "schema_version",
+            "name",
+            "system",
+            "compute",
+            "memory",
+            "simulation",
+        },
         "root",
     )
     if config.get("schema_version") != 1:
@@ -92,6 +99,13 @@ def load_hardware(path):
     compute = _mapping(config.get("compute"), "compute")
     vector = _mapping(compute.get("vector"), "compute.vector")
     tensor = _mapping(compute.get("tensor"), "compute.tensor")
+    memory = _mapping(config.get("memory"), "memory")
+    _fields(memory, {"sram"}, "memory")
+    sram = _mapping(memory.get("sram"), "memory.sram")
+    _fields(sram, {"capacity_bytes"}, "memory.sram")
+    ppa_sram_capacity = _positive_int(
+        sram.get("capacity_bytes"), "memory.sram.capacity_bytes"
+    )
     simulation = _mapping(config.get("simulation"), "simulation")
     if simulation.get("schema_version") != 1:
         raise ConfigError("simulation.schema_version must be 1")
@@ -152,6 +166,7 @@ def load_hardware(path):
         "ppa_frequency_mhz": _positive_number(
             system.get("frequency_mhz"), "system.frequency_mhz"
         ),
+        "ppa_sram_capacity_bytes": ppa_sram_capacity,
         "array_dim": array_dim,
         "simulation": simulation,
     }
@@ -201,9 +216,17 @@ def load_task(path):
         raise ConfigError("attention.d must be <= 255")
     if shape["q"] * shape["kv"] > 16_000_000:
         raise ConfigError("attention.q * attention.kv is too large")
+    tiling = _mapping(config.get("tiling"), "tiling")
+    _fields(tiling, {"q", "kv"}, "tiling")
+    br = _positive_int(tiling.get("q"), "tiling.q")
+    bc = _positive_int(tiling.get("kv"), "tiling.kv")
+    if br != 128 or bc != 128:
+        raise ConfigError("tiling.q and tiling.kv must both be 128 for V1")
     return {
         "name": _string(config.get("name"), "name"),
         **shape,
+        "br": br,
+        "bc": bc,
         **expected,
     }
 
@@ -267,6 +290,13 @@ def main():
         task_path = args.task.resolve(strict=True)
         hardware = load_hardware(hardware_path)
         task = load_task(task_path)
+        if (
+            task["br"] > hardware["array_dim"]
+            or task["bc"] > hardware["array_dim"]
+        ):
+            raise ConfigError(
+                "task tiling dimensions must not exceed the MPU array"
+            )
     except (OSError, ConfigError, yaml.YAMLError) as error:
         print(f"gem5-fa-sim: input error: {error}", file=sys.stderr)
         return 2
@@ -332,6 +362,10 @@ def main():
         task["kv"],
         "--d",
         task["d"],
+        "--br",
+        task["br"],
+        "--bc",
+        task["bc"],
         "--profile-log",
         profile_log,
         "--simulation-config",
@@ -417,6 +451,10 @@ def main():
     summary["hardware"] = {
         "name": hardware["name"],
         "ppa_frequency_mhz": hardware["ppa_frequency_mhz"],
+        "ppa_sram_capacity_bytes": hardware["ppa_sram_capacity_bytes"],
+        "simulation_spm_size_bytes": hardware["simulation"]["spm"][
+            "size_bytes"
+        ],
         "simulation_clock_mhz": hardware["simulation"]["clock_mhz"],
         "tensor_array_dim": hardware["array_dim"],
     }
@@ -472,7 +510,8 @@ def main():
         f"simulation {hardware['simulation']['clock_mhz']:.0f} MHz)"
     )
     print(
-        f"Task: q={task['q']} kv={task['kv']} d={task['d']} " "batch=1 heads=1"
+        f"Task: q={task['q']} kv={task['kv']} d={task['d']} "
+        f"BR={task['br']} BC={task['bc']} batch=1 heads=1"
     )
     print("")
     print(f"{'Metric':<24}{'Cycles':>14}")

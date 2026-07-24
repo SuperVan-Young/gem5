@@ -1,0 +1,16 @@
+---
+schema_version: 1
+name: fa_q192_kv512_d128
+operator: flash_attention_v2
+attention:
+    q: 192
+    kv: 512
+    d: 128
+    batch: 1
+    heads: 1
+    input_dtype: int8
+    accumulation_dtype: int32
+    softmax_dtype: float32
+tiling:
+    q: 128
+    kv: 128

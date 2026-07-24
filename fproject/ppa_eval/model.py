@@ -17,6 +17,7 @@ MESH_DIM = 32
 DEFAULT_FLOW = "DC-Innovus"
 DEFAULT_UTILIZATION_PCT = 50.0
 DEFAULT_ARA_VARIANT = "no_macro"
+SRAM_DESIGN = "SRAM_16384x32"
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,96 @@ class PPARecord:
         )
 
 
+@dataclass(frozen=True)
+class SRAMRecord:
+    record_id: str
+    source_kind: str
+    pdk: str
+    design: str
+    depth: int
+    word_bits: int
+    capacity_bytes: int
+    max_frequency_mhz: float
+    static_power_mw: float
+    static_power_w: float
+    area_um2: float
+    area_mm2: float
+    derived_from: str
+    static_power_scale: float
+    area_scale: float
+    provenance: str
+
+    @classmethod
+    def from_csv_row(cls, row):
+        try:
+            record = cls(
+                record_id=row["record_id"],
+                source_kind=row["source_kind"],
+                pdk=row["pdk"],
+                design=row["design"],
+                depth=int(row["depth"]),
+                word_bits=int(row["word_bits"]),
+                capacity_bytes=int(row["capacity_bytes"]),
+                max_frequency_mhz=float(row["max_frequency_mhz"]),
+                static_power_mw=float(row["static_power_mw"]),
+                static_power_w=float(row["static_power_w"]),
+                area_um2=float(row["area_um2"]),
+                area_mm2=float(row["area_mm2"]),
+                derived_from=row["derived_from"],
+                static_power_scale=float(row["static_power_scale"]),
+                area_scale=float(row["area_scale"]),
+                provenance=row["provenance"],
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"Invalid SRAM datasheet row: {error}") from error
+        record.validate()
+        return record
+
+    def validate(self):
+        label = self.record_id or "<missing record_id>"
+        if not self.record_id or not self.pdk or not self.provenance:
+            raise ValueError(
+                f"SRAM record {label} has missing identity fields"
+            )
+        if self.source_kind not in {"spec", "derived"}:
+            raise ValueError(f"SRAM record {label} has invalid source_kind")
+        if self.design != SRAM_DESIGN:
+            raise ValueError(f"SRAM record {label} has unsupported design")
+        if self.depth <= 0 or self.word_bits <= 0 or self.word_bits % 8 != 0:
+            raise ValueError(f"SRAM record {label} has invalid organization")
+        expected_capacity = self.depth * self.word_bits // 8
+        if self.capacity_bytes != expected_capacity:
+            raise ValueError(
+                f"SRAM record {label} capacity does not match organization"
+            )
+        positive_values = {
+            "max_frequency_mhz": self.max_frequency_mhz,
+            "static_power_mw": self.static_power_mw,
+            "static_power_w": self.static_power_w,
+            "area_um2": self.area_um2,
+            "area_mm2": self.area_mm2,
+            "static_power_scale": self.static_power_scale,
+            "area_scale": self.area_scale,
+        }
+        for field, value in positive_values.items():
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"SRAM record {label} has invalid {field}")
+        if not _close(self.static_power_w, self.static_power_mw / 1000.0):
+            raise ValueError(
+                f"SRAM record {label} has inconsistent power units"
+            )
+        if not _close(self.area_mm2, self.area_um2 / 1_000_000.0):
+            raise ValueError(
+                f"SRAM record {label} has inconsistent area units"
+            )
+        if self.source_kind == "spec" and self.derived_from:
+            raise ValueError(
+                f"SRAM record {label} spec source cannot be derived"
+            )
+        if self.source_kind == "derived" and not self.derived_from:
+            raise ValueError(f"SRAM record {label} is missing derived_from")
+
+
 def _sha256(path):
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -76,6 +167,44 @@ def load_records(path):
     if not rows:
         raise ValueError(f"Datasheet is empty: {path}")
     return [PPARecord.from_csv_row(row) for row in rows]
+
+
+def load_sram_records(path):
+    with path.open(newline="", encoding="utf-8") as source:
+        rows = list(csv.DictReader(source))
+    if not rows:
+        raise ValueError(f"SRAM datasheet is empty: {path}")
+    records = [SRAMRecord.from_csv_row(row) for row in rows]
+    keys = [(record.pdk, record.design) for record in records]
+    if len(keys) != len(set(keys)):
+        raise ValueError("SRAM datasheet has duplicate pdk/design records")
+    by_id = {record.record_id: record for record in records}
+    if len(by_id) != len(records):
+        raise ValueError("SRAM datasheet has duplicate record_id values")
+    for record in records:
+        if record.source_kind != "derived":
+            continue
+        source = by_id.get(record.derived_from)
+        if source is None:
+            raise ValueError(
+                f"SRAM record {record.record_id} has unknown derived_from"
+            )
+        inherited = (
+            record.design == source.design
+            and record.depth == source.depth
+            and record.word_bits == source.word_bits
+            and record.capacity_bytes == source.capacity_bytes
+            and _close(record.max_frequency_mhz, source.max_frequency_mhz)
+        )
+        scaled = _close(
+            record.static_power_w,
+            source.static_power_w * record.static_power_scale,
+        ) and _close(record.area_um2, source.area_um2 * record.area_scale)
+        if not inherited or not scaled:
+            raise ValueError(
+                f"SRAM record {record.record_id} derivation is inconsistent"
+            )
+    return records
 
 
 def _mapping(value, path):
@@ -98,11 +227,24 @@ def _positive_number(value, path):
     return float(value)
 
 
+def _positive_int(value, path):
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
 def load_config(path):
     config = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "root")
     _check_fields(
         config,
-        {"schema_version", "name", "system", "compute", "simulation"},
+        {
+            "schema_version",
+            "name",
+            "system",
+            "compute",
+            "memory",
+            "simulation",
+        },
         "root",
     )
     if config.get("schema_version") != 1:
@@ -137,6 +279,10 @@ def load_config(path):
     )
     tensor = _mapping(compute.get("tensor"), "compute.tensor")
     _check_fields(tensor, {"array_dim", "utilization_pct"}, "compute.tensor")
+    memory = _mapping(config.get("memory"), "memory")
+    _check_fields(memory, {"sram"}, "memory")
+    sram = _mapping(memory.get("sram"), "memory.sram")
+    _check_fields(sram, {"capacity_bytes"}, "memory.sram")
 
     return {
         "schema_version": 1,
@@ -169,6 +315,14 @@ def load_config(path):
                     "compute.tensor.utilization_pct",
                 ),
             },
+        },
+        "memory": {
+            "sram": {
+                "capacity_bytes": _positive_int(
+                    sram.get("capacity_bytes"),
+                    "memory.sram.capacity_bytes",
+                )
+            }
         },
     }
 
@@ -272,11 +426,55 @@ def _module_result(
     }
 
 
-def evaluate_config(config, records, datasheet_path):
+def _sram_result(config, records, frequency_mhz):
+    matching = [
+        record
+        for record in records
+        if record.pdk == config["system"]["pdk"]
+        and record.design == SRAM_DESIGN
+    ]
+    if len(matching) != 1:
+        raise ValueError(
+            "Expected exactly one SRAM record for "
+            f"pdk={config['system']['pdk']}, design={SRAM_DESIGN}; "
+            f"found {len(matching)}"
+        )
+    record = matching[0]
+    if frequency_mhz > record.max_frequency_mhz + 1e-9:
+        raise ValueError(
+            f"SRAM {record.record_id} supports at most "
+            f"{record.max_frequency_mhz:g} MHz, requested "
+            f"{frequency_mhz:g} MHz"
+        )
+    requested = config["memory"]["sram"]["capacity_bytes"]
+    instance_count = math.ceil(requested / record.capacity_bytes)
+    return {
+        "kind": "sram",
+        "power_kind": "static",
+        "requested_capacity_bytes": requested,
+        "instance_capacity_bytes": record.capacity_bytes,
+        "instance_count": instance_count,
+        "provisioned_capacity_bytes": (instance_count * record.capacity_bytes),
+        "selected_record": asdict(record),
+        "static_power_mw": instance_count * record.static_power_mw,
+        "static_power_w": instance_count * record.static_power_w,
+        "area_um2": instance_count * record.area_um2,
+        "area_mm2": instance_count * record.area_mm2,
+    }
+
+
+def evaluate_config(
+    config,
+    records,
+    datasheet_path,
+    sram_records,
+    sram_datasheet_path,
+):
     frequency_mhz = config["system"]["frequency_mhz"]
     system_period_ns = 1000.0 / frequency_mhz
     pdk = config["system"]["pdk"]
     flow = config["system"]["flow"]
+    sram = _sram_result(config, sram_records, frequency_mhz)
 
     vector_config = config["compute"]["vector"]
     vector_ops = vector_config["fp32_ops_per_cycle"]
@@ -321,6 +519,9 @@ def evaluate_config(config, records, datasheet_path):
         tensor_selection,
         frequency_mhz,
     )
+    compute_power_w = vector["power_w"] + tensor["power_w"]
+    compute_area_um2 = vector["area_um2"] + tensor["area_um2"]
+    compute_area_mm2 = vector["area_mm2"] + tensor["area_mm2"]
 
     warnings = [
         module["selection"]["warning"]
@@ -335,14 +536,26 @@ def evaluate_config(config, records, datasheet_path):
             "period_ns": system_period_ns,
         },
         "datasheet": {
-            "path": str(datasheet_path),
-            "sha256": _sha256(datasheet_path),
+            "compute": {
+                "path": str(datasheet_path),
+                "sha256": _sha256(datasheet_path),
+            },
+            "sram": {
+                "path": str(sram_datasheet_path),
+                "sha256": _sha256(sram_datasheet_path),
+            },
         },
-        "modules": {"vector": vector, "tensor": tensor},
+        "modules": {"vector": vector, "tensor": tensor, "sram": sram},
         "totals": {
-            "power_w": vector["power_w"] + tensor["power_w"],
-            "area_um2": vector["area_um2"] + tensor["area_um2"],
-            "area_mm2": vector["area_mm2"] + tensor["area_mm2"],
+            "compute_power_w": compute_power_w,
+            "sram_static_power_w": sram["static_power_w"],
+            "power_w": compute_power_w + sram["static_power_w"],
+            "compute_area_um2": compute_area_um2,
+            "compute_area_mm2": compute_area_mm2,
+            "sram_area_um2": sram["area_um2"],
+            "sram_area_mm2": sram["area_mm2"],
+            "area_um2": compute_area_um2 + sram["area_um2"],
+            "area_mm2": compute_area_mm2 + sram["area_mm2"],
         },
         "warnings": warnings,
     }

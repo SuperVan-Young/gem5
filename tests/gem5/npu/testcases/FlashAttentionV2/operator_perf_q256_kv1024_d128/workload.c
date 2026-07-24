@@ -44,6 +44,8 @@ struct TaskShape
     uint32_t q = 256U;
     uint32_t kv = 1024U;
     uint32_t d = 128U;
+    uint32_t br = 128U;
+    uint32_t bc = 128U;
     const char *scenario = ExpectedScenario;
 };
 
@@ -78,6 +80,10 @@ parseArgs(int argc, char **argv, TaskShape *shape)
             target = &shape->kv;
         } else if (strcmp(arg, "--d") == 0) {
             target = &shape->d;
+        } else if (strcmp(arg, "--br") == 0) {
+            target = &shape->br;
+        } else if (strcmp(arg, "--bc") == 0) {
+            target = &shape->bc;
         } else if (strcmp(arg, "--scenario") == 0) {
             if (++index >= argc) {
                 return false;
@@ -96,7 +102,8 @@ parseArgs(int argc, char **argv, TaskShape *shape)
     }
 
     return strcmp(shape->scenario, ExpectedScenario) == 0 &&
-           shape->d <= 255U;
+           shape->d <= 255U && shape->br == ArrayDim &&
+           shape->bc == ArrayDim;
 }
 
 static bool
@@ -137,22 +144,21 @@ struct MatmulWorkspace
 static bool
 makeWorkspace(const TaskShape &shape, MatmulWorkspace *workspace)
 {
-    const uint32_t q_tile_m = std::min(shape.q, ArrayDim);
-    const uint32_t qk_tile_n = std::min(shape.kv, ArrayDim);
+    const uint32_t q_tile_m = std::min(shape.q, shape.br);
+    const uint32_t kv_tile_n = std::min(shape.kv, shape.bc);
     const uint32_t pv_tile_n = std::min(shape.d, ArrayDim);
-    const uint32_t pv_tile_k = std::min(shape.kv, ArrayDim);
     const uint64_t qk_a = blockedBytes(
-        shape.q, shape.d, q_tile_m, shape.d, sizeof(int8_t));
+        q_tile_m, shape.d, q_tile_m, shape.d, sizeof(int8_t));
     const uint64_t qk_b = blockedBytes(
-        shape.d, shape.kv, shape.d, qk_tile_n, sizeof(int8_t));
+        shape.d, kv_tile_n, shape.d, kv_tile_n, sizeof(int8_t));
     const uint64_t qk_c = blockedBytes(
-        shape.q, shape.kv, q_tile_m, qk_tile_n, sizeof(int32_t));
+        q_tile_m, kv_tile_n, q_tile_m, kv_tile_n, sizeof(int32_t));
     const uint64_t pv_a = blockedBytes(
-        shape.q, pv_tile_k, q_tile_m, pv_tile_k, sizeof(int8_t));
+        q_tile_m, kv_tile_n, q_tile_m, kv_tile_n, sizeof(int8_t));
     const uint64_t pv_b = blockedBytes(
-        pv_tile_k, shape.d, pv_tile_k, pv_tile_n, sizeof(int8_t));
+        kv_tile_n, shape.d, kv_tile_n, pv_tile_n, sizeof(int8_t));
     const uint64_t pv_c = blockedBytes(
-        shape.q, shape.d, q_tile_m, pv_tile_n, sizeof(int32_t));
+        q_tile_m, shape.d, q_tile_m, pv_tile_n, sizeof(int32_t));
     const uint64_t a_bytes = std::max(qk_a, pv_a);
     const uint64_t b_bytes = std::max(qk_b, pv_b);
     const uint64_t c_bytes = std::max(qk_c, pv_c);
@@ -250,20 +256,31 @@ storeVector(uint32_t slot, const uint32_t *src, uint32_t count)
 }
 
 static void
-buildSoftmaxInputs(const TaskShape &shape,
+copyVector(uint32_t dst_slot, uint32_t src_slot, uint32_t count)
+{
+    volatile uint32_t *dst = npu_spm_slot_word_ptr_default(dst_slot);
+    const volatile uint32_t *src =
+        npu_spm_slot_word_ptr_default(src_slot);
+    for (uint32_t idx = 0U; idx < count; ++idx) {
+        dst[idx] = src[idx];
+    }
+}
+
+static void
+buildSoftmaxInputs(uint32_t rows, uint32_t cols, uint32_t seed,
                    std::vector<uint32_t> &scores_bits,
                    std::vector<uint32_t> &m_prev_bits,
                    std::vector<uint32_t> &l_prev_bits)
 {
-    for (uint32_t row = 0U; row < shape.q; ++row) {
+    for (uint32_t row = 0U; row < rows; ++row) {
         float row_max = -1.0e30f;
-        for (uint32_t col = 0U; col < shape.kv; ++col) {
+        for (uint32_t col = 0U; col < cols; ++col) {
             const int32_t code =
                 static_cast<int32_t>(
-                    (row * 17U + col * 13U + 19U) % 113U) -
+                    (row * 17U + col * 13U + seed + 19U) % 113U) -
                 56;
             const float value = static_cast<float>(code) * 0.125f;
-            scores_bits[static_cast<size_t>(row) * shape.kv + col] =
+            scores_bits[static_cast<size_t>(row) * cols + col] =
                 npu_float_to_bits(value);
             row_max = std::max(row_max, value);
         }
@@ -274,12 +291,15 @@ buildSoftmaxInputs(const TaskShape &shape,
 }
 
 static int
-runFastOnlineSoftmaxPhase(const TaskShape &shape)
+runFastOnlineSoftmaxPhase(uint32_t base_slot, uint32_t rows, uint32_t cols,
+                          uint32_t max_cols, uint32_t seed,
+                          bool initialize_state,
+                          NpuFastOnlineSoftmaxStats *phase_stats)
 {
     const uint32_t matrix_slot_span =
-        llm_matrix_slot_span(shape.q, shape.kv);
-    const uint32_t vector_slot_span = llm_vector_slot_span(shape.q);
-    const uint32_t scores_slot = 0U;
+        llm_matrix_slot_span(rows, max_cols);
+    const uint32_t vector_slot_span = llm_vector_slot_span(rows);
+    const uint32_t scores_slot = base_slot;
     const uint32_t m_prev_slot = scores_slot + matrix_slot_span;
     const uint32_t l_prev_slot = m_prev_slot + vector_slot_span;
     const uint32_t m_next_slot = l_prev_slot + vector_slot_span;
@@ -287,17 +307,17 @@ runFastOnlineSoftmaxPhase(const TaskShape &shape)
     const uint32_t p_block_slot = l_next_slot + vector_slot_span;
     const uint32_t scratch_base_slot = p_block_slot + matrix_slot_span;
     const PrimitiveTensorDesc scores_desc = llm_packed_last_axis_tensor(
-        scores_slot, shape.q, shape.kv, LayoutSizeElems);
+        scores_slot, rows, cols, LayoutSizeElems);
     const PrimitiveTensorDesc m_prev_desc = PrimitiveTensorDesc::denseSpm(
-        m_prev_slot, VPU_DATA_F32, {shape.q}, LayoutSizeElems);
+        m_prev_slot, VPU_DATA_F32, {rows}, LayoutSizeElems);
     const PrimitiveTensorDesc l_prev_desc = PrimitiveTensorDesc::denseSpm(
-        l_prev_slot, VPU_DATA_F32, {shape.q}, LayoutSizeElems);
+        l_prev_slot, VPU_DATA_F32, {rows}, LayoutSizeElems);
     const PrimitiveTensorDesc m_next_desc = PrimitiveTensorDesc::denseSpm(
-        m_next_slot, VPU_DATA_F32, {shape.q}, LayoutSizeElems);
+        m_next_slot, VPU_DATA_F32, {rows}, LayoutSizeElems);
     const PrimitiveTensorDesc l_next_desc = PrimitiveTensorDesc::denseSpm(
-        l_next_slot, VPU_DATA_F32, {shape.q}, LayoutSizeElems);
+        l_next_slot, VPU_DATA_F32, {rows}, LayoutSizeElems);
     const PrimitiveTensorDesc p_block_desc = llm_packed_last_axis_tensor(
-        p_block_slot, shape.q, shape.kv, LayoutSizeElems);
+        p_block_slot, rows, cols, LayoutSizeElems);
     const uint32_t scratch_slot_span =
         npu_fast_online_softmax_scratch_slot_span(scores_desc);
     const uint64_t end_bytes =
@@ -308,7 +328,7 @@ runFastOnlineSoftmaxPhase(const TaskShape &shape)
     };
     NpuFastOnlineSoftmaxStats stats = {};
     size_t score_elements = 0;
-    if (!checkedElements(shape.q, shape.kv, &score_elements) ||
+    if (!checkedElements(rows, cols, &score_elements) ||
         end_bytes > SpmSize) {
         printf("FLASH_ATTENTION_V2_SOFTMAX_SPM_CAPACITY_FAIL "
                "required=%llu available=%llu\n",
@@ -317,21 +337,26 @@ runFastOnlineSoftmaxPhase(const TaskShape &shape)
         return -1;
     }
     std::vector<uint32_t> scores_bits(score_elements);
-    std::vector<uint32_t> m_prev_bits(shape.q);
-    std::vector<uint32_t> l_prev_bits(shape.q);
+    std::vector<uint32_t> m_prev_bits(rows);
+    std::vector<uint32_t> l_prev_bits(rows);
 
-    buildSoftmaxInputs(shape, scores_bits, m_prev_bits, l_prev_bits);
+    buildSoftmaxInputs(
+        rows, cols, seed, scores_bits, m_prev_bits, l_prev_bits);
     llm_clear_slot_span(scores_slot, matrix_slot_span);
-    llm_clear_slot_span(m_prev_slot, vector_slot_span);
-    llm_clear_slot_span(l_prev_slot, vector_slot_span);
+    if (initialize_state) {
+        llm_clear_slot_span(m_prev_slot, vector_slot_span);
+        llm_clear_slot_span(l_prev_slot, vector_slot_span);
+    }
     llm_clear_slot_span(m_next_slot, vector_slot_span);
     llm_clear_slot_span(l_next_slot, vector_slot_span);
     llm_clear_slot_span(p_block_slot, matrix_slot_span);
     llm_clear_slot_span(scratch_base_slot, scratch_slot_span);
     llm_store_logical_matrix_last_axis_front(
-        scores_slot, scores_bits.data(), shape.q, shape.kv);
-    storeVector(m_prev_slot, m_prev_bits.data(), shape.q);
-    storeVector(l_prev_slot, l_prev_bits.data(), shape.q);
+        scores_slot, scores_bits.data(), rows, cols);
+    if (initialize_state) {
+        storeVector(m_prev_slot, m_prev_bits.data(), rows);
+        storeVector(l_prev_slot, l_prev_bits.data(), rows);
+    }
 
     const size_t macro_count = vpu_fast_online_softmax_f32(
         scores_desc, m_prev_desc, l_prev_desc, m_next_desc, l_next_desc,
@@ -342,6 +367,11 @@ runFastOnlineSoftmaxPhase(const TaskShape &shape)
     }
     npu_launch_sync_wait(DeviceId, SoftmaxSyncIndicator, 0U, 0U, 0U);
     npu_cmd_sync_done();
+    copyVector(m_prev_slot, m_next_slot, rows);
+    copyVector(l_prev_slot, l_next_slot, rows);
+    if (phase_stats != nullptr) {
+        *phase_stats = stats;
+    }
     return 0;
 }
 
@@ -359,8 +389,8 @@ main(int argc, char **argv)
     TaskShape shape;
     MatmulWorkspace workspace = {};
     NpuFastMatmulStats qk_stats = {};
-    uint32_t pv_cmds = 0U;
-    uint32_t pv_templates = 0U;
+    NpuFastMatmulStats pv_stats = {};
+    NpuFastOnlineSoftmaxStats softmax_stats = {};
 
     if (!parseArgs(argc, argv, &shape)) {
         printf("FLASH_ATTENTION_V2_ARGUMENT_FAIL\n");
@@ -370,34 +400,76 @@ main(int argc, char **argv)
         printf("FLASH_ATTENTION_V2_SPM_CAPACITY_FAIL\n");
         return 1;
     }
-    if (runFastMatmul(workspace, shape.q, shape.kv, shape.d,
-                      QKSyncIndicator, 0U, &qk_stats) != 0) {
-        printf("FLASH_ATTENTION_V2_QK_FAST_MATMUL_FAIL\n");
-        return 1;
-    }
-    if (runFastOnlineSoftmaxPhase(shape) != 0) {
-        printf("FLASH_ATTENTION_V2_FAST_ONLINE_SOFTMAX_FAIL\n");
-        return 1;
-    }
-    for (uint32_t k0 = 0U; k0 < shape.kv; k0 += ArrayDim) {
-        const uint32_t chunk_k = std::min(ArrayDim, shape.kv - k0);
-        NpuFastMatmulStats chunk_stats = {};
-        if (runFastMatmul(workspace, shape.q, shape.d, chunk_k,
-                          PVSyncIndicator, 5U + k0, &chunk_stats) != 0) {
-            printf("FLASH_ATTENTION_V2_PV_FAST_MATMUL_FAIL k0=%u\n", k0);
-            return 1;
+    const uint32_t q_blocks = (shape.q + shape.br - 1U) / shape.br;
+    const uint32_t kv_blocks = (shape.kv + shape.bc - 1U) / shape.bc;
+    const uint32_t attention_tiles = q_blocks * kv_blocks;
+    const uint32_t padded_q_rows = q_blocks * shape.br - shape.q;
+    const uint32_t softmax_base_slot = static_cast<uint32_t>(
+        (workspace.end - SpmBase) / VPU_LOCAL_SLOT_STRIDE);
+    for (uint32_t q0 = 0U; q0 < shape.q; q0 += shape.br) {
+        const uint32_t block_q = std::min(shape.br, shape.q - q0);
+        bool initialize_state = true;
+        for (uint32_t kv0 = 0U; kv0 < shape.kv; kv0 += shape.bc) {
+            const uint32_t block_kv = std::min(shape.bc, shape.kv - kv0);
+            NpuFastMatmulStats tile_qk_stats = {};
+            NpuFastMatmulStats tile_pv_stats = {};
+            NpuFastOnlineSoftmaxStats tile_softmax_stats = {};
+            if (runFastMatmul(
+                    workspace, block_q, block_kv, shape.d,
+                    QKSyncIndicator, q0 + kv0, &tile_qk_stats) != 0) {
+                printf(
+                    "FLASH_ATTENTION_V2_QK_FAST_MATMUL_FAIL "
+                    "q0=%u kv0=%u\n",
+                    q0, kv0);
+                return 1;
+            }
+            if (runFastOnlineSoftmaxPhase(
+                    softmax_base_slot, shape.br, block_kv, shape.bc, q0 + kv0,
+                    initialize_state, &tile_softmax_stats) != 0) {
+                printf(
+                    "FLASH_ATTENTION_V2_FAST_ONLINE_SOFTMAX_FAIL "
+                    "q0=%u kv0=%u\n",
+                    q0, kv0);
+                return 1;
+            }
+            if (runFastMatmul(
+                    workspace, block_q, shape.d, block_kv,
+                    PVSyncIndicator, 5U + q0 + kv0,
+                    &tile_pv_stats) != 0) {
+                printf(
+                    "FLASH_ATTENTION_V2_PV_FAST_MATMUL_FAIL "
+                    "q0=%u kv0=%u\n",
+                    q0, kv0);
+                return 1;
+            }
+            qk_stats.launched_cmd_count +=
+                tile_qk_stats.launched_cmd_count;
+            qk_stats.template_build_count +=
+                tile_qk_stats.template_build_count;
+            qk_stats.tile_count += tile_qk_stats.tile_count;
+            pv_stats.launched_cmd_count +=
+                tile_pv_stats.launched_cmd_count;
+            pv_stats.template_build_count +=
+                tile_pv_stats.template_build_count;
+            pv_stats.tile_count += tile_pv_stats.tile_count;
+            softmax_stats.launched_cmd_count +=
+                tile_softmax_stats.launched_cmd_count;
+            softmax_stats.template_build_count +=
+                tile_softmax_stats.template_build_count;
+            softmax_stats.slice_count += tile_softmax_stats.slice_count;
+            initialize_state = false;
         }
-        pv_cmds += chunk_stats.launched_cmd_count;
-        pv_templates += chunk_stats.template_build_count;
     }
 
     const uint64_t stage_ops = singleStageOps(shape);
     printf("FLASH_ATTENTION_V2_SCENARIO=%s\n", shape.scenario);
     printf("FLASH_ATTENTION_V2_SHAPE q=%u kv=%u d=%u tile_m=%u tile_n=%u "
-           "tile_k=%u matmul_count=2 single_matmul_flops=%llu "
-           "total_matmul_flops=%llu\n",
-           shape.q, shape.kv, shape.d, std::min(shape.q, ArrayDim),
-           std::min(shape.kv, ArrayDim), shape.d,
+           "tile_k=%u br=%u bc=%u q_blocks=%u kv_blocks=%u "
+           "attention_tiles=%u padded_q_rows=%u matmul_count=2 "
+           "single_matmul_flops=%llu total_matmul_flops=%llu\n",
+           shape.q, shape.kv, shape.d, std::min(shape.q, shape.br),
+           std::min(shape.kv, shape.bc), shape.d, shape.br, shape.bc,
+           q_blocks, kv_blocks, attention_tiles, padded_q_rows,
            static_cast<unsigned long long>(stage_ops),
            static_cast<unsigned long long>(stage_ops * 2ULL));
     printf("FLASH_ATTENTION_V2_QK_FAST_MATMUL cmds=%u template_builds=%u "
@@ -406,10 +478,11 @@ main(int argc, char **argv)
            QKSyncIndicator);
     printf("FLASH_ATTENTION_V2_FAST_ONLINE_SOFTMAX cmds=%u "
            "sync_indicator=%u status=PASS\n",
-           NPU_FAST_ONLINE_SOFTMAX_TEMPLATE_COUNT, SoftmaxSyncIndicator);
+           softmax_stats.launched_cmd_count, SoftmaxSyncIndicator);
     printf("FLASH_ATTENTION_V2_PV_FAST_MATMUL cmds=%u template_builds=%u "
            "sync_indicator=%u status=PASS\n",
-           pv_cmds, pv_templates, PVSyncIndicator);
+           pv_stats.launched_cmd_count, pv_stats.template_build_count,
+           PVSyncIndicator);
     printf("FLASH_ATTENTION_V2_SPM_LAYOUT a=%#llx b=%#llx c=%#llx end=%#llx "
            "capacity_end=%#llx\n",
            static_cast<unsigned long long>(workspace.a),

@@ -168,7 +168,7 @@ def _nested(config, section, field, default):
     return config.get(section, {}).get(field, default)
 
 
-def build_system(binary, scenario, q, kv, d, simulation):
+def build_system(binary, scenario, q, kv, d, br, bc, simulation):
     if scenario != SCENARIO:
         raise ValueError(f"Unsupported scenario: {scenario}")
 
@@ -251,6 +251,10 @@ def build_system(binary, scenario, q, kv, d, simulation):
             str(kv),
             "--d",
             str(d),
+            "--br",
+            str(br),
+            "--bc",
+            str(bc),
         ],
     )
     builder.add_megacmdqueue()
@@ -324,12 +328,16 @@ parser.add_argument("--scenario", required=True)
 parser.add_argument("--q", type=int, default=256)
 parser.add_argument("--kv", type=int, default=1024)
 parser.add_argument("--d", type=int, default=128)
+parser.add_argument("--br", type=int, default=128)
+parser.add_argument("--bc", type=int, default=128)
 parser.add_argument("--profile-log")
 parser.add_argument("--simulation-config")
 args = parser.parse_args()
 
 if args.q <= 0 or args.kv <= 0 or args.d <= 0:
     parser.error("--q, --kv, and --d must be positive")
+if args.br != 128 or args.bc != 128:
+    parser.error("--br and --bc must both be 128")
 if args.profile_log:
     PROFILE_LOG = Path(args.profile_log).resolve()
 simulation = _load_simulation_config(args.simulation_config)
@@ -337,7 +345,14 @@ if simulation.get("clock_mhz", 1000) != 1000:
     parser.error("simulation clock must be 1000 MHz")
 
 builder, process = build_system(
-    args.binary, args.scenario, args.q, args.kv, args.d, simulation
+    args.binary,
+    args.scenario,
+    args.q,
+    args.kv,
+    args.d,
+    args.br,
+    args.bc,
+    simulation,
 )
 m5.instantiate()
 
@@ -355,6 +370,9 @@ exit_cause = exit_event.getCause()
 exit_code = exit_event.getCode()
 active_mpu = builder.system.mpu
 active_vpu = builder.system.vpu0
+attention_tiles = ((args.q + args.br - 1) // args.br) * (
+    (args.kv + args.bc - 1) // args.bc
+)
 
 profile_ok = emit_profile_summary()
 print(f"FLASH_ATTENTION_V2_EXIT_CAUSE={exit_cause}")
@@ -384,8 +402,8 @@ if (
     profile_ok
     and exit_cause == EXPECTED_EXIT_CAUSE
     and exit_code == EXPECTED_EXIT_CODE
-    and active_mpu.completedCmdCount() == 1 + (args.kv + 127) // 128
-    and active_vpu.completedCmdCount() == 14
+    and active_mpu.completedCmdCount() == attention_tiles * 2
+    and active_vpu.completedCmdCount() == attention_tiles * 14
     and active_vpu.queueOccupancy() == 0
 ):
     print("FLASH_ATTENTION_V2_CONFIG_PASS")

@@ -16,6 +16,7 @@ try:
         evaluate_config,
         load_config,
         load_records,
+        load_sram_records,
     )
 except ImportError:
     from model import (
@@ -23,11 +24,15 @@ except ImportError:
         evaluate_config,
         load_config,
         load_records,
+        load_sram_records,
     )
 
 
-DEFAULT_DATASHEET = Path(__file__).resolve().parent / "data" / (
-    "ppa_augmented_v1.csv"
+DEFAULT_DATASHEET = (
+    Path(__file__).resolve().parent / "data" / ("ppa_augmented_v1.csv")
+)
+DEFAULT_SRAM_DATASHEET = (
+    Path(__file__).resolve().parent / "data" / "sram_v1.csv"
 )
 
 
@@ -35,6 +40,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("configs", nargs="+", type=Path)
     parser.add_argument("--datasheet", type=Path, default=DEFAULT_DATASHEET)
+    parser.add_argument(
+        "--sram-datasheet", type=Path, default=DEFAULT_SRAM_DATASHEET
+    )
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -57,6 +65,19 @@ def _module_text(module):
     )
 
 
+def _sram_text(module):
+    record = module["selected_record"]
+    return (
+        f"  sram: instances={module['instance_count']} "
+        f"requested={module['requested_capacity_bytes'] / 1024:.3f} KiB "
+        f"provisioned="
+        f"{module['provisioned_capacity_bytes'] / 1024:.3f} KiB "
+        f"record={record['record_id']} "
+        f"static_power={module['static_power_mw']:.6f} mW "
+        f"area={module['area_mm2']:.6f} mm^2"
+    )
+
+
 def _evaluation_text(result):
     lines = [
         (
@@ -67,9 +88,11 @@ def _evaluation_text(result):
         ),
         _module_text(result["modules"]["vector"]),
         _module_text(result["modules"]["tensor"]),
+        _sram_text(result["modules"]["sram"]),
         (
             f"  total: power={result['totals']['power_w']:.6f} W "
-            f"area={result['totals']['area_mm2']:.6f} mm^2"
+            f"area={result['totals']['area_mm2']:.6f} mm^2 "
+            "sram_power=static-only"
         ),
     ]
     lines.extend(f"  WARNING: {warning}" for warning in result["warnings"])
@@ -94,7 +117,7 @@ def render_text(result):
         ),
         (
             f"Architecture: {baseline['system']['frequency_mhz']:.0f} MHz, "
-            "32 x ara_sys + 16 x Mesh_BOTH_32x32"
+            "32 x ara_sys + 16 x Mesh_BOTH_32x32 + 256 KiB SRAM"
         ),
         separator,
         (
@@ -132,9 +155,14 @@ def main():
     args = parse_args()
     try:
         records = load_records(args.datasheet)
+        sram_records = load_sram_records(args.sram_datasheet)
         results = [
             evaluate_config(
-                load_config(config_path), records, args.datasheet
+                load_config(config_path),
+                records,
+                args.datasheet,
+                sram_records,
+                args.sram_datasheet,
             )
             for config_path in args.configs
         ]

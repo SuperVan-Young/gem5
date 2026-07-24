@@ -91,6 +91,40 @@ def main():
     mpu_summary = extract_kv_line(simout_text, MPU_SUMMARY_PREFIX)
     vpu_summary = extract_kv_line(simout_text, VPU_SUMMARY_PREFIX)
 
+    q = require_int(shape, "q")
+    kv = require_int(shape, "kv")
+    br = require_int(shape, "br")
+    bc = require_int(shape, "bc")
+    q_blocks = (q + br - 1) // br
+    kv_blocks = (kv + bc - 1) // bc
+    attention_tiles = q_blocks * kv_blocks
+    if require_int(shape, "q_blocks") != q_blocks:
+        raise ValueError("Reported q_blocks does not match shape and BR")
+    if require_int(shape, "kv_blocks") != kv_blocks:
+        raise ValueError("Reported kv_blocks does not match shape and BC")
+    if require_int(shape, "attention_tiles") != attention_tiles:
+        raise ValueError("Reported attention_tiles does not match tiling")
+    padded_q_rows = q_blocks * br - q
+    if require_int(shape, "padded_q_rows") != padded_q_rows:
+        raise ValueError("Reported padded_q_rows does not match tiling")
+    expected_macros = {
+        "qk": attention_tiles,
+        "softmax": attention_tiles * 14,
+        "pv": attention_tiles,
+        "total": attention_tiles * 16,
+    }
+    actual_macros = {
+        "qk": require_int(qk, "macro_count"),
+        "softmax": require_int(softmax, "macro_count"),
+        "pv": require_int(pv, "macro_count"),
+        "total": require_int(total, "macro_count"),
+    }
+    if actual_macros != expected_macros:
+        raise ValueError(
+            f"Profile macro counts {actual_macros} do not match "
+            f"tiling-derived counts {expected_macros}"
+        )
+
     total_matmul_flops = require_int(shape, "total_matmul_flops")
     total_span_cycles = require_int(total, "total_span_cycles")
     total_busy_cycles = require_int(total, "busy_cycles")
@@ -108,12 +142,21 @@ def main():
 
     summary = {
         "shape": {
-            "q": require_int(shape, "q"),
-            "kv": require_int(shape, "kv"),
+            "q": q,
+            "kv": kv,
             "d": require_int(shape, "d"),
             "matmul_count": require_int(shape, "matmul_count"),
             "single_matmul_flops": require_int(shape, "single_matmul_flops"),
             "total_matmul_flops": total_matmul_flops,
+        },
+        "tiling": {
+            "br": br,
+            "bc": bc,
+            "q_blocks": q_blocks,
+            "kv_blocks": kv_blocks,
+            "attention_tiles": attention_tiles,
+            "padded_q_rows": padded_q_rows,
+            "expected_macro_counts": expected_macros,
         },
         "profile": {
             "qk_fast_matmul": {

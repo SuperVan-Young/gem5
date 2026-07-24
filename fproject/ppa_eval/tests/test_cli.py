@@ -7,7 +7,6 @@ import sys
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
 TOOL_ROOT = ROOT / "fproject" / "ppa_eval"
 
@@ -35,6 +34,12 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             report["candidate"]["modules"]["tensor"]["instance_count"], 16
         )
+        self.assertEqual(
+            report["baseline"]["modules"]["sram"]["instance_count"], 4
+        )
+        self.assertAlmostEqual(
+            report["baseline"]["totals"]["sram_static_power_w"], 0.00025494
+        )
         self.assertTrue(
             report["baseline"]["modules"]["tensor"]["selection"][
                 "timing_fallback"
@@ -53,7 +58,9 @@ class CliTest(unittest.TestCase):
         self.assertIn("Power (W)", result.stdout)
         self.assertIn("Area (mm^2)", result.stdout)
         self.assertIn("29.573%", result.stdout)
-        self.assertIn("29.923%", result.stdout)
+        self.assertIn("30.015%", result.stdout)
+        self.assertIn("requested=256.000 KiB", result.stdout)
+        self.assertIn("sram_power=static-only", result.stdout)
 
 
 if __name__ == "__main__":

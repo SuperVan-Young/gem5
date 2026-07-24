@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fproject.ppa_eval.model import (
     PPARecord,
+    SRAMRecord,
     compare_results,
     evaluate_config,
     load_config,
@@ -43,6 +44,32 @@ def make_record(
         derived_from="",
         power_scale=1.0,
         area_scale=1.0,
+    )
+
+
+def make_sram_record(
+    *,
+    pdk="T7",
+    power_mw=0.063735,
+    area_um2=23249.16,
+):
+    return SRAMRecord(
+        record_id=f"sram-{pdk}",
+        source_kind="spec",
+        pdk=pdk,
+        design="SRAM_16384x32",
+        depth=16384,
+        word_bits=32,
+        capacity_bytes=65536,
+        max_frequency_mhz=2000.0,
+        static_power_mw=power_mw,
+        static_power_w=power_mw / 1000.0,
+        area_um2=area_um2,
+        area_mm2=area_um2 / 1_000_000.0,
+        derived_from="",
+        static_power_scale=1.0,
+        area_scale=1.0,
+        provenance="fixture",
     )
 
 
@@ -86,6 +113,9 @@ compute:
     fp32_ops_per_cycle: 128
   tensor:
     array_dim: 128
+memory:
+  sram:
+    capacity_bytes: 262144
 """
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.yaml"
@@ -97,6 +127,7 @@ compute:
             "no_macro",
         )
         self.assertEqual(config["compute"]["tensor"]["utilization_pct"], 50.0)
+        self.assertEqual(config["memory"]["sram"]["capacity_bytes"], 262144)
 
     def test_config_allows_simulation_section_without_affecting_ppa(self):
         content = """
@@ -110,6 +141,9 @@ compute:
     fp32_ops_per_cycle: 128
   tensor:
     array_dim: 128
+memory:
+  sram:
+    capacity_bytes: 262144
 simulation:
   clock_mhz: 1000
   spm:
@@ -160,16 +194,112 @@ simulation:
                     "utilization_pct": 50.0,
                 },
             },
+            "memory": {"sram": {"capacity_bytes": 262144}},
         }
         with tempfile.TemporaryDirectory() as directory:
             datasheet = Path(directory) / "data.csv"
             datasheet.write_text("fixture", encoding="utf-8")
-            result = evaluate_config(config, records, datasheet)
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            result = evaluate_config(
+                config,
+                records,
+                datasheet,
+                [make_sram_record()],
+                sram_datasheet,
+            )
         self.assertEqual(result["modules"]["vector"]["instance_count"], 32)
         self.assertEqual(result["modules"]["tensor"]["instance_count"], 16)
-        self.assertEqual(result["totals"]["power_w"], 64)
-        self.assertEqual(result["totals"]["area_mm2"], 20)
+        self.assertEqual(result["modules"]["sram"]["instance_count"], 4)
+        self.assertAlmostEqual(result["totals"]["compute_power_w"], 64)
+        self.assertAlmostEqual(
+            result["totals"]["sram_static_power_w"], 0.00025494
+        )
+        self.assertAlmostEqual(result["totals"]["power_w"], 64.00025494)
+        self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 20)
+        self.assertAlmostEqual(result["totals"]["area_mm2"], 20.09299664)
         self.assertEqual(len(result["warnings"]), 2)
+
+    def test_sram_capacity_rounds_up_to_whole_macros(self):
+        records = [
+            make_record("vector", "ara_sys", variant="no_macro"),
+            make_record("tensor", "Mesh_BOTH_32x32"),
+        ]
+        config = {
+            "name": "T7",
+            "system": {
+                "frequency_mhz": 2000.0,
+                "pdk": "T7",
+                "flow": "DC-Innovus",
+            },
+            "compute": {
+                "vector": {
+                    "fp32_ops_per_cycle": 4.0,
+                    "utilization_pct": 50.0,
+                    "implementation_variant": "no_macro",
+                },
+                "tensor": {
+                    "array_dim": 32.0,
+                    "utilization_pct": 50.0,
+                },
+            },
+            "memory": {"sram": {"capacity_bytes": 65537}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            datasheet = Path(directory) / "data.csv"
+            datasheet.write_text("fixture", encoding="utf-8")
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            result = evaluate_config(
+                config,
+                records,
+                datasheet,
+                [make_sram_record()],
+                sram_datasheet,
+            )
+        self.assertEqual(result["modules"]["sram"]["instance_count"], 2)
+        self.assertEqual(
+            result["modules"]["sram"]["provisioned_capacity_bytes"], 131072
+        )
+
+    def test_sram_rejects_frequency_above_two_ghz(self):
+        config = {
+            "name": "T7",
+            "system": {
+                "frequency_mhz": 2001.0,
+                "pdk": "T7",
+                "flow": "DC-Innovus",
+            },
+            "compute": {
+                "vector": {
+                    "fp32_ops_per_cycle": 4.0,
+                    "utilization_pct": 50.0,
+                    "implementation_variant": "no_macro",
+                },
+                "tensor": {
+                    "array_dim": 32.0,
+                    "utilization_pct": 50.0,
+                },
+            },
+            "memory": {"sram": {"capacity_bytes": 65536}},
+        }
+        records = [
+            make_record("vector", "ara_sys", variant="no_macro"),
+            make_record("tensor", "Mesh_BOTH_32x32"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            datasheet = Path(directory) / "data.csv"
+            datasheet.write_text("fixture", encoding="utf-8")
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "at most 2000 MHz"):
+                evaluate_config(
+                    config,
+                    records,
+                    datasheet,
+                    [make_sram_record()],
+                    sram_datasheet,
+                )
 
     def test_comparison_improvement(self):
         baseline = {"totals": {"power_w": 10.0, "area_mm2": 4.0}}
