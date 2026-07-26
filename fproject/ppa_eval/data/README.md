@@ -34,17 +34,19 @@ Area 原始单位为 μm²，`area_mm2 = area_um2 / 1_000_000`。Power 使用原
 ## SRAM 数据
 
 `sram_v1.csv` 独立保存 SRAM macro 数据，不修改或混入原始 compute
-datasheet。每个 macro 的组织形式为 `16384 × 32 bit`，即 65536 byte
+datasheet。每个 macro 的组织形式为 `4096 × 128 bit`，即 65536 byte
 （64 KiB），可工作在 2 GHz：
 
 ```text
-T7 static power = 0.063735 mW
-T7 area         = 23249.160000 μm²
+T7 power = 0.041590 W
+T7 area  = 20923.128000 μm²
 
-F7 static power = T7 × 0.50
+F7 power = T7 × 0.50
 F7 area         = T7 × 0.50
 ```
 
-F7 记录的 `derived_from`、`static_power_scale` 和 `area_scale` 保留
-上述派生关系。默认每 SM 的 256 KiB 配置使用 4 个 macro。SRAM 只提供
-静态功耗数据；系统报告不会将其描述为 SRAM 动态功耗。
+F7 记录的 `derived_from`、`power_scale` 和 `area_scale` 保留上述
+派生关系。容量约束下 256 KiB 需要 4 个 macro；当前 2R1W 带宽配置
+按同拍 1R1W 计算需要 80 个，最终实例数取两者较大值。Power 字段按
+spec 报告值使用，
+不额外推断其静态/动态组成。

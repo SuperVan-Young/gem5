@@ -37,8 +37,9 @@ BR=128 for the softmax primitive's fixed layout unit; the summary reports
 
 The hardware YAML intentionally carries two different SRAM/SPM capacities:
 
-- `memory.sram.capacity_bytes=262144` is the 256 KiB physical capacity used by
-  PPA evaluation.
+- `memory.sram.capacity_bytes=262144` is the 256 KiB logical capacity used by
+  PPA evaluation. Its `port_groups` additionally provision enough 4096×128
+  macros for 2R1W bandwidth, so the reported physical macro capacity is larger.
 - `simulation.spm.size_bytes=8388608` is a sufficiently large functional
   workspace used by cycle simulation.
 

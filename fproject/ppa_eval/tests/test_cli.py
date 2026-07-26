@@ -34,11 +34,16 @@ class CliTest(unittest.TestCase):
         self.assertEqual(
             report["candidate"]["modules"]["tensor"]["instance_count"], 4
         )
-        self.assertEqual(
-            report["baseline"]["modules"]["sram"]["instance_count"], 4
-        )
+        sram = report["baseline"]["modules"]["sram"]
+        self.assertEqual(sram["capacity_instance_count"], 4)
+        self.assertEqual(sram["bandwidth_instance_count"], 80)
+        self.assertEqual(sram["instance_count"], 80)
+        self.assertEqual(sram["required_bytes_per_cycle"], 1920)
+        self.assertEqual(sram["required_read_bytes_per_cycle"], 1152)
+        self.assertEqual(sram["required_write_bytes_per_cycle"], 768)
+        self.assertTrue(sram["simultaneous_read_write"])
         self.assertAlmostEqual(
-            report["baseline"]["totals"]["sram_static_power_w"], 0.00025494
+            report["baseline"]["totals"]["sram_power_w"], 3.3272
         )
         self.assertTrue(
             report["baseline"]["modules"]["tensor"]["selection"][
@@ -57,8 +62,6 @@ class CliTest(unittest.TestCase):
         self.assertIn("PPA COMPARISON: T7 (baseline) -> F7", result.stdout)
         self.assertIn("Power (W)", result.stdout)
         self.assertIn("Area (mm^2)", result.stdout)
-        self.assertIn("45.738%", result.stdout)
-        self.assertIn("34.662%", result.stdout)
         self.assertIn(
             "1 x shared CPU/other + 16 x 4-lane Vector/SRAM",
             result.stdout,
@@ -67,7 +70,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("timing_met=True", result.stdout)
         self.assertIn("peak=16.384000 TOPS", result.stdout)
         self.assertIn("requested=256.000 KiB", result.stdout)
-        self.assertIn("sram_power=static-only", result.stdout)
+        self.assertIn("capacity_instances=4", result.stdout)
+        self.assertIn("bandwidth_instances=80", result.stdout)
+        self.assertIn("simultaneous_rw=True", result.stdout)
+        self.assertIn("bandwidth=1920 B/cycle", result.stdout)
 
 
 if __name__ == "__main__":

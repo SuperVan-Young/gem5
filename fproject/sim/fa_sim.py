@@ -102,7 +102,11 @@ def load_hardware(path):
     memory = _mapping(config.get("memory"), "memory")
     _fields(memory, {"sram"}, "memory")
     sram = _mapping(memory.get("sram"), "memory.sram")
-    _fields(sram, {"capacity_bytes"}, "memory.sram")
+    _fields(
+        sram,
+        {"capacity_bytes", "port_groups", "simultaneous_read_write"},
+        "memory.sram",
+    )
     ppa_sram_capacity = _positive_int(
         sram.get("capacity_bytes"), "memory.sram.capacity_bytes"
     )

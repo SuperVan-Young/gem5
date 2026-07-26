@@ -56,24 +56,23 @@ def make_record(
 def make_sram_record(
     *,
     pdk="T7",
-    power_mw=0.063735,
-    area_um2=23249.16,
+    power_w=0.041590,
+    area_um2=20923.128,
 ):
     return SRAMRecord(
-        record_id=f"sram-{pdk}",
+        record_id=f"sram-{pdk}-4096x128",
         source_kind="spec",
         pdk=pdk,
-        design="SRAM_16384x32",
-        depth=16384,
-        word_bits=32,
+        design="SRAM_4096x128",
+        depth=4096,
+        word_bits=128,
         capacity_bytes=65536,
         max_frequency_mhz=2000.0,
-        static_power_mw=power_mw,
-        static_power_w=power_mw / 1000.0,
+        power_w=power_w,
         area_um2=area_um2,
         area_mm2=area_um2 / 1_000_000.0,
         derived_from="",
-        static_power_scale=1.0,
+        power_scale=1.0,
         area_scale=1.0,
         provenance="fixture",
     )
@@ -224,12 +223,10 @@ simulation:
             result["modules"]["tensor"]["requested_ops_per_cycle"], 8192
         )
         self.assertAlmostEqual(result["totals"]["compute_power_w"], 21)
-        self.assertAlmostEqual(
-            result["totals"]["sram_static_power_w"], 0.00025494
-        )
-        self.assertAlmostEqual(result["totals"]["power_w"], 21.00025494)
+        self.assertAlmostEqual(result["totals"]["sram_power_w"], 0.16636)
+        self.assertAlmostEqual(result["totals"]["power_w"], 21.16636)
         self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 7.5)
-        self.assertAlmostEqual(result["totals"]["area_mm2"], 7.59299664)
+        self.assertAlmostEqual(result["totals"]["area_mm2"], 7.583692512)
         self.assertEqual(result["modules"]["vector"]["shared_instance_count"], 1)
         self.assertAlmostEqual(
             result["modules"]["vector"]["lane_group_power_w"], 0.8

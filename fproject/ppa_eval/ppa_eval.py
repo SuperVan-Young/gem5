@@ -79,11 +79,15 @@ def _sram_text(module):
     record = module["selected_record"]
     return (
         f"  sram: instances={module['instance_count']} "
+        f"capacity_instances={module['capacity_instance_count']} "
+        f"bandwidth_instances={module['bandwidth_instance_count']} "
+        f"simultaneous_rw={module['simultaneous_read_write']} "
         f"requested={module['requested_capacity_bytes'] / 1024:.3f} KiB "
         f"provisioned="
-        f"{module['provisioned_capacity_bytes'] / 1024:.3f} KiB "
+        f"{module['provisioned_capacity_bytes'] / 1048576:.3f} MiB "
+        f"bandwidth={module['required_bytes_per_cycle']:.0f} B/cycle "
         f"record={record['record_id']} "
-        f"static_power={module['static_power_mw']:.6f} mW "
+        f"power={module['power_w']:.6f} W "
         f"area={module['area_mm2']:.6f} mm^2"
     )
 
@@ -101,8 +105,7 @@ def _evaluation_text(result):
         _sram_text(result["modules"]["sram"]),
         (
             f"  total: power={result['totals']['power_w']:.6f} W "
-            f"area={result['totals']['area_mm2']:.6f} mm^2 "
-            "sram_power=static-only"
+            f"area={result['totals']['area_mm2']:.6f} mm^2"
         ),
     ]
     lines.extend(f"  WARNING: {warning}" for warning in result["warnings"])

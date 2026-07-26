@@ -19,7 +19,7 @@ MESH_DIM = 32
 DEFAULT_FLOW = "DC-Innovus"
 DEFAULT_UTILIZATION_PCT = 50.0
 DEFAULT_ARA_VARIANT = "with_macro"
-SRAM_DESIGN = "SRAM_16384x32"
+SRAM_DESIGN = "SRAM_4096x128"
 
 
 @dataclass(frozen=True)
@@ -83,12 +83,11 @@ class SRAMRecord:
     word_bits: int
     capacity_bytes: int
     max_frequency_mhz: float
-    static_power_mw: float
-    static_power_w: float
+    power_w: float
     area_um2: float
     area_mm2: float
     derived_from: str
-    static_power_scale: float
+    power_scale: float
     area_scale: float
     provenance: str
 
@@ -104,12 +103,11 @@ class SRAMRecord:
                 word_bits=int(row["word_bits"]),
                 capacity_bytes=int(row["capacity_bytes"]),
                 max_frequency_mhz=float(row["max_frequency_mhz"]),
-                static_power_mw=float(row["static_power_mw"]),
-                static_power_w=float(row["static_power_w"]),
+                power_w=float(row["power_w"]),
                 area_um2=float(row["area_um2"]),
                 area_mm2=float(row["area_mm2"]),
                 derived_from=row["derived_from"],
-                static_power_scale=float(row["static_power_scale"]),
+                power_scale=float(row["power_scale"]),
                 area_scale=float(row["area_scale"]),
                 provenance=row["provenance"],
             )
@@ -137,20 +135,15 @@ class SRAMRecord:
             )
         positive_values = {
             "max_frequency_mhz": self.max_frequency_mhz,
-            "static_power_mw": self.static_power_mw,
-            "static_power_w": self.static_power_w,
+            "power_w": self.power_w,
             "area_um2": self.area_um2,
             "area_mm2": self.area_mm2,
-            "static_power_scale": self.static_power_scale,
+            "power_scale": self.power_scale,
             "area_scale": self.area_scale,
         }
         for field, value in positive_values.items():
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"SRAM record {label} has invalid {field}")
-        if not _close(self.static_power_w, self.static_power_mw / 1000.0):
-            raise ValueError(
-                f"SRAM record {label} has inconsistent power units"
-            )
         if not _close(self.area_mm2, self.area_um2 / 1_000_000.0):
             raise ValueError(
                 f"SRAM record {label} has inconsistent area units"
@@ -207,8 +200,8 @@ def load_sram_records(path):
             and _close(record.max_frequency_mhz, source.max_frequency_mhz)
         )
         scaled = _close(
-            record.static_power_w,
-            source.static_power_w * record.static_power_scale,
+            record.power_w,
+            source.power_w * record.power_scale,
         ) and _close(record.area_um2, source.area_um2 * record.area_scale)
         if not inherited or not scaled:
             raise ValueError(
@@ -292,7 +285,53 @@ def load_config(path):
     memory = _mapping(config.get("memory"), "memory")
     _check_fields(memory, {"sram"}, "memory")
     sram = _mapping(memory.get("sram"), "memory.sram")
-    _check_fields(sram, {"capacity_bytes"}, "memory.sram")
+    _check_fields(
+        sram,
+        {"capacity_bytes", "port_groups", "simultaneous_read_write"},
+        "memory.sram",
+    )
+    simultaneous_read_write = sram.get("simultaneous_read_write", False)
+    if not isinstance(simultaneous_read_write, bool):
+        raise ValueError(
+            "memory.sram.simultaneous_read_write must be a boolean"
+        )
+    port_groups = sram.get("port_groups", [])
+    if not isinstance(port_groups, list):
+        raise ValueError("memory.sram.port_groups must be a list")
+    normalized_port_groups = []
+    for index, group_value in enumerate(port_groups):
+        path = f"memory.sram.port_groups[{index}]"
+        group = _mapping(group_value, path)
+        _check_fields(
+            group,
+            {"name", "module_count", "read_widths_bytes", "write_widths_bytes"},
+            path,
+        )
+        group_name = group.get("name")
+        if not isinstance(group_name, str) or not group_name:
+            raise ValueError(f"{path}.name must be a non-empty string")
+        read_widths = group.get("read_widths_bytes")
+        write_widths = group.get("write_widths_bytes")
+        if not isinstance(read_widths, list) or not read_widths:
+            raise ValueError(f"{path}.read_widths_bytes must be non-empty")
+        if not isinstance(write_widths, list) or not write_widths:
+            raise ValueError(f"{path}.write_widths_bytes must be non-empty")
+        normalized_port_groups.append(
+            {
+                "name": group_name,
+                "module_count": _positive_int(
+                    group.get("module_count"), f"{path}.module_count"
+                ),
+                "read_widths_bytes": [
+                    _positive_int(width, f"{path}.read_widths_bytes")
+                    for width in read_widths
+                ],
+                "write_widths_bytes": [
+                    _positive_int(width, f"{path}.write_widths_bytes")
+                    for width in write_widths
+                ],
+            }
+        )
 
     return {
         "schema_version": 1,
@@ -331,7 +370,9 @@ def load_config(path):
                 "capacity_bytes": _positive_int(
                     sram.get("capacity_bytes"),
                     "memory.sram.capacity_bytes",
-                )
+                ),
+                "port_groups": normalized_port_groups,
+                "simultaneous_read_write": simultaneous_read_write,
             }
         },
     }
@@ -509,17 +550,70 @@ def _sram_result(config, records, frequency_mhz):
             f"{frequency_mhz:g} MHz"
         )
     requested = config["memory"]["sram"]["capacity_bytes"]
-    instance_count = math.ceil(requested / record.capacity_bytes)
+    capacity_instance_count = math.ceil(requested / record.capacity_bytes)
+    word_bytes = record.word_bits // 8
+    port_groups = []
+    bandwidth_instance_count = 0
+    required_bytes_per_cycle = 0
+    required_read_bytes_per_cycle = 0
+    required_write_bytes_per_cycle = 0
+    simultaneous_read_write = config["memory"]["sram"].get(
+        "simultaneous_read_write", False
+    )
+    for group in config["memory"]["sram"].get("port_groups", []):
+        read_instances_per_module = sum(
+            math.ceil(width / word_bytes)
+            for width in group["read_widths_bytes"]
+        )
+        write_instances_per_module = sum(
+            math.ceil(width / word_bytes)
+            for width in group["write_widths_bytes"]
+        )
+        instances_per_module = (
+            max(read_instances_per_module, write_instances_per_module)
+            if simultaneous_read_write
+            else read_instances_per_module + write_instances_per_module
+        )
+        instance_count = group["module_count"] * instances_per_module
+        read_bytes_per_cycle = group["module_count"] * sum(
+            group["read_widths_bytes"]
+        )
+        write_bytes_per_cycle = group["module_count"] * sum(
+            group["write_widths_bytes"]
+        )
+        bytes_per_cycle = read_bytes_per_cycle + write_bytes_per_cycle
+        bandwidth_instance_count += instance_count
+        required_bytes_per_cycle += bytes_per_cycle
+        required_read_bytes_per_cycle += read_bytes_per_cycle
+        required_write_bytes_per_cycle += write_bytes_per_cycle
+        port_groups.append(
+            {
+                **group,
+                "read_instances_per_module": read_instances_per_module,
+                "write_instances_per_module": write_instances_per_module,
+                "instances_per_module": instances_per_module,
+                "instance_count": instance_count,
+                "required_bytes_per_cycle": bytes_per_cycle,
+            }
+        )
+    instance_count = max(capacity_instance_count, bandwidth_instance_count)
     return {
         "kind": "sram",
-        "power_kind": "static",
+        "power_kind": "reported",
         "requested_capacity_bytes": requested,
         "instance_capacity_bytes": record.capacity_bytes,
+        "instance_word_bytes": word_bytes,
+        "capacity_instance_count": capacity_instance_count,
+        "bandwidth_instance_count": bandwidth_instance_count,
         "instance_count": instance_count,
         "provisioned_capacity_bytes": (instance_count * record.capacity_bytes),
+        "required_bytes_per_cycle": required_bytes_per_cycle,
+        "required_read_bytes_per_cycle": required_read_bytes_per_cycle,
+        "required_write_bytes_per_cycle": required_write_bytes_per_cycle,
+        "simultaneous_read_write": simultaneous_read_write,
+        "port_groups": port_groups,
         "selected_record": asdict(record),
-        "static_power_mw": instance_count * record.static_power_mw,
-        "static_power_w": instance_count * record.static_power_w,
+        "power_w": instance_count * record.power_w,
         "area_um2": instance_count * record.area_um2,
         "area_mm2": instance_count * record.area_mm2,
     }
@@ -628,8 +722,8 @@ def evaluate_config(
         "modules": {"vector": vector, "tensor": tensor, "sram": sram},
         "totals": {
             "compute_power_w": compute_power_w,
-            "sram_static_power_w": sram["static_power_w"],
-            "power_w": compute_power_w + sram["static_power_w"],
+            "sram_power_w": sram["power_w"],
+            "power_w": compute_power_w + sram["power_w"],
             "compute_area_um2": compute_area_um2,
             "compute_area_mm2": compute_area_mm2,
             "sram_area_um2": sram["area_um2"],

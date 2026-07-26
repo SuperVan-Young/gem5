@@ -16,6 +16,16 @@ compute:
 memory:
     sram:
         capacity_bytes: 262144
+        simultaneous_read_write: true
+        port_groups:
+          - name: vector
+            module_count: 16
+            read_widths_bytes: [32, 32]
+            write_widths_bytes: [32]
+          - name: tensor_broadcast
+            module_count: 1
+            read_widths_bytes: [64, 64]
+            write_widths_bytes: [256]
 simulation:
     schema_version: 1
     clock_mhz: 2000
