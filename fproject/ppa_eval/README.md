@@ -55,15 +55,21 @@ fproject/ppa_eval/
   按乘、加 2 ops 计，因此在 2 GHz 下提供 16.384 TOPS。
 - Vector：512 B/cycle FP32 数据通路为 128 FP32 elements/cycle。
   Ara 每 lane 每周期处理一个 64-bit packet，即 2 个 FP32 elements；
-  每个 4-lane `ara_sys` 提供 8 elements/cycle，因此需要 16 个。
+  每个 4-lane group 提供 8 elements/cycle，因此需要 16 个 group。
 - Vector FMA 同样按 2 ops/element 计，峰值为 0.512 TFLOPS。
-- 每个 `ara_sys` 完整计入 CPU、RVV 和 L1Cache。
+- Vector 采用 2 GHz timing 通过的 `with_macro`（SRAM）记录。
+- `ara_sys` 只保留 1 份共享 CPU 和 Other；扩展吞吐时只复制
+  4-lane Vector/SRAM 部分。共享部分来自原表第 27、29 行：
+  T7 为 0.0784 W、182267.71 μm²。
+- 原表没有 `with_macro` 的组件拆分。因此模型从所选 `with_macro`
+  总 PPA 中扣除上述 CPU/Other，余量视为一个 4-lane Vector/SRAM
+  group。这是显式记录在输出中的推导口径。
 - 每个 SM 配置 256 KiB SRAM，由 4 个 16384×32（64 KiB）macro
   组成。
 - SRAM 只计入 spec 给出的静态功耗；报告将 compute Power 和 SRAM
   static Power 分项展示后相加。
 - Vector/Tensor 版图利用率默认均为 50%。
-- flow 默认 `DC-Innovus`，`ara_sys` 默认 `no_macro`。
+- flow 默认 `DC-Innovus`，`ara_sys` 默认 `with_macro`。
 - Area 的原始单位是 μm²，最终同时换算并显示 mm²。
 - Power 使用 datasheet 中唯一的总 Power。
 
@@ -76,7 +82,8 @@ SRAM 使用独立的 `data/sram_v1.csv`。T7 单 macro 静态功耗为
 性能仿真的功能性工作区，不是 PPA 计费容量；PPA 只读取
 `memory.sram.capacity_bytes=262144`。
 
-F7 缺少真实 `ara_sys` 数据，因此 augmented datasheet 按以下规则生成：
+F7 缺少真实 `ara_sys` 数据，因此 augmented datasheet 对总值及共享
+CPU/Other 分量使用相同规则生成：
 
 ```text
 F7 ara_sys Power = T7 ara_sys Power × 0.50

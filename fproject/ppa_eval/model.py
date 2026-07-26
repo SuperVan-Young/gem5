@@ -18,7 +18,7 @@ OPS_PER_FMA = 2
 MESH_DIM = 32
 DEFAULT_FLOW = "DC-Innovus"
 DEFAULT_UTILIZATION_PCT = 50.0
-DEFAULT_ARA_VARIANT = "no_macro"
+DEFAULT_ARA_VARIANT = "with_macro"
 SRAM_DESIGN = "SRAM_16384x32"
 
 
@@ -41,6 +41,10 @@ class PPARecord:
     derived_from: str
     power_scale: float
     area_scale: float
+    shared_power_w: float = 0.0
+    shared_area_um2: float = 0.0
+    shared_area_mm2: float = 0.0
+    shared_derived_from: str = ""
 
     @classmethod
     def from_csv_row(cls, row):
@@ -62,6 +66,10 @@ class PPARecord:
             derived_from=row["derived_from"],
             power_scale=float(row["power_scale"]),
             area_scale=float(row["area_scale"]),
+            shared_power_w=float(row.get("shared_power_w") or 0.0),
+            shared_area_um2=float(row.get("shared_area_um2") or 0.0),
+            shared_area_mm2=float(row.get("shared_area_mm2") or 0.0),
+            shared_derived_from=row.get("shared_derived_from", ""),
         )
 
 
@@ -428,6 +436,58 @@ def _module_result(
     }
 
 
+def _vector_result(
+    requested_ops_per_cycle,
+    instance_ops_per_cycle,
+    instance_count,
+    record,
+    selection,
+    frequency_mhz,
+):
+    shared_power_w = record.shared_power_w
+    shared_area_um2 = record.shared_area_um2
+    lane_group_power_w = record.power_w - shared_power_w
+    lane_group_area_um2 = record.area_um2 - shared_area_um2
+    if (
+        shared_power_w <= 0
+        or shared_area_um2 <= 0
+        or lane_group_power_w <= 0
+        or lane_group_area_um2 <= 0
+    ):
+        raise ValueError(
+            f"ara_sys record {record.record_id} cannot be decomposed into "
+            "positive shared and lane-group PPA"
+        )
+    power_w = shared_power_w + instance_count * lane_group_power_w
+    area_um2 = shared_area_um2 + instance_count * lane_group_area_um2
+    return {
+        "kind": "vector",
+        "requested_ops_per_cycle": requested_ops_per_cycle,
+        "instance_ops_per_cycle": instance_ops_per_cycle,
+        "requested_tops": (
+            requested_ops_per_cycle * frequency_mhz / 1_000_000.0
+        ),
+        "instance_tops": instance_ops_per_cycle * frequency_mhz / 1_000_000.0,
+        "instance_count": instance_count,
+        "provisioned_ops_per_cycle": instance_count * instance_ops_per_cycle,
+        "selected_record": asdict(record),
+        "selection": selection,
+        "scaling_model": "one_shared_cpu_and_other_plus_lane_groups",
+        "shared_instance_count": 1,
+        "shared_power_w": shared_power_w,
+        "shared_area_um2": shared_area_um2,
+        "shared_area_mm2": shared_area_um2 / 1_000_000.0,
+        "lane_group_count": instance_count,
+        "lane_group_lanes": ARA_LANES,
+        "lane_group_power_w": lane_group_power_w,
+        "lane_group_area_um2": lane_group_area_um2,
+        "lane_group_area_mm2": lane_group_area_um2 / 1_000_000.0,
+        "power_w": power_w,
+        "area_um2": area_um2,
+        "area_mm2": area_um2 / 1_000_000.0,
+    }
+
+
 def _sram_result(config, records, frequency_mhz):
     matching = [
         record
@@ -493,8 +553,7 @@ def evaluate_config(
         system_period_ns=system_period_ns,
         variant=vector_config["implementation_variant"],
     )
-    vector = _module_result(
-        "vector",
+    vector = _vector_result(
         vector_ops,
         ara_ops,
         vector_count,

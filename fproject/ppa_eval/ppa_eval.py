@@ -56,7 +56,7 @@ def parse_args():
 def _module_text(module):
     record = module["selected_record"]
     fallback = module["selection"]["timing_fallback"]
-    return (
+    line = (
         f"  {module['kind']}: instances={module['instance_count']} "
         f"record={record['record_id']} power={module['power_w']:.6f} W "
         f"area={module['area_mm2']:.6f} mm^2 "
@@ -64,6 +64,15 @@ def _module_text(module):
         f"timing_met={record['timing_met']} "
         f"timing_fallback={fallback}"
     )
+    if module["kind"] == "vector":
+        line += (
+            f"\n    shared_cpu_other=1 "
+            f"({module['shared_power_w']:.6f} W, "
+            f"{module['shared_area_mm2']:.6f} mm^2), "
+            f"lane_groups={module['lane_group_count']}x"
+            f"{module['lane_group_lanes']}"
+        )
+    return line
 
 
 def _sram_text(module):
@@ -118,7 +127,10 @@ def render_text(result):
         ),
         (
             f"Architecture: {baseline['system']['frequency_mhz']:.0f} MHz, "
-            f"{baseline['modules']['vector']['instance_count']} x ara_sys + "
+            "1 x shared CPU/other + "
+            f"{baseline['modules']['vector']['lane_group_count']} x "
+            f"{baseline['modules']['vector']['lane_group_lanes']}-lane "
+            "Vector/SRAM + "
             f"{baseline['modules']['tensor']['instance_count']} x "
             "Mesh_BOTH_32x32 + 256 KiB SRAM"
         ),

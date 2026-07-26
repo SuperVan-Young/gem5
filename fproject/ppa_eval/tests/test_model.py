@@ -25,6 +25,8 @@ def make_record(
     timing_met=True,
     power=1.0,
     area=1.0,
+    shared_power=0.2,
+    shared_area=0.1,
 ):
     return PPARecord(
         record_id=record_id,
@@ -44,6 +46,10 @@ def make_record(
         derived_from="",
         power_scale=1.0,
         area_scale=1.0,
+        shared_power_w=shared_power,
+        shared_area_um2=shared_area * 1_000_000,
+        shared_area_mm2=shared_area,
+        shared_derived_from="fixture-cpu,fixture-other",
     )
 
 
@@ -124,7 +130,7 @@ memory:
         self.assertEqual(config["system"]["flow"], "DC-Innovus")
         self.assertEqual(
             config["compute"]["vector"]["implementation_variant"],
-            "no_macro",
+            "with_macro",
         )
         self.assertEqual(config["compute"]["tensor"]["utilization_pct"], 50.0)
         self.assertEqual(config["memory"]["sram"]["capacity_bytes"], 262144)
@@ -217,13 +223,17 @@ simulation:
         self.assertEqual(
             result["modules"]["tensor"]["requested_ops_per_cycle"], 8192
         )
-        self.assertAlmostEqual(result["totals"]["compute_power_w"], 24)
+        self.assertAlmostEqual(result["totals"]["compute_power_w"], 21)
         self.assertAlmostEqual(
             result["totals"]["sram_static_power_w"], 0.00025494
         )
-        self.assertAlmostEqual(result["totals"]["power_w"], 24.00025494)
-        self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 9)
-        self.assertAlmostEqual(result["totals"]["area_mm2"], 9.09299664)
+        self.assertAlmostEqual(result["totals"]["power_w"], 21.00025494)
+        self.assertAlmostEqual(result["totals"]["compute_area_mm2"], 7.5)
+        self.assertAlmostEqual(result["totals"]["area_mm2"], 7.59299664)
+        self.assertEqual(result["modules"]["vector"]["shared_instance_count"], 1)
+        self.assertAlmostEqual(
+            result["modules"]["vector"]["lane_group_power_w"], 0.8
+        )
         self.assertEqual(len(result["warnings"]), 2)
 
     def test_sram_capacity_rounds_up_to_whole_macros(self):

@@ -54,6 +54,15 @@ def augment_f7_ara(
         clone["power_w"] = _scaled(record["power_w"], power_scale)
         clone["area_um2"] = _scaled(record["area_um2"], area_scale)
         clone["area_mm2"] = float(clone["area_um2"]) / 1_000_000.0
+        clone["shared_power_w"] = _scaled(
+            record["shared_power_w"], power_scale
+        )
+        clone["shared_area_um2"] = _scaled(
+            record["shared_area_um2"], area_scale
+        )
+        clone["shared_area_mm2"] = (
+            float(clone["shared_area_um2"]) / 1_000_000.0
+        )
         clone["notes"] = (
             f"augmented from {record['record_id']}: "
             f"power_scale={power_scale}, area_scale={area_scale}; "

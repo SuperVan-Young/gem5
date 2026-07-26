@@ -14,6 +14,12 @@ e1a8624ebc477b93651a9f6e6e4acfcda6fd96db68c9c5d17c43a543562fc2c3
 
 `ppa_base_v1.csv` 是原始 XLSX 的规范化版本，`ppa_base_v1.audit.json` 记录接受及忽略的原始行。
 
+原表第 27、29 行给出 `ara_sys` 的 CPU 和 Other 分量。规范化数据把
+两者之和保存为 `shared_*` 字段，供“共享部分只计一份、仅扩展
+4-lane Vector/SRAM”模型使用。由于原表只在 `no_macro` 记录旁提供
+组件拆分，`with_macro` 的 lane-group PPA 是用整机值减去共享分量
+得到的推导值。
+
 `ppa_augmented_v1.csv` 包含全部 base 记录，以及从对应 T7 记录派生的 F7-PKU `ara_sys`：
 
 ```text

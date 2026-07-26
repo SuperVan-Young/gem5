@@ -9,7 +9,7 @@ compute:
     vector:
         fp32_elements_per_cycle: 128
         utilization_pct: 50
-        implementation_variant: no_macro
+        implementation_variant: with_macro
     tensor:
         array_dim: 64
         utilization_pct: 50

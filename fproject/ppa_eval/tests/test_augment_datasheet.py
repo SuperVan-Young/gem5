@@ -18,6 +18,10 @@ class AugmentDatasheetTest(unittest.TestCase):
             "area_um2": "400000",
             "area_mm2": "0.4",
             "power_w": "1.2",
+            "shared_power_w": "0.2",
+            "shared_area_um2": "100000",
+            "shared_area_mm2": "0.1",
+            "shared_derived_from": "source-sheet1-r27,source-sheet1-r29",
             "notes": "no macro",
         }
 
@@ -30,6 +34,8 @@ class AugmentDatasheetTest(unittest.TestCase):
         self.assertAlmostEqual(augmented["power_w"], 0.6)
         self.assertAlmostEqual(augmented["area_um2"], 300000)
         self.assertAlmostEqual(augmented["area_mm2"], 0.3)
+        self.assertAlmostEqual(augmented["shared_power_w"], 0.1)
+        self.assertAlmostEqual(augmented["shared_area_um2"], 75000)
 
     def test_refuses_to_overwrite_real_target_data(self):
         existing = dict(self.source, pdk="F7-PKU")

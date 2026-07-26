@@ -37,12 +37,17 @@ FIELDNAMES = (
     "area_um2",
     "area_mm2",
     "power_w",
+    "shared_power_w",
+    "shared_area_um2",
+    "shared_area_mm2",
+    "shared_derived_from",
     "notes",
     "derived_from",
     "power_scale",
     "area_scale",
 )
 VALID_DESIGNS = {"ara_sys", "Mesh_BOTH_32x32"}
+ARA_SHARED_DESIGNS = {"cpu", "other"}
 
 
 def _sha256(path):
@@ -135,9 +140,20 @@ def infer_variant(design, notes):
 
 def normalize_snapshot(path):
     source_sha256 = _sha256(path)
+    source_rows = read_first_sheet_rows(path)
+    shared_rows = [
+        (row_number, cells)
+        for row_number, cells in source_rows
+        if cells.get(3, "").strip().lower() in ARA_SHARED_DESIGNS
+    ]
+    shared_power_w = sum(float(cells.get(11, 0)) for _, cells in shared_rows)
+    shared_area_um2 = sum(float(cells.get(8, 0)) for _, cells in shared_rows)
+    shared_derived_from = ",".join(
+        f"source-sheet1-r{row_number}" for row_number, _ in shared_rows
+    )
     records = []
     ignored = []
-    for row_number, cells in read_first_sheet_rows(path):
+    for row_number, cells in source_rows:
         raw_pdk = cells.get(1, "")
         raw_flow = cells.get(2, "")
         design = cells.get(3, "")
@@ -177,8 +193,7 @@ def normalize_snapshot(path):
             raw_timing, target_period_ns
         )
         area_um2 = float(area)
-        records.append(
-            {
+        record = {
                 "record_id": f"source-sheet1-r{row_number}",
                 "source_kind": "source",
                 "source_file_sha256": source_sha256,
@@ -199,12 +214,25 @@ def normalize_snapshot(path):
                 "area_um2": area_um2,
                 "area_mm2": area_um2 / 1_000_000.0,
                 "power_w": float(power),
+                "shared_power_w": "",
+                "shared_area_um2": "",
+                "shared_area_mm2": "",
+                "shared_derived_from": "",
                 "notes": notes,
                 "derived_from": "",
                 "power_scale": 1.0,
                 "area_scale": 1.0,
             }
-        )
+        if design == "ara_sys" and raw_pdk == "T7":
+            record.update(
+                {
+                    "shared_power_w": shared_power_w,
+                    "shared_area_um2": shared_area_um2,
+                    "shared_area_mm2": shared_area_um2 / 1_000_000.0,
+                    "shared_derived_from": shared_derived_from,
+                }
+            )
+        records.append(record)
     return records, ignored
 
 

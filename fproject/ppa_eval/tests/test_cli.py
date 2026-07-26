@@ -57,9 +57,14 @@ class CliTest(unittest.TestCase):
         self.assertIn("PPA COMPARISON: T7 (baseline) -> F7", result.stdout)
         self.assertIn("Power (W)", result.stdout)
         self.assertIn("Area (mm^2)", result.stdout)
-        self.assertIn("36.537%", result.stdout)
-        self.assertIn("27.965%", result.stdout)
-        self.assertIn("16 x ara_sys + 4 x Mesh_BOTH_32x32", result.stdout)
+        self.assertIn("45.738%", result.stdout)
+        self.assertIn("34.662%", result.stdout)
+        self.assertIn(
+            "1 x shared CPU/other + 16 x 4-lane Vector/SRAM",
+            result.stdout,
+        )
+        self.assertIn("record=source-sheet1-r32", result.stdout)
+        self.assertIn("timing_met=True", result.stdout)
         self.assertIn("peak=16.384000 TOPS", result.stdout)
         self.assertIn("requested=256.000 KiB", result.stdout)
         self.assertIn("sram_power=static-only", result.stdout)
