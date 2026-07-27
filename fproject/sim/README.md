@@ -45,6 +45,29 @@ The hardware YAML intentionally carries two different SRAM/SPM capacities:
 
 The cycle simulator does not use the 8 MiB workspace as PPA capacity.
 
+The hardware config also carries an analytical buffer-pipeline model derived
+from the measured MPU and VPU busy cycles:
+
+- The 32-bank baseline exposes 4 B/cycle per bank and one shared 32-bank
+  engine group. Tensor and Vector execution therefore remain serialized.
+- The 64-bank configuration splits the address space into two independent
+  32-bank contexts along the BR/query-block dimension. BC is not used for the
+  split because online softmax and output accumulation carry dependencies
+  between KV blocks of the same query block.
+
+For the default task, the 32-bank model retains 35,440 cycles. The 64-bank
+double-buffer model divides QK, softmax, and PV busy time across the two BR
+slots and evaluates four finite-pipeline stages:
+
+```text
+QK0 -> max(QK1, softmax0) -> max(softmax1, PV0) -> PV1
+```
+
+The stages take 4,448, 8,824, 8,824, and 4,448 cycles, respectively, for a
+total of 26,544 cycles and a 1.335x speedup. This is a busy-cycle overlap
+model; it does not claim that the current sequential workload already issues
+the two engines concurrently.
+
 Each run creates an independent directory under `results/` containing the
 input snapshots, resolved simulation configuration, gem5 stdout/stderr, raw
 profile log, parsed JSON, interactive HTML, manifest, and performance summary.

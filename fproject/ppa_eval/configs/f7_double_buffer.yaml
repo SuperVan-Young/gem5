@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-name: F7
+name: F7-double-buffer
 system:
     frequency_mhz: 2000
     pdk: F7-PKU
@@ -15,8 +15,8 @@ compute:
         utilization_pct: 50
 memory:
     sram:
-        capacity_bytes: 262144
-        bank_count: 32
+        capacity_bytes: 524288
+        bank_count: 64
         bank_width_bytes: 4
         simultaneous_read_write: true
 simulation:
@@ -38,10 +38,10 @@ simulation:
         width_bytes: 256
         latency_cycles: 0
     buffer_pipeline:
-        bank_count: 32
+        bank_count: 64
         bank_width_bytes: 4
         banks_per_engine: 32
-        buffer_slots: 1
+        buffer_slots: 2
         context_stride_bytes: 262144
         split_dimension: br
     mpu:

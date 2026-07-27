@@ -77,8 +77,14 @@ def _module_text(module):
 
 def _sram_text(module):
     record = module["selected_record"]
+    banking = ""
+    if module["bank_count"] is not None:
+        banking = (
+            f"banks={module['bank_count']}x{module['bank_width_bytes']}B "
+        )
     return (
         f"  sram: instances={module['instance_count']} "
+        f"{banking}"
         f"capacity_instances={module['capacity_instance_count']} "
         f"bandwidth_instances={module['bandwidth_instance_count']} "
         f"simultaneous_rw={module['simultaneous_read_write']} "

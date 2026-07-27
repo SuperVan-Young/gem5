@@ -46,7 +46,8 @@ F7 area         = T7 × 0.50
 ```
 
 F7 记录的 `derived_from`、`power_scale` 和 `area_scale` 保留上述
-派生关系。容量约束下 256 KiB 需要 4 个 macro；当前 2R1W 带宽配置
-按同拍 1R1W 计算需要 80 个，最终实例数取两者较大值。Power 字段按
+派生关系。容量约束下 256 KiB 需要 4 个 macro；baseline 为保留
+独立 bank 寻址能力使用 32 个 macro，double-buffer 方案使用 64 个。
+每个 bank 对外按 4 B/cycle 建模，并支持同拍 1R1W。Power 字段按
 spec 报告值使用，
 不额外推断其静态/动态组成。

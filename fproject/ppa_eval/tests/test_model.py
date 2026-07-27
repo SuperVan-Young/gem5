@@ -275,6 +275,58 @@ simulation:
             result["modules"]["sram"]["provisioned_capacity_bytes"], 131072
         )
 
+    def test_fixed_sram_banks_override_capacity_count(self):
+        records = [
+            make_record("vector", "ara_sys", variant="no_macro"),
+            make_record("tensor", "Mesh_BOTH_32x32"),
+        ]
+        config = {
+            "name": "T7",
+            "system": {
+                "frequency_mhz": 2000.0,
+                "pdk": "T7",
+                "flow": "DC-Innovus",
+            },
+            "compute": {
+                "vector": {
+                    "fp32_elements_per_cycle": 8.0,
+                    "utilization_pct": 50.0,
+                    "implementation_variant": "no_macro",
+                },
+                "tensor": {
+                    "array_dim": 32.0,
+                    "utilization_pct": 50.0,
+                },
+            },
+            "memory": {
+                "sram": {
+                    "capacity_bytes": 262144,
+                    "bank_count": 32,
+                    "bank_width_bytes": 4,
+                    "port_groups": [],
+                    "simultaneous_read_write": True,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            datasheet = Path(directory) / "data.csv"
+            datasheet.write_text("fixture", encoding="utf-8")
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            result = evaluate_config(
+                config,
+                records,
+                datasheet,
+                [make_sram_record()],
+                sram_datasheet,
+            )
+        sram = result["modules"]["sram"]
+        self.assertEqual(sram["capacity_instance_count"], 4)
+        self.assertEqual(sram["bandwidth_instance_count"], 32)
+        self.assertEqual(sram["instance_count"], 32)
+        self.assertEqual(sram["required_read_bytes_per_cycle"], 128)
+        self.assertEqual(sram["required_write_bytes_per_cycle"], 128)
+
     def test_sram_rejects_frequency_above_two_ghz(self):
         config = {
             "name": "T7",

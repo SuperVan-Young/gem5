@@ -1,6 +1,6 @@
 ---
 schema_version: 1
-name: T7
+name: T7-double-buffer
 system:
     frequency_mhz: 2000
     pdk: T7
@@ -15,7 +15,7 @@ compute:
         utilization_pct: 50
 memory:
     sram:
-        capacity_bytes: 262144
-        bank_count: 32
+        capacity_bytes: 524288
+        bank_count: 64
         bank_width_bytes: 4
         simultaneous_read_write: true

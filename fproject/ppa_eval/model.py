@@ -287,7 +287,13 @@ def load_config(path):
     sram = _mapping(memory.get("sram"), "memory.sram")
     _check_fields(
         sram,
-        {"capacity_bytes", "port_groups", "simultaneous_read_write"},
+        {
+            "capacity_bytes",
+            "bank_count",
+            "bank_width_bytes",
+            "port_groups",
+            "simultaneous_read_write",
+        },
         "memory.sram",
     )
     simultaneous_read_write = sram.get("simultaneous_read_write", False)
@@ -332,6 +338,17 @@ def load_config(path):
                 ],
             }
         )
+    bank_count = sram.get("bank_count")
+    bank_width_bytes = sram.get("bank_width_bytes")
+    if bank_count is not None or bank_width_bytes is not None:
+        if port_groups:
+            raise ValueError(
+                "memory.sram fixed banks and port_groups are mutually exclusive"
+            )
+        bank_count = _positive_int(bank_count, "memory.sram.bank_count")
+        bank_width_bytes = _positive_int(
+            bank_width_bytes, "memory.sram.bank_width_bytes"
+        )
 
     return {
         "schema_version": 1,
@@ -372,6 +389,8 @@ def load_config(path):
                     "memory.sram.capacity_bytes",
                 ),
                 "port_groups": normalized_port_groups,
+                "bank_count": bank_count,
+                "bank_width_bytes": bank_width_bytes,
                 "simultaneous_read_write": simultaneous_read_write,
             }
         },
@@ -560,6 +579,17 @@ def _sram_result(config, records, frequency_mhz):
     simultaneous_read_write = config["memory"]["sram"].get(
         "simultaneous_read_write", False
     )
+    bank_count = config["memory"]["sram"].get("bank_count")
+    bank_width_bytes = config["memory"]["sram"].get("bank_width_bytes")
+    if bank_count is not None:
+        bandwidth_instance_count = bank_count
+        required_read_bytes_per_cycle = bank_count * bank_width_bytes
+        required_write_bytes_per_cycle = (
+            required_read_bytes_per_cycle if simultaneous_read_write else 0
+        )
+        required_bytes_per_cycle = (
+            required_read_bytes_per_cycle + required_write_bytes_per_cycle
+        )
     for group in config["memory"]["sram"].get("port_groups", []):
         read_instances_per_module = sum(
             math.ceil(width / word_bytes)
@@ -611,6 +641,8 @@ def _sram_result(config, records, frequency_mhz):
         "required_read_bytes_per_cycle": required_read_bytes_per_cycle,
         "required_write_bytes_per_cycle": required_write_bytes_per_cycle,
         "simultaneous_read_write": simultaneous_read_write,
+        "bank_count": bank_count,
+        "bank_width_bytes": bank_width_bytes,
         "port_groups": port_groups,
         "selected_record": asdict(record),
         "power_w": instance_count * record.power_w,

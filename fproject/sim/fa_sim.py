@@ -19,6 +19,11 @@ from pathlib import Path
 
 import yaml
 
+try:
+    from .buffer_pipeline_model import evaluate_buffer_pipeline
+except ImportError:
+    from buffer_pipeline_model import evaluate_buffer_pipeline
+
 ROOT = Path(__file__).resolve().parents[2]
 SIM_ROOT = Path(__file__).resolve().parent
 TESTCASE_ROOT = (
@@ -104,7 +109,13 @@ def load_hardware(path):
     sram = _mapping(memory.get("sram"), "memory.sram")
     _fields(
         sram,
-        {"capacity_bytes", "port_groups", "simultaneous_read_write"},
+        {
+            "capacity_bytes",
+            "bank_count",
+            "bank_width_bytes",
+            "port_groups",
+            "simultaneous_read_write",
+        },
         "memory.sram",
     )
     ppa_sram_capacity = _positive_int(
@@ -134,7 +145,12 @@ def load_hardware(path):
     }
     _fields(
         simulation,
-        {"schema_version", "clock_mhz", *required_sections},
+        {
+            "schema_version",
+            "clock_mhz",
+            "buffer_pipeline",
+            *required_sections,
+        },
         "simulation",
     )
     missing = sorted(required_sections - set(simulation))
@@ -169,6 +185,50 @@ def load_hardware(path):
     spm = simulation["spm"]
     _positive_int(spm.get("base_address"), "simulation.spm.base_address")
     _positive_int(spm.get("size_bytes"), "simulation.spm.size_bytes")
+    buffer_pipeline = _mapping(
+        simulation.get("buffer_pipeline"), "simulation.buffer_pipeline"
+    )
+    _fields(
+        buffer_pipeline,
+        {
+            "bank_count",
+            "bank_width_bytes",
+            "banks_per_engine",
+            "buffer_slots",
+            "context_stride_bytes",
+            "split_dimension",
+        },
+        "simulation.buffer_pipeline",
+    )
+    normalized_buffer_pipeline = {
+        field: _positive_int(
+            buffer_pipeline.get(field), f"simulation.buffer_pipeline.{field}"
+        )
+        for field in (
+            "bank_count",
+            "bank_width_bytes",
+            "banks_per_engine",
+            "buffer_slots",
+            "context_stride_bytes",
+        )
+    }
+    split_dimension = _string(
+        buffer_pipeline.get("split_dimension"),
+        "simulation.buffer_pipeline.split_dimension",
+    )
+    if split_dimension != "br":
+        raise ConfigError(
+            "simulation.buffer_pipeline.split_dimension must be 'br'"
+        )
+    normalized_buffer_pipeline["split_dimension"] = split_dimension
+    if (
+        normalized_buffer_pipeline["buffer_slots"]
+        * normalized_buffer_pipeline["context_stride_bytes"]
+        > spm["size_bytes"]
+    ):
+        raise ConfigError(
+            "simulation.buffer_pipeline contexts exceed simulation.spm"
+        )
 
     return {
         "name": _string(config.get("name"), "name"),
@@ -178,6 +238,7 @@ def load_hardware(path):
         "tensor_ops_per_cycle": 2 * array_dim * array_dim,
         "vector_fp32_elements_per_cycle": vector_elements,
         "vector_fp32_flops_per_cycle": 2 * vector_elements,
+        "buffer_pipeline": normalized_buffer_pipeline,
         "simulation": simulation,
     }
 
@@ -300,6 +361,11 @@ def main():
         task_path = args.task.resolve(strict=True)
         hardware = load_hardware(hardware_path)
         task = load_task(task_path)
+        q_blocks = math.ceil(task["q"] / task["br"])
+        if hardware["buffer_pipeline"]["buffer_slots"] > q_blocks:
+            raise ConfigError(
+                "buffer slots cannot exceed the number of BR query blocks"
+            )
     except (OSError, ConfigError, yaml.YAMLError) as error:
         print(f"gem5-fa-sim: input error: {error}", file=sys.stderr)
         return 2
@@ -451,6 +517,50 @@ def main():
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["status"] = "PASS"
+    profile = summary["profile"]
+    summary["buffer_pipeline"] = evaluate_buffer_pipeline(
+        qk_busy_cycles=profile["qk_fast_matmul"]["busy_cycles"],
+        softmax_busy_cycles=profile["fast_online_softmax"]["busy_cycles"],
+        pv_busy_cycles=profile["pv_fast_matmul"]["busy_cycles"],
+        **{
+            key: value
+            for key, value in hardware["buffer_pipeline"].items()
+            if key not in {"context_stride_bytes", "split_dimension"}
+        },
+    )
+    pipeline = summary["buffer_pipeline"]
+    context_stride = hardware["buffer_pipeline"]["context_stride_bytes"]
+    context_base = hardware["simulation"]["spm"]["base_address"]
+    pipeline["context_stride_bytes"] = context_stride
+    pipeline["split_dimension"] = hardware["buffer_pipeline"][
+        "split_dimension"
+    ]
+    pipeline["buffer_contexts"] = [
+        {
+            "slot": slot,
+            "start_address": context_base + slot * context_stride,
+            "end_address_exclusive": context_base + (slot + 1) * context_stride,
+            "br_blocks": list(
+                range(
+                    slot,
+                    math.ceil(task["q"] / task["br"]),
+                    pipeline["buffer_slots"],
+                )
+            ),
+        }
+        for slot in range(pipeline["buffer_slots"])
+    ]
+    clock_hz = hardware["simulation"]["clock_mhz"] * 1_000_000
+    modeled_tops = (
+        summary["performance"]["total_tensor_ops"]
+        * clock_hz
+        / pipeline["overlapped_cycles"]
+        / 1_000_000_000_000
+    )
+    pipeline["modeled_effective_tops"] = modeled_tops
+    pipeline["modeled_utilization_percent"] = (
+        modeled_tops / summary["performance"]["theoretical_tops"] * 100.0
+    )
     summary["hardware"] = {
         "name": hardware["name"],
         "ppa_frequency_mhz": hardware["ppa_frequency_mhz"],
@@ -511,7 +621,6 @@ def main():
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
-    profile = summary["profile"]
     performance = summary["performance"]
     print("FlashAttentionV2 cycle simulation: " + manifest["status"])
     print(
@@ -540,6 +649,23 @@ def main():
         f"Tensor throughput: {performance['effective_tops']:.6f} TOPS "
         f"({utilization:.3f}% of "
         f"{performance['theoretical_tops']:.3f} TOPS peak)"
+    )
+    print(
+        f"Buffer pipeline: {pipeline['bank_count']} banks x "
+        f"{pipeline['bank_width_bytes']} B/cycle, "
+        f"before={pipeline['non_overlap_cycles']:,d} cycles, "
+        f"after={pipeline['overlapped_cycles']:,d} cycles, "
+        f"speedup={pipeline['speedup']:.3f}x, "
+        f"modeled={pipeline['modeled_effective_tops']:.3f} TOPS"
+    )
+    print(
+        "Buffer contexts: "
+        + ", ".join(
+            f"slot{context['slot']}="
+            f"0x{context['start_address']:x}-"
+            f"0x{context['end_address_exclusive'] - 1:x}"
+            for context in pipeline["buffer_contexts"]
+        )
     )
     print(f"Profile HTML: {_display_path(profile_html)}")
     print(f"Summary JSON: {_display_path(summary_path)}")

@@ -25,6 +25,17 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(hardware["vector_fp32_flops_per_cycle"], 256)
         self.assertEqual(hardware["ppa_sram_capacity_bytes"], 262144)
         self.assertEqual(
+            hardware["buffer_pipeline"],
+            {
+                "bank_count": 32,
+                "bank_width_bytes": 4,
+                "banks_per_engine": 32,
+                "buffer_slots": 1,
+                "context_stride_bytes": 262144,
+                "split_dimension": "br",
+            },
+        )
+        self.assertEqual(
             hardware["simulation"]["spm"]["size_bytes"], 8 * 1024 * 1024
         )
 

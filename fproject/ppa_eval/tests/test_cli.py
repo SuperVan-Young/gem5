@@ -36,14 +36,16 @@ class CliTest(unittest.TestCase):
         )
         sram = report["baseline"]["modules"]["sram"]
         self.assertEqual(sram["capacity_instance_count"], 4)
-        self.assertEqual(sram["bandwidth_instance_count"], 80)
-        self.assertEqual(sram["instance_count"], 80)
-        self.assertEqual(sram["required_bytes_per_cycle"], 1920)
-        self.assertEqual(sram["required_read_bytes_per_cycle"], 1152)
-        self.assertEqual(sram["required_write_bytes_per_cycle"], 768)
+        self.assertEqual(sram["bandwidth_instance_count"], 32)
+        self.assertEqual(sram["instance_count"], 32)
+        self.assertEqual(sram["bank_count"], 32)
+        self.assertEqual(sram["bank_width_bytes"], 4)
+        self.assertEqual(sram["required_bytes_per_cycle"], 256)
+        self.assertEqual(sram["required_read_bytes_per_cycle"], 128)
+        self.assertEqual(sram["required_write_bytes_per_cycle"], 128)
         self.assertTrue(sram["simultaneous_read_write"])
         self.assertAlmostEqual(
-            report["baseline"]["totals"]["sram_power_w"], 3.3272
+            report["baseline"]["totals"]["sram_power_w"], 1.33088
         )
         self.assertTrue(
             report["baseline"]["modules"]["tensor"]["selection"][
@@ -71,9 +73,10 @@ class CliTest(unittest.TestCase):
         self.assertIn("peak=16.384000 TOPS", result.stdout)
         self.assertIn("requested=256.000 KiB", result.stdout)
         self.assertIn("capacity_instances=4", result.stdout)
-        self.assertIn("bandwidth_instances=80", result.stdout)
+        self.assertIn("bandwidth_instances=32", result.stdout)
+        self.assertIn("banks=32x4B", result.stdout)
         self.assertIn("simultaneous_rw=True", result.stdout)
-        self.assertIn("bandwidth=1920 B/cycle", result.stdout)
+        self.assertIn("bandwidth=256 B/cycle", result.stdout)
 
 
 if __name__ == "__main__":
