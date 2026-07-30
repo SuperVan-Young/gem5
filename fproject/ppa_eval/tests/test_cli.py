@@ -78,6 +78,30 @@ class CliTest(unittest.TestCase):
         self.assertIn("simultaneous_rw=True", result.stdout)
         self.assertIn("bandwidth=256 B/cycle", result.stdout)
 
+    def test_vector2x_configuration_scales_vector_and_sram(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TOOL_ROOT / "ppa_eval.py"),
+                str(
+                    TOOL_ROOT
+                    / "configs"
+                    / "f7_vector2x_double_buffer.yaml"
+                ),
+                "--format",
+                "json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["modules"]["vector"]["instance_count"], 32)
+        self.assertEqual(report["modules"]["sram"]["instance_count"], 96)
+        self.assertAlmostEqual(report["totals"]["power_w"], 23.52232)
+        self.assertAlmostEqual(report["totals"]["area_mm2"], 3.9383025505)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,9 @@ class BufferPipelineModelTest(unittest.TestCase):
             pv_busy_cycles=8896,
             bank_count=32,
             bank_width_bytes=4,
-            banks_per_engine=32,
+            tensor_bank_count=32,
+            vector_bank_count=32,
+            vector_compute_scale=1,
             buffer_slots=1,
         )
         self.assertEqual(result["bandwidth_bytes_per_cycle"], 128)
@@ -30,7 +32,9 @@ class BufferPipelineModelTest(unittest.TestCase):
             pv_busy_cycles=8896,
             bank_count=64,
             bank_width_bytes=4,
-            banks_per_engine=32,
+            tensor_bank_count=32,
+            vector_bank_count=32,
+            vector_compute_scale=1,
             buffer_slots=2,
         )
         self.assertEqual(result["bandwidth_bytes_per_cycle"], 256)
@@ -44,16 +48,36 @@ class BufferPipelineModelTest(unittest.TestCase):
         )
 
     def test_rejects_incomplete_engine_bank_group(self):
-        with self.assertRaisesRegex(ValueError, "complete engine bank group"):
+        with self.assertRaisesRegex(ValueError, "complete engine bank set"):
             evaluate_buffer_pipeline(
                 qk_busy_cycles=1,
                 softmax_busy_cycles=1,
                 pv_busy_cycles=1,
                 bank_count=31,
                 bank_width_bytes=4,
-                banks_per_engine=32,
+                tensor_bank_count=32,
+                vector_bank_count=32,
+                vector_compute_scale=1,
                 buffer_slots=1,
             )
+
+    def test_vector_double_rate_requires_96_banks_for_overlap(self):
+        result = evaluate_buffer_pipeline(
+            qk_busy_cycles=8896,
+            softmax_busy_cycles=17648,
+            pv_busy_cycles=8896,
+            bank_count=96,
+            bank_width_bytes=4,
+            tensor_bank_count=32,
+            vector_bank_count=64,
+            vector_compute_scale=2,
+            buffer_slots=2,
+        )
+        self.assertTrue(result["overlap_enabled"])
+        self.assertEqual(result["required_overlap_banks"], 96)
+        self.assertEqual(result["modeled_softmax_busy_cycles"], 8824)
+        self.assertEqual(result["overlapped_cycles"], 17792)
+        self.assertAlmostEqual(result["speedup"], 1.4959532374)
 
 
 if __name__ == "__main__":

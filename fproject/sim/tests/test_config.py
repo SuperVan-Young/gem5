@@ -29,7 +29,9 @@ class ConfigTest(unittest.TestCase):
             {
                 "bank_count": 32,
                 "bank_width_bytes": 4,
-                "banks_per_engine": 32,
+                "tensor_bank_count": 32,
+                "vector_bank_count": 32,
+                "vector_compute_scale": 1,
                 "buffer_slots": 1,
                 "context_stride_bytes": 262144,
                 "split_dimension": "br",
@@ -49,6 +51,21 @@ class ConfigTest(unittest.TestCase):
             path.write_text(content, encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "must match"):
                 load_hardware(path)
+
+    def test_vector2x_hardware_scales_vpu_and_banks(self):
+        hardware = load_hardware(
+            ROOT
+            / "fproject/ppa_eval/configs/f7_vector2x_double_buffer.yaml"
+        )
+        self.assertEqual(hardware["vector_fp32_elements_per_cycle"], 256)
+        self.assertEqual(hardware["simulation"]["vpu"]["dlen_bytes"], 512)
+        self.assertEqual(hardware["buffer_pipeline"]["bank_count"], 96)
+        self.assertEqual(
+            hardware["buffer_pipeline"]["vector_bank_count"], 64
+        )
+        self.assertEqual(
+            hardware["buffer_pipeline"]["vector_compute_scale"], 2
+        )
 
     def test_runtime_shapes_are_loaded_from_task_files(self):
         first = load_task(

@@ -40,7 +40,9 @@ simulation:
     buffer_pipeline:
         bank_count: 32
         bank_width_bytes: 4
-        banks_per_engine: 32
+        tensor_bank_count: 32
+        vector_bank_count: 32
+        vector_compute_scale: 1
         buffer_slots: 1
         context_stride_bytes: 262144
         split_dimension: br

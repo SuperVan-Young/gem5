@@ -177,10 +177,14 @@ def load_hardware(path):
         vector.get("fp32_elements_per_cycle"),
         "compute.vector.fp32_elements_per_cycle",
     )
-    if dlen_bytes % 4 != 0 or dlen_bytes // 4 != vector_elements:
+    native_vector_elements = dlen_bytes // 4
+    if (
+        dlen_bytes % 4 != 0
+        or vector_elements % native_vector_elements != 0
+    ):
         raise ConfigError(
-            "simulation.vpu.dlen_bytes / 4 must match "
-            "compute.vector.fp32_elements_per_cycle"
+            "compute.vector.fp32_elements_per_cycle must be an integer "
+            "multiple of simulation.vpu.dlen_bytes / 4"
         )
     spm = simulation["spm"]
     _positive_int(spm.get("base_address"), "simulation.spm.base_address")
@@ -193,7 +197,9 @@ def load_hardware(path):
         {
             "bank_count",
             "bank_width_bytes",
-            "banks_per_engine",
+            "tensor_bank_count",
+            "vector_bank_count",
+            "vector_compute_scale",
             "buffer_slots",
             "context_stride_bytes",
             "split_dimension",
@@ -207,7 +213,9 @@ def load_hardware(path):
         for field in (
             "bank_count",
             "bank_width_bytes",
-            "banks_per_engine",
+            "tensor_bank_count",
+            "vector_bank_count",
+            "vector_compute_scale",
             "buffer_slots",
             "context_stride_bytes",
         )
@@ -221,6 +229,16 @@ def load_hardware(path):
             "simulation.buffer_pipeline.split_dimension must be 'br'"
         )
     normalized_buffer_pipeline["split_dimension"] = split_dimension
+    expected_vector_compute_scale = vector_elements // native_vector_elements
+    if (
+        normalized_buffer_pipeline["vector_compute_scale"]
+        != expected_vector_compute_scale
+    ):
+        raise ConfigError(
+            "simulation.buffer_pipeline.vector_compute_scale must match "
+            "compute.vector.fp32_elements_per_cycle divided by "
+            "simulation.vpu.dlen_bytes / 4"
+        )
     if (
         normalized_buffer_pipeline["buffer_slots"]
         * normalized_buffer_pipeline["context_stride_bytes"]

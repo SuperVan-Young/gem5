@@ -1,13 +1,13 @@
 ---
 schema_version: 1
-name: F7-double-buffer
+name: F7-vector2x-double-buffer
 system:
     frequency_mhz: 2000
     pdk: F7-PKU
     flow: DC-Innovus
 compute:
     vector:
-        fp32_elements_per_cycle: 128
+        fp32_elements_per_cycle: 256
         utilization_pct: 50
         implementation_variant: with_macro
     tensor:
@@ -16,7 +16,7 @@ compute:
 memory:
     sram:
         capacity_bytes: 524288
-        bank_count: 64
+        bank_count: 96
         bank_width_bytes: 4
         simultaneous_read_write: true
 simulation:
@@ -32,17 +32,17 @@ simulation:
         bandwidth: 100GiB/s
         latency: 1ns
         pipeline_depth: 1024
-        pipeline_ports: 32
+        pipeline_ports: 96
         pipeline_port_stride: 64
     interconnect:
-        width_bytes: 256
+        width_bytes: 512
         latency_cycles: 0
     buffer_pipeline:
-        bank_count: 64
+        bank_count: 96
         bank_width_bytes: 4
         tensor_bank_count: 32
-        vector_bank_count: 32
-        vector_compute_scale: 1
+        vector_bank_count: 64
+        vector_compute_scale: 2
         buffer_slots: 2
         context_stride_bytes: 262144
         split_dimension: br
@@ -55,7 +55,7 @@ simulation:
         outstanding_limit: 1024
     vpu:
         dlen_bytes: 512
-        mem_side_ports: 32
+        mem_side_ports: 64
         input_buffer_count: 24
         output_buffer_count: 12
         local_buffer_stride: 65536

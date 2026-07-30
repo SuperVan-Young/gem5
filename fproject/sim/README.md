@@ -49,11 +49,14 @@ The hardware config also carries an analytical buffer-pipeline model derived
 from the measured MPU and VPU busy cycles:
 
 - The 32-bank baseline exposes 4 B/cycle per bank and one shared 32-bank
-  engine group. Tensor and Vector execution therefore remain serialized.
+  bank set. Tensor and Vector execution therefore remain serialized.
 - The 64-bank configuration splits the address space into two independent
   32-bank contexts along the BR/query-block dimension. BC is not used for the
   split because online softmax and output accumulation carry dependencies
   between KV blocks of the same query block.
+- The Vector-2x configuration uses 96 banks: 32 banks provide the Tensor
+  engine's 128 B/cycle path and 64 banks provide a 256 B/cycle path to two
+  parallel Vector groups. It retains the two BR-addressed buffer contexts.
 
 For the default task, the 32-bank model retains 35,440 cycles. The 64-bank
 double-buffer model divides QK, softmax, and PV busy time across the two BR
@@ -67,6 +70,15 @@ The stages take 4,448, 8,824, 8,824, and 4,448 cycles, respectively, for a
 total of 26,544 cycles and a 1.335x speedup. This is a busy-cycle overlap
 model; it does not claim that the current sequential workload already issues
 the two engines concurrently.
+
+The current workload has a fixed 128-FP32 (512 B) lowest VPU layout
+dimension, so the Vector-2x configuration keeps the executable VPU dlen at
+512 B. Its analytical model uses `vector_compute_scale=2` to divide the
+measured softmax busy cycles between two parallel Vector groups. A full run
+measures 8,608 QK cycles, 17,360 softmax cycles, and 8,608 PV cycles. After
+Vector scaling, the four finite-pipeline stages total 17,288 cycles, or
+15.527 TOPS at 2 GHz. This is 1.535x the modeled throughput of the 64-bank
+configuration.
 
 Each run creates an independent directory under `results/` containing the
 input snapshots, resolved simulation configuration, gem5 stdout/stderr, raw

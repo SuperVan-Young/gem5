@@ -1,0 +1,21 @@
+---
+schema_version: 1
+name: T7-vector2x-double-buffer
+system:
+    frequency_mhz: 2000
+    pdk: T7
+    flow: DC-Innovus
+compute:
+    vector:
+        fp32_elements_per_cycle: 256
+        utilization_pct: 50
+        implementation_variant: with_macro
+    tensor:
+        array_dim: 64
+        utilization_pct: 50
+memory:
+    sram:
+        capacity_bytes: 524288
+        bank_count: 96
+        bank_width_bytes: 4
+        simultaneous_read_write: true
