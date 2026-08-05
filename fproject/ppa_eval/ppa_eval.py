@@ -94,7 +94,9 @@ def _sram_text(module):
         f"bandwidth={module['required_bytes_per_cycle']:.0f} B/cycle "
         f"record={record['record_id']} "
         f"power={module['power_w']:.6f} W "
-        f"area={module['area_mm2']:.6f} mm^2"
+        f"macro_area={module['macro_area_mm2']:.6f} mm^2 "
+        f"layout_utilization={module['layout_utilization_pct']:.1f}% "
+        f"floorplan_area={module['floorplan_area_mm2']:.6f} mm^2"
     )
 
 

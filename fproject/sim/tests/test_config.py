@@ -24,6 +24,10 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(hardware["vector_fp32_elements_per_cycle"], 128)
         self.assertEqual(hardware["vector_fp32_flops_per_cycle"], 256)
         self.assertEqual(hardware["ppa_sram_capacity_bytes"], 262144)
+        self.assertEqual(hardware["ppa_sram_layout_utilization_pct"], 50)
+        self.assertEqual(
+            hardware["simulation"]["spm"]["bandwidth"], "100GiB/s"
+        )
         self.assertEqual(
             hardware["buffer_pipeline"],
             {

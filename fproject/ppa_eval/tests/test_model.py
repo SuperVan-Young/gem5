@@ -133,6 +133,131 @@ memory:
         )
         self.assertEqual(config["compute"]["tensor"]["utilization_pct"], 50.0)
         self.assertEqual(config["memory"]["sram"]["capacity_bytes"], 262144)
+        self.assertEqual(
+            config["memory"]["sram"]["layout_utilization_pct"], 100.0
+        )
+
+    def test_sram_layout_utilization_scales_area_not_power(self):
+        records = [
+            make_record("vector", "ara_sys", variant="no_macro"),
+            make_record("tensor", "Mesh_BOTH_32x32"),
+        ]
+        config = {
+            "name": "T7",
+            "system": {
+                "frequency_mhz": 2000.0,
+                "pdk": "T7",
+                "flow": "DC-Innovus",
+            },
+            "compute": {
+                "vector": {
+                    "fp32_elements_per_cycle": 8.0,
+                    "utilization_pct": 50.0,
+                    "implementation_variant": "no_macro",
+                },
+                "tensor": {
+                    "array_dim": 32.0,
+                    "utilization_pct": 50.0,
+                },
+            },
+            "memory": {
+                "sram": {
+                    "capacity_bytes": 65536,
+                    "layout_utilization_pct": 50.0,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            datasheet = Path(directory) / "data.csv"
+            datasheet.write_text("fixture", encoding="utf-8")
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            result = evaluate_config(
+                config,
+                records,
+                datasheet,
+                [make_sram_record()],
+                sram_datasheet,
+            )
+        sram = result["modules"]["sram"]
+        self.assertAlmostEqual(sram["power_w"], 0.041590)
+        self.assertAlmostEqual(sram["macro_area_um2"], 20923.128)
+        self.assertAlmostEqual(sram["floorplan_area_um2"], 41846.256)
+        self.assertAlmostEqual(sram["area_um2"], 41846.256)
+
+    def test_sram_layout_utilization_rejects_more_than_100_percent(self):
+        content = """
+schema_version: 1
+name: sample
+system:
+  frequency_mhz: 2000
+  pdk: T7
+compute:
+  vector:
+    fp32_elements_per_cycle: 128
+  tensor:
+    array_dim: 64
+memory:
+  sram:
+    capacity_bytes: 262144
+    layout_utilization_pct: 101
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yaml"
+            path.write_text(content, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "at most 100"):
+                load_config(path)
+
+    def test_logical_banks_can_share_fixed_physical_macro_capacity(self):
+        records = [
+            make_record("vector", "ara_sys", variant="no_macro"),
+            make_record("tensor", "Mesh_BOTH_32x32"),
+        ]
+        config = {
+            "name": "T7",
+            "system": {
+                "frequency_mhz": 2000.0,
+                "pdk": "T7",
+                "flow": "DC-Innovus",
+            },
+            "compute": {
+                "vector": {
+                    "fp32_elements_per_cycle": 8.0,
+                    "utilization_pct": 50.0,
+                    "implementation_variant": "no_macro",
+                },
+                "tensor": {
+                    "array_dim": 32.0,
+                    "utilization_pct": 50.0,
+                },
+            },
+            "memory": {
+                "sram": {
+                    "capacity_bytes": 524288,
+                    "bank_count": 96,
+                    "bank_width_bytes": 4,
+                    "physical_macro_count": 64,
+                    "simultaneous_read_write": True,
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            datasheet = Path(directory) / "data.csv"
+            datasheet.write_text("fixture", encoding="utf-8")
+            sram_datasheet = Path(directory) / "sram.csv"
+            sram_datasheet.write_text("fixture", encoding="utf-8")
+            result = evaluate_config(
+                config,
+                records,
+                datasheet,
+                [make_sram_record()],
+                sram_datasheet,
+            )
+        sram = result["modules"]["sram"]
+        self.assertEqual(sram["bank_count"], 96)
+        self.assertEqual(sram["bandwidth_instance_count"], 96)
+        self.assertEqual(sram["instance_count"], 64)
+        self.assertEqual(sram["provisioned_capacity_bytes"], 4 * 1024 * 1024)
 
     def test_config_allows_simulation_section_without_affecting_ppa(self):
         content = """

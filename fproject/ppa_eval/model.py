@@ -291,6 +291,8 @@ def load_config(path):
             "capacity_bytes",
             "bank_count",
             "bank_width_bytes",
+            "layout_utilization_pct",
+            "physical_macro_count",
             "port_groups",
             "simultaneous_read_write",
         },
@@ -340,6 +342,14 @@ def load_config(path):
         )
     bank_count = sram.get("bank_count")
     bank_width_bytes = sram.get("bank_width_bytes")
+    layout_utilization_pct = _positive_number(
+        sram.get("layout_utilization_pct", 100.0),
+        "memory.sram.layout_utilization_pct",
+    )
+    if layout_utilization_pct > 100.0:
+        raise ValueError(
+            "memory.sram.layout_utilization_pct must be at most 100"
+        )
     if bank_count is not None or bank_width_bytes is not None:
         if port_groups:
             raise ValueError(
@@ -391,6 +401,15 @@ def load_config(path):
                 "port_groups": normalized_port_groups,
                 "bank_count": bank_count,
                 "bank_width_bytes": bank_width_bytes,
+                "layout_utilization_pct": layout_utilization_pct,
+                "physical_macro_count": (
+                    _positive_int(
+                        sram.get("physical_macro_count"),
+                        "memory.sram.physical_macro_count",
+                    )
+                    if sram.get("physical_macro_count") is not None
+                    else None
+                ),
                 "simultaneous_read_write": simultaneous_read_write,
             }
         },
@@ -626,7 +645,27 @@ def _sram_result(config, records, frequency_mhz):
                 "required_bytes_per_cycle": bytes_per_cycle,
             }
         )
-    instance_count = max(capacity_instance_count, bandwidth_instance_count)
+    physical_macro_count = config["memory"]["sram"].get(
+        "physical_macro_count"
+    )
+    if (
+        physical_macro_count is not None
+        and physical_macro_count < capacity_instance_count
+    ):
+        raise ValueError(
+            "memory.sram.physical_macro_count cannot provide the requested "
+            "capacity"
+        )
+    instance_count = (
+        physical_macro_count
+        if physical_macro_count is not None
+        else max(capacity_instance_count, bandwidth_instance_count)
+    )
+    macro_area_um2 = instance_count * record.area_um2
+    layout_utilization_pct = config["memory"]["sram"].get(
+        "layout_utilization_pct", 100.0
+    )
+    floorplan_area_um2 = macro_area_um2 / (layout_utilization_pct / 100.0)
     return {
         "kind": "sram",
         "power_kind": "reported",
@@ -635,6 +674,7 @@ def _sram_result(config, records, frequency_mhz):
         "instance_word_bytes": word_bytes,
         "capacity_instance_count": capacity_instance_count,
         "bandwidth_instance_count": bandwidth_instance_count,
+        "physical_macro_count_override": physical_macro_count,
         "instance_count": instance_count,
         "provisioned_capacity_bytes": (instance_count * record.capacity_bytes),
         "required_bytes_per_cycle": required_bytes_per_cycle,
@@ -646,8 +686,13 @@ def _sram_result(config, records, frequency_mhz):
         "port_groups": port_groups,
         "selected_record": asdict(record),
         "power_w": instance_count * record.power_w,
-        "area_um2": instance_count * record.area_um2,
-        "area_mm2": instance_count * record.area_mm2,
+        "layout_utilization_pct": layout_utilization_pct,
+        "macro_area_um2": macro_area_um2,
+        "macro_area_mm2": macro_area_um2 / 1_000_000.0,
+        "floorplan_area_um2": floorplan_area_um2,
+        "floorplan_area_mm2": floorplan_area_um2 / 1_000_000.0,
+        "area_um2": floorplan_area_um2,
+        "area_mm2": floorplan_area_um2 / 1_000_000.0,
     }
 
 

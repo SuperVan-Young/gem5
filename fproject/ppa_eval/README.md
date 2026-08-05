@@ -74,9 +74,13 @@ fproject/ppa_eval/
 - Vector-2x double-buffer 方案把 4-lane Vector/SRAM group 从 16 组
   增加到 32 组，并使用 96 banks：Tensor 独占 32 banks（128
   B/cycle），双倍 Vector 独占 64 banks（256 B/cycle）。总 SRAM
-  带宽为 384 B/cycle，物理容量为 6 MiB。
+  带宽为 384 B/cycle。96 个逻辑 bank 通过切分 64 个物理 macro 实现，
+  不增加 double-buffer 的总 SRAM 容量；PPA 仍按 64 个 macro 计费，
+  物理容量保持 4 MiB。
 - 每个 macro 按同拍 1R1W 建模，读写可重叠。
 - SRAM Power 使用 spec 给出的每 macro 报告值，不再描述为静态功耗。
+- SRAM macro 的版图利用率按 50% 建模；PPA 同时报告 macro 裸面积和
+  包含布线留白的 floorplan 面积，后者为前者的 2 倍并计入总面积。
 - Vector/Tensor 版图利用率默认均为 50%。
 - flow 默认 `DC-Innovus`，`ara_sys` 默认 `with_macro`。
 - Area 的原始单位是 μm²，最终同时换算并显示 mm²。

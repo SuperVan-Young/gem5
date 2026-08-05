@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430">
+  <rect x="1" y="1" width="758" height="428" rx="18" fill="#F8FAFC" stroke="#D8E0EA" stroke-width="2"/>
+  <text x="32" y="45" font-family="Noto Sans CJK SC" font-size="25" font-weight="700" fill="#17324D">性能提升</text>
+  <text x="32" y="72" font-family="Noto Sans CJK SC" font-size="14" fill="#64748B">查询长度 256 · 键值长度 1024 · 维度 128 · 2 吉赫兹</text>
+  <text x="32" y="102" font-family="Noto Sans CJK SC" font-size="13" fill="#475569">吞吐量（万亿次运算/秒）</text>
+  <line x1="82" y1="342" x2="724" y2="342" stroke="#94A3B8" stroke-width="1.4"/>
+  <line x1="82" y1="286" x2="724" y2="286" stroke="#E2E8F0"/>
+  <line x1="82" y1="230" x2="724" y2="230" stroke="#E2E8F0"/>
+  <line x1="82" y1="174" x2="724" y2="174" stroke="#E2E8F0"/>
+  <line x1="82" y1="118" x2="724" y2="118" stroke="#E2E8F0"/>
+  <g font-family="Noto Sans CJK SC" font-size="12" fill="#64748B" text-anchor="end">
+    <text x="70" y="346">0</text><text x="70" y="290">4</text><text x="70" y="234">8</text><text x="70" y="178">12</text><text x="70" y="122">16</text>
+  </g>
+  <rect x="132" y="236" width="124" height="106" rx="8" fill="#40566F"/>
+  <rect x="339" y="200" width="124" height="142" rx="8" fill="#169C9C"/>
+  <rect x="546" y="124" width="124" height="218" rx="8" fill="#F28C28"/>
+  <g font-family="Noto Sans CJK SC" text-anchor="middle">
+    <text x="194" y="223" font-size="18" font-weight="700" fill="#17324D">7.57</text>
+    <text x="401" y="187" font-size="18" font-weight="700" fill="#17324D">10.11</text>
+    <text x="608" y="111" font-size="18" font-weight="700" fill="#17324D">15.53</text>
+    <text x="194" y="371" font-size="16" font-weight="700" fill="#334155">T7</text>
+    <text x="401" y="371" font-size="16" font-weight="700" fill="#334155">F7-opt1</text>
+    <text x="608" y="371" font-size="16" font-weight="700" fill="#334155">F7-opt2</text>
+    <text x="194" y="399" font-size="14" fill="#64748B">1.00×</text>
+    <text x="401" y="399" font-size="14" font-weight="700" fill="#169C9C">1.34×</text>
+    <text x="608" y="399" font-size="14" font-weight="700" fill="#E56F12">2.05×</text>
+  </g>
+</svg>

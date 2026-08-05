@@ -44,6 +44,10 @@ class CliTest(unittest.TestCase):
         self.assertEqual(sram["required_read_bytes_per_cycle"], 128)
         self.assertEqual(sram["required_write_bytes_per_cycle"], 128)
         self.assertTrue(sram["simultaneous_read_write"])
+        self.assertEqual(sram["layout_utilization_pct"], 50.0)
+        self.assertAlmostEqual(
+            sram["floorplan_area_mm2"], 2.0 * sram["macro_area_mm2"]
+        )
         self.assertAlmostEqual(
             report["baseline"]["totals"]["sram_power_w"], 1.33088
         )
@@ -77,6 +81,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("banks=32x4B", result.stdout)
         self.assertIn("simultaneous_rw=True", result.stdout)
         self.assertIn("bandwidth=256 B/cycle", result.stdout)
+        self.assertIn("layout_utilization=50.0%", result.stdout)
 
     def test_vector2x_configuration_scales_vector_and_sram(self):
         result = subprocess.run(
@@ -98,9 +103,13 @@ class CliTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(report["modules"]["vector"]["instance_count"], 32)
-        self.assertEqual(report["modules"]["sram"]["instance_count"], 96)
-        self.assertAlmostEqual(report["totals"]["power_w"], 23.52232)
-        self.assertAlmostEqual(report["totals"]["area_mm2"], 3.9383025505)
+        self.assertEqual(report["modules"]["sram"]["bank_count"], 96)
+        self.assertEqual(report["modules"]["sram"]["instance_count"], 64)
+        self.assertEqual(
+            report["modules"]["sram"]["physical_macro_count_override"], 64
+        )
+        self.assertAlmostEqual(report["totals"]["power_w"], 22.85688)
+        self.assertAlmostEqual(report["totals"]["area_mm2"], 4.2730725985)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ memory:
         capacity_bytes: 524288
         bank_count: 96
         bank_width_bytes: 4
+        layout_utilization_pct: 50
+        physical_macro_count: 64
         simultaneous_read_write: true
 simulation:
     schema_version: 1

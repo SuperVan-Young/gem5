@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="430" viewBox="0 0 760 430">
+  <rect x="1" y="1" width="758" height="428" rx="18" fill="#F8FAFC" stroke="#D8E0EA" stroke-width="2"/>
+  <text x="32" y="45" font-family="Noto Sans CJK SC" font-size="25" font-weight="700" fill="#17324D">面积与功耗分解</text>
+  <text x="32" y="72" font-family="Noto Sans CJK SC" font-size="14" fill="#64748B">相对 T7 基线归一化（越低越好）</text>
+  <g font-family="Noto Sans CJK SC" font-size="12" fill="#334155">
+    <rect x="330" y="31" width="13" height="13" rx="2" fill="#40566F"/><text x="350" y="42">T7</text>
+    <rect x="397" y="31" width="13" height="13" rx="2" fill="#7C8EA3"/><text x="417" y="42">F7</text>
+    <rect x="464" y="31" width="13" height="13" rx="2" fill="#169C9C"/><text x="484" y="42">F7-opt1</text>
+    <rect x="568" y="31" width="13" height="13" rx="2" fill="#F28C28"/><text x="588" y="42">F7-opt2</text>
+  </g>
+  <line x1="78" y1="348" x2="724" y2="348" stroke="#94A3B8" stroke-width="1.4"/>
+  <line x1="78" y1="293" x2="724" y2="293" stroke="#E2E8F0"/>
+  <line x1="78" y1="238" x2="724" y2="238" stroke="#E2E8F0"/>
+  <line x1="78" y1="183" x2="724" y2="183" stroke="#E2E8F0"/>
+  <line x1="78" y1="128" x2="724" y2="128" stroke="#E2E8F0"/>
+  <g font-family="Noto Sans CJK SC" font-size="12" fill="#64748B" text-anchor="end">
+    <text x="68" y="352">0</text><text x="68" y="297">0.25</text><text x="68" y="242">0.50</text><text x="68" y="187">0.75</text><text x="68" y="132">1.00</text>
+  </g>
+  <g>
+    <rect x="130" y="128" width="56" height="220" rx="5" fill="#40566F"/>
+    <rect x="190" y="215" width="56" height="133" rx="5" fill="#7C8EA3"/>
+    <rect x="250" y="178" width="56" height="170" rx="5" fill="#169C9C"/>
+    <rect x="310" y="117" width="56" height="231" rx="5" fill="#F28C28"/>
+    <rect x="435" y="128" width="56" height="220" rx="5" fill="#40566F"/>
+    <rect x="495" y="229" width="56" height="119" rx="5" fill="#7C8EA3"/>
+    <rect x="555" y="223" width="56" height="125" rx="5" fill="#169C9C"/>
+    <rect x="615" y="130" width="56" height="218" rx="5" fill="#F28C28"/>
+  </g>
+  <g font-family="Noto Sans CJK SC" font-size="12" font-weight="700" fill="#334155" text-anchor="middle">
+    <text x="158" y="118">1.00</text><text x="218" y="205">0.61</text><text x="278" y="168">0.77</text><text x="338" y="107">1.05</text>
+    <text x="463" y="118">1.00</text><text x="523" y="219">0.54</text><text x="583" y="213">0.57</text><text x="643" y="120">0.99</text>
+  </g>
+  <g font-family="Noto Sans CJK SC" font-size="17" font-weight="700" fill="#334155" text-anchor="middle">
+    <text x="248" y="385">面积</text><text x="553" y="385">功耗</text>
+  </g>
+  <text x="380" y="414" font-family="Noto Sans CJK SC" font-size="12" fill="#64748B" text-anchor="middle">F7-opt2 的物理片上存储容量与 F7-opt1 相同</text>
+</svg>

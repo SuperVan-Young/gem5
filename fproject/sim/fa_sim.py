@@ -113,6 +113,8 @@ def load_hardware(path):
             "capacity_bytes",
             "bank_count",
             "bank_width_bytes",
+            "layout_utilization_pct",
+            "physical_macro_count",
             "port_groups",
             "simultaneous_read_write",
         },
@@ -121,6 +123,14 @@ def load_hardware(path):
     ppa_sram_capacity = _positive_int(
         sram.get("capacity_bytes"), "memory.sram.capacity_bytes"
     )
+    ppa_sram_layout_utilization_pct = _positive_number(
+        sram.get("layout_utilization_pct", 100.0),
+        "memory.sram.layout_utilization_pct",
+    )
+    if ppa_sram_layout_utilization_pct > 100.0:
+        raise ConfigError(
+            "memory.sram.layout_utilization_pct must be at most 100"
+        )
     simulation = _mapping(config.get("simulation"), "simulation")
     if simulation.get("schema_version") != 1:
         raise ConfigError("simulation.schema_version must be 1")
@@ -252,6 +262,9 @@ def load_hardware(path):
         "name": _string(config.get("name"), "name"),
         "ppa_frequency_mhz": ppa_frequency_mhz,
         "ppa_sram_capacity_bytes": ppa_sram_capacity,
+        "ppa_sram_layout_utilization_pct": (
+            ppa_sram_layout_utilization_pct
+        ),
         "array_dim": array_dim,
         "tensor_ops_per_cycle": 2 * array_dim * array_dim,
         "vector_fp32_elements_per_cycle": vector_elements,
