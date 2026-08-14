@@ -19,7 +19,7 @@ DEFAULT_TEMPLATE = ATLAS_ROOT / "configs/gem5_template.yaml"
 
 # gem5_template.yaml represents this ATLAS design point. Other designs are
 # converted by exact relative scaling; an inexact mapping is an error.
-REFERENCE_MAC_NUM = 8192
+REFERENCE_MAC_NUM = 4096
 REFERENCE_VEC_NUM = 512
 REFERENCE_BUFFER_KIB = 3072
 REFERENCE_NOC_FLIT_BYTES = 64
