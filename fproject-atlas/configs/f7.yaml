@@ -1,0 +1,42 @@
+---
+schema_version: 1
+name: F7-atlas
+clock_mhz: 2000
+interconnect:
+    width_bytes: 256
+    latency_cycles: 0
+memory:
+    dram:
+        size_bytes: 33554432
+        bandwidth: 25.378787879GB/s
+        latency: 30ns
+    spm:
+        base_address: 0x60000000
+        size_bytes: 8388608
+        bandwidth: 100GiB/s
+        latency: 1ns
+        pipeline_depth: 1024
+        pipeline_ports: 32
+        pipeline_port_stride: 64
+mpu:
+    array_dim: 64
+    a_buffer_bytes: 16384
+    b_buffer_bytes: 16384
+    c_buffer_bytes: 65536
+    mem_side_ports: 3
+    outstanding_limit: 1024
+vector:
+    dlen_bytes: 512
+    mem_side_ports: 32
+    outstanding_limit: 1024
+    input_buffer_count: 24
+    output_buffer_count: 12
+    local_buffer_stride: 65536
+    int32_cycles_per_dlen: 2
+    float16_cycles_per_dlen: 2
+    float32_cycles_per_dlen: 1
+lut:
+    range_reduction_latency: 1ns
+    lookup_latency: 1ns
+    interpolation_latency: 1ns
+    normalize_latency: 1ns
