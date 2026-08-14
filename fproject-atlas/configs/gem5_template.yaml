@@ -1,13 +1,14 @@
 ---
 schema_version: 1
-name: F7-atlas
+name: gem5-template
 clock_mhz: 2000
 interconnect:
     width_bytes: 256
     latency_cycles: 0
 memory:
     dram:
-        size_bytes: 33554432
+        mapped_size_bytes: 33554432
+        capacity_bytes: 33554432
         bandwidth: 25.378787879GB/s
         latency: 30ns
     spm:

@@ -16,14 +16,16 @@ load_hardware = RUN.load_hardware
 
 class HardwareConfigTest(unittest.TestCase):
     def test_example_config(self):
-        config = load_hardware(ATLAS_ROOT / "configs/f7.yaml")
-        self.assertEqual(config["name"], "F7-atlas")
+        config = load_hardware(ATLAS_ROOT / "configs/gem5_template.yaml")
+        self.assertEqual(config["name"], "gem5-template")
         self.assertEqual(config["mpu"]["array_dim"], 64)
         self.assertEqual(config["vector"]["dlen_bytes"], 512)
         self.assertEqual(config["memory"]["spm"]["base_address"], 0x60000000)
 
     def test_extra_fields_are_left_to_consumers(self):
-        text = (ATLAS_ROOT / "configs/f7.yaml").read_text(encoding="utf-8")
+        text = (ATLAS_ROOT / "configs/gem5_template.yaml").read_text(
+            encoding="utf-8"
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "extended.yaml"
             path.write_text(text + "unknown: true\n", encoding="utf-8")

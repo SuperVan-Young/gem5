@@ -119,4 +119,9 @@ def map_workload(top, config):
         spm["size_bytes"],
         False,
     )
-    process.map(0x20000000, 0x20000000, dram["size_bytes"], False)
+    process.map(
+        0x20000000,
+        0x20000000,
+        dram["mapped_size_bytes"],
+        False,
+    )

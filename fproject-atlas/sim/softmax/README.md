@@ -4,7 +4,7 @@ Run the default FlashAttention shape from the host with:
 
 ```sh
 ./fproject-atlas/sim/softmax/run.sh \
-  --hardware fproject-atlas/configs/f7.yaml \
+  --hardware fproject-atlas/configs/attention_chip.yaml \
   --rows 256 --cols 1024
 ```
 

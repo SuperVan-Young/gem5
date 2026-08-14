@@ -4,12 +4,29 @@ This directory contains the small, operator-oriented gem5 interface used by
 Atlas.  It is intentionally independent of the FlashAttention orchestration in
 `fproject/sim`.
 
-The first supported operator is int8 matrix multiplication.  Run the default
-acceptance shape from the host with:
+Convert an ATLAS chip description into a gem5 hardware configuration with:
+
+```sh
+./fproject-atlas/hw/config_adaptor.py \
+  /home/xuechenhao/ATLAS-MICRO-2026/fproject/configs/attention_chip.yaml \
+  fproject-atlas/configs/attention_chip.yaml
+```
+
+The adaptor scales the MPU, VPU, local buffers, scratchpad, and interconnect
+from `configs/gem5_template.yaml`. It resolves ATLAS's referenced HBDRAM YAML
+to derive capacity, bandwidth, and closed-row read latency. LUT parameters
+remain those of the template.
+
+`memory.dram.capacity_bytes` and `mapped_size_bytes` are the per-core capacity
+decoded from the ATLAS HBDRAM organization. DRAM bandwidth is likewise divided
+by `core_num`, because one gem5 instance models one ATLAS core.
+
+The first supported operator is int8 matrix multiplication. Run the default
+shape from the host with:
 
 ```sh
 ./fproject-atlas/sim/matmul/run.sh \
-  --hardware fproject-atlas/configs/f7.yaml \
+  --hardware fproject-atlas/configs/attention_chip.yaml \
   --m 256 --n 1024 --k 128
 ```
 
